@@ -1,11 +1,12 @@
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::error::WireCode;
+use crate::heimdall::clientip::rate_limit_key;
 use crate::heimdall::verifier;
 use crate::runar::names;
 use crate::runar::room::{unix_now, CreateError, Ttl, TtlKind};
@@ -106,9 +107,10 @@ pub struct ResolveBody {
 pub async fn names_resolve(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<ResolveBody>,
 ) -> Response {
-    let ip = addr.ip().to_string();
+    let ip = rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
     if !state.name_lookup_ip.check(&ip) || !state.name_lookup_global.check(&"__global__".to_string()) {
         return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);
     }
@@ -225,9 +227,10 @@ fn validate_params(body: &CreateRoomBody) -> Result<ValidParams, Box<Response>> 
 pub async fn create_unlisted(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<CreateRoomBody>,
 ) -> Response {
-    let ip = addr.ip().to_string();
+    let ip = rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
     if !state.rooms_created.check(&ip) {
         return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);
     }
@@ -268,9 +271,10 @@ pub async fn create_unlisted(
 pub async fn create_named(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<CreateRoomBody>,
 ) -> Response {
-    let ip = addr.ip().to_string();
+    let ip = rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
     if !state.named_created.check(&ip) {
         return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);
     }

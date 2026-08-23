@@ -16,9 +16,13 @@ type Ws = tokio_tungstenite::WebSocketStream<
 >;
 
 async fn spawn_server() -> String {
+    spawn_server_with(test_config()).await
+}
+
+async fn spawn_server_with(cfg: runa_server::config::Config) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = runa_server::AppState::new(test_config());
+    let state = runa_server::AppState::new(cfg);
     let app = build_router(state);
     tokio::spawn(async move {
         axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
@@ -513,3 +517,92 @@ async fn oversized_frame_is_closed_with_4004() {
 // unit-tested in room.rs's purge_ack_tests module. A full end-to-end test
 // would require spawning 33 WebSocket connections, which adds complexity
 // without testing anything the unit test doesn't already cover.
+
+/// Deploying behind a reverse proxy makes every request arrive from the
+/// loopback address. Without `trusted_proxy`, every per-IP limit therefore
+/// collapses into a single shared bucket and the server stops serving new
+/// users long before it should. These two tests pin both directions.
+mod behind_a_reverse_proxy {
+    use super::*;
+
+    fn proxied_config(trusted_proxy: bool) -> runa_server::config::Config {
+        runa_server::config::Config {
+            auth_floor: Duration::from_millis(1),
+            dist_dir: "/nonexistent".into(),
+            rooms_created_per_ip_per_hour: 3,
+            trusted_proxy,
+            ..runa_server::config::Config::default()
+        }
+    }
+
+    async fn create_as(server: &str, forwarded_for: &str) -> reqwest::StatusCode {
+        let auth_key: [u8; 32] = rand_bytes_32();
+        let mut salt = [0u8; 16];
+        getrandom::fill(&mut salt).unwrap();
+        reqwest::Client::new()
+            .post(format!("{server}/api/rooms/unlisted"))
+            .header("X-Forwarded-For", forwarded_for)
+            .json(&json!({
+                "id": hex::encode(random_room_id()),
+                "verifier": verifier_for(&auth_key),
+                "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(salt) },
+                "ttl": { "kind": "idle-peers", "secs": 3600 },
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn distinct_clients_get_distinct_buckets() {
+        let server = spawn_server_with(proxied_config(true)).await;
+        // The limit is 3 per client per hour. Six different clients, two
+        // requests each, must all succeed: nobody has exceeded their own bar.
+        for client in 0..6u8 {
+            let ip = format!("203.0.113.{client}");
+            for attempt in 0..2 {
+                let status = create_as(&server, &ip).await;
+                assert_eq!(
+                    status, 201,
+                    "client {ip} attempt {attempt} was refused; buckets are shared"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_client_still_hits_its_own_limit() {
+        let server = spawn_server_with(proxied_config(true)).await;
+        for _ in 0..3 {
+            assert_eq!(create_as(&server, "198.51.100.7").await, 201);
+        }
+        assert_eq!(
+            create_as(&server, "198.51.100.7").await,
+            429,
+            "a single client must still be limited"
+        );
+        // A forged prefix must not mint a fresh bucket: the proxy-appended
+        // address is the rightmost entry and that is what we key on.
+        assert_eq!(
+            create_as(&server, "1.2.3.4, 198.51.100.7").await,
+            429,
+            "prepending a fake hop bypassed the limiter"
+        );
+        // An unrelated client is unaffected.
+        assert_eq!(create_as(&server, "198.51.100.8").await, 201);
+    }
+
+    #[tokio::test]
+    async fn header_is_ignored_when_no_proxy_is_declared() {
+        let server = spawn_server_with(proxied_config(false)).await;
+        for _ in 0..3 {
+            assert_eq!(create_as(&server, "203.0.113.1").await, 201);
+        }
+        assert_eq!(
+            create_as(&server, "203.0.113.99").await,
+            429,
+            "X-Forwarded-For must be ignored unless RUNA_TRUSTED_PROXY is set"
+        );
+    }
+}

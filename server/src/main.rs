@@ -15,6 +15,12 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::from_env();
+    if cfg.trusted_proxy {
+        tracing::info!(
+            "RUNA_TRUSTED_PROXY=1: rate limits keyed on the last X-Forwarded-For entry. \
+             Only correct behind exactly one trusted reverse proxy."
+        );
+    }
     let state = AppState::new(cfg.clone());
 
     tokio::spawn(runa_server::runar::scheduler::run_scheduler(

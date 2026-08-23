@@ -5,6 +5,9 @@ pub struct Config {
     pub bind_addr: String,
     pub dist_dir: String,
     pub allow_insecure_ws: bool,
+    /// Trust `X-Forwarded-For` for per-IP rate limiting. Off unless a reverse
+    /// proxy terminates connections, because otherwise the header is forgeable.
+    pub trusted_proxy: bool,
     pub max_frame_bytes: usize,
     pub max_log_bytes: u64,
     pub max_peers_per_room: usize,
@@ -28,6 +31,7 @@ impl Default for Config {
             bind_addr: "127.0.0.1:3000".into(),
             dist_dir: "dist".into(),
             allow_insecure_ws: false,
+            trusted_proxy: false,
             max_frame_bytes: 256 * 1024,
             max_log_bytes: 32 * 1024 * 1024,
             max_peers_per_room: 32,
@@ -57,6 +61,7 @@ impl Config {
         c.bind_addr = std::env::var("RUNA_BIND").unwrap_or(c.bind_addr);
         c.dist_dir = std::env::var("RUNA_DIST").unwrap_or(c.dist_dir);
         c.allow_insecure_ws = std::env::var("RUNA_ALLOW_INSECURE").is_ok_and(|v| v == "1");
+        c.trusted_proxy = std::env::var("RUNA_TRUSTED_PROXY").is_ok_and(|v| v == "1");
         c.max_frame_bytes = env("RUNA_MAX_FRAME", c.max_frame_bytes);
         c.max_log_bytes = env("RUNA_MAX_LOG", c.max_log_bytes);
         c.max_peers_per_room = env("RUNA_MAX_PEERS", c.max_peers_per_room);

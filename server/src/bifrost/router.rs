@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,10 +18,10 @@ pub async fn ws_route(
     State(state): State<AppState>,
     Path(room_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
-    ws.on_upgrade(move |socket| {
-        bifrost::handle_socket(socket, state, room_id, addr.ip().to_string())
-    })
+    let ip = crate::heimdall::clientip::rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
+    ws.on_upgrade(move |socket| bifrost::handle_socket(socket, state, room_id, ip))
 }
 
 async fn security_headers(req: axum::extract::Request, next: Next) -> Response {

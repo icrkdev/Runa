@@ -29,7 +29,7 @@
 - [Running the tests](#running-the-tests)
 - [Deploying to the internet](#deploying-to-the-internet)
   - [Docker (recommended)](#docker-recommended)
-  - [Behind a reverse proxy (nginx)](#behind-a-reverse-proxy-nginx)
+  - [Behind a reverse proxy](#behind-a-reverse-proxy)
 - [Troubleshooting](#troubleshooting)
 - [Security: what this does and does not protect you from](#security-what-this-does-and-does-not-protect-you-from)
 - [Project structure](#project-structure)
@@ -427,42 +427,98 @@ This runs the server with:
 
 The container serves the built frontend and the API/WebSocket on port 3000.
 
-### Behind a reverse proxy (nginx)
+### Behind a reverse proxy
 
-If you're deploying manually (without Docker), put nginx in front of the
-server to handle HTTPS:
+Any real deployment needs HTTPS in front of RÚNA — the browser refuses `ws://`
+on anything but loopback, so without TLS the editor simply will not connect.
+
+> **Required behind any proxy: `RUNA_TRUSTED_PROXY=1`.**
+>
+> Every per-IP rate limit keys on the address RÚNA sees. Behind a proxy that
+> address is the loopback for *every* visitor, so all the limits in `config.rs`
+> collapse into one shared bucket — the eleventh simultaneous visitor is refused
+> a WebSocket because the whole server has "used up" its ten connections. With
+> this variable set, RÚNA keys the limits on the last `X-Forwarded-For` entry
+> instead. That value is used in memory as a limiter key and is never logged.
+>
+> Leave it **off** when RÚNA is exposed directly, or anyone can forge the header
+> and get a fresh bucket per request.
+
+#### Caddy (recommended)
+
+Caddy is the better fit here for one specific reason: **it does not log
+requests unless you ask it to.** RÚNA's URLs contain the room ID, which is the
+secret, so a proxy that writes request paths to disk by default is a
+liability. Caddy also obtains and renews Let's Encrypt certificates on its own.
+
+```caddyfile
+runa.example.com {
+    # No `log` directive, deliberately. The request path contains the room ID.
+    tls {
+        protocols tls1.3 tls1.3
+    }
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+Point an A record at the machine, run `caddy run --config Caddyfile`, and the
+certificate is issued on first request.
+
+#### nginx
 
 ```nginx
 server {
-    listen 443 ssl http2;
-    server_name runa.yourdomain.com;
+    listen 443 ssl;
+    http2 on;
+    server_name runa.example.com;
 
-    # TLS certificate (use Let's Encrypt / certbot)
-    ssl_certificate /etc/letsencrypt/live/runa.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/runa.yourdomain.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/runa.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/runa.example.com/privkey.pem;
     ssl_protocols TLSv1.3;
+
+    # The request path contains the room ID, which is a secret. nginx logs
+    # every path by default, so this line is a security control, not a
+    # preference. Do not remove it to "debug something quickly".
+    access_log off;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+
+        # RÚNA reads this only when RUNA_TRUSTED_PROXY=1, and only ever as an
+        # in-memory rate-limit key. It is never written anywhere.
+        proxy_set_header X-Forwarded-For $remote_addr;
     }
 }
 ```
 
-Then build the web bundle and point the server at it:
+#### Running the server behind it
+
+Bind RÚNA to the loopback interface so it is reachable only through the proxy:
 
 ```sh
-cd web && npm ci && npm run build
-cd ..
-RUNA_DIST=web/dist cargo run --release -p runa-server -- --bind 0.0.0.0:3000
+cd web && npm ci && npm run build && cd ..
+RUNA_TRUSTED_PROXY=1 RUNA_DIST=web/dist RUNA_BIND=127.0.0.1:3000 \
+  cargo run --release -p runa-server
 ```
 
-> ⚠️ **Critical nginx configuration:** Make sure your access logs either
-> record no paths, or are disabled entirely. The request path contains the
-> room ID, which is a secret. Also strip `X-Forwarded-For` — RÚNA does not
-> need it, and logging IPs undermines the privacy promise.
+Or with Docker, publishing the port to loopback only:
+
+```sh
+docker run -d --name runa \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
+  --memory=512m --memory-swap=512m --pids-limit=256 \
+  -e RUNA_TRUSTED_PROXY=1 \
+  -p 127.0.0.1:3000:3000 \
+  runa
+```
+
+> Rooms live only in RAM. Restarting the container, deploying, or rebooting the
+> host destroys every open document. That is the design, not a bug — but it
+> means you should not restart a production instance casually.
 
 ---
 
