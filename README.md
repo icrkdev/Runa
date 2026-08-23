@@ -59,13 +59,13 @@ burns their envelopes and throws away their keys.
 ## How it works (in plain English)
 
 ```
-Your browser                    Server                     Friend's browser
-┌─────────────┐                ┌─────────────┐             ┌─────────────┐
-│ You type    │   encrypted    │ Stores      │  encrypted  │ They see    │
-│ "hello"  ───┼───scrambled────│ scrambled  ─┼──scrambled──▶ "hello"    │
-│             │   bytes        │ bytes       │  bytes      │             │
-│ Has the key │                │ Has NO key  │             │ Has the key │
-└─────────────┘                └─────────────┘             └─────────────┘
+   Your browser                  Server                  Friend's browser
+┌───────────────┐              ┌───────────────┐              ┌───────────────┐
+│ You type      │              │ Stores        │              │ They see      │
+│ "hello"       ├──encrypted──►│ scrambled     ├──encrypted──►│ "hello"       │
+│               │    bytes     │ bytes         │    bytes     │               │
+│ Has the key   │              │ Has NO key    │              │ Has the key   │
+└───────────────┘              └───────────────┘              └───────────────┘
 ```
 
 - Your browser encrypts every keystroke using a key derived from the room's
@@ -364,7 +364,17 @@ says *"Nothing here anymore."* The encryption keys are gone. There is no undo.
 
 ## Running the tests
 
-If you want to verify that everything works correctly:
+The fastest check is the verification script. It runs the server tests, clippy,
+the Linux cross-compile check, the web suite, type checking, linting, the
+production build, and the supply-chain scans — stopping at the first failure:
+
+```sh
+./scripts/verify.sh
+```
+
+It prints `VERIFIED` and nothing else if everything passed.
+
+To run the suites separately:
 
 ```sh
 # Terminal 1: Server tests
@@ -377,7 +387,7 @@ npm ci          # only needed once, or if package.json changed
 npx vitest run
 ```
 
-You should see all tests pass. The server has 29 unit tests and 8 integration
+You should see all tests pass. The server has 31 unit tests and 8 integration
 tests. The web suite has over 100 tests covering cryptography, transport,
 document convergence, rendering security, and shred consensus.
 
@@ -537,6 +547,7 @@ Runa/
 │   ├── SECURITY.md          How to report vulnerabilities
 │   ├── PROTOCOL.md          Wire format specification
 │   └── ATTRIBUTION.md       Upstream credits and dependency licences
+├── scripts/verify.sh        One-command check: tests, lint, build, supply chain
 ├── .github/workflows/       CI pipeline
 ├── Dockerfile               Distroless production image
 └── deny.toml                Bans database crates, enforces licences
