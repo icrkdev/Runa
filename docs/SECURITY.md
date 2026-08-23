@@ -7,8 +7,7 @@ because it stores nothing; pin and review what you deploy.
 
 ## Reporting a vulnerability
 
-Email: **security@vardrlabs.example** (replace with the live mailbox before
-first release; PGP key published alongside).
+Email: **security@vardrlabs.com**
 
 - Please include reproduction steps, affected commit or bundle hash
   (`GET /version` prints both), and your assessment of severity.
@@ -37,6 +36,21 @@ The highest-value targets, in order:
 
 ## Release integrity
 
-Release artifacts are signed with `cosign`; the public key lives in this repo
-and in release notes. `GET /version` returns the running commit and bundle
-SHA-256 so you can compare what you were served with what was audited.
+Release artifacts are signed with [cosign](https://docs.sigstore.dev/) using
+keyless Sigstore signing, so there is no long-lived public key to distribute or
+protect. Every release publishes the artifact, its SHA-256, a signature, and the
+short-lived signing certificate. Verify a download with:
+
+```sh
+cosign verify-blob \
+  --signature   runa-<target>.tar.gz.sig \
+  --certificate runa-<target>.tar.gz.pem \
+  --certificate-identity-regexp '^https://github\.com/icrkdev/Runa/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  runa-<target>.tar.gz
+```
+
+The identity regexp is what actually matters: it proves the artifact was built
+by this repository's tagged release workflow and not by someone who merely holds
+a key. `GET /version` returns the running commit and bundle SHA-256 so you can
+compare what you were served with what was audited.

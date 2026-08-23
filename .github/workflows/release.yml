@@ -68,7 +68,13 @@ jobs:
         uses: sigstore/cosign-installer@v3
       - name: Sign artifacts (keyless)
         shell: bash
-        run: cosign sign-blob --yes --output-signature runa-*.tar.gz.sig runa-*.tar.gz
+        run: |
+          for f in runa-*.tar.gz; do
+            cosign sign-blob --yes \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem" \
+              "$f"
+          done
 
       - name: SBOMs
         if: matrix.os == 'ubuntu-latest'
@@ -84,6 +90,7 @@ jobs:
             runa-*.tar.gz
             runa-*.tar.gz.sha256
             runa-*.tar.gz.sig
+            runa-*.tar.gz.pem
             runa-*-sbom.json
 
   publish:
