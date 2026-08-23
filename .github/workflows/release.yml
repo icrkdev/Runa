@@ -1,0 +1,100 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web bundle (reproducible)
+        working-directory: web
+        env:
+          SOURCE_DATE_EPOCH: "0"
+          TZ: UTC
+          LC_ALL: C
+        run: |
+          npm ci
+          npm run build
+
+      - name: Bundle hash
+        id: bundle
+        working-directory: web/dist
+        run: echo "sha256=$(find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build server
+        env:
+          RUNA_COMMIT: ${{ github.sha }}
+          RUNA_BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
+          SOURCE_DATE_EPOCH: "0"
+        run: cargo build --release --target ${{ matrix.target }} -p runa-server
+
+      - name: Package
+        shell: bash
+        run: |
+          dir=runa-${{ matrix.target }}
+          mkdir "$dir"
+          cp "target/${{ matrix.target }}/release/runa-server" "$dir/" 2>/dev/null || \
+            cp "target/${{ matrix.target }}/release/runa" "$dir/"
+          tar czf "$dir.tar.gz" "$dir"
+          sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign artifacts (keyless)
+        shell: bash
+        run: cosign sign-blob --yes --output-signature runa-*.tar.gz.sig runa-*.tar.gz
+
+      - name: SBOMs
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo install --locked cargo-cyclonedx
+          cargo cyclonedx -p runa-server --format json
+          cd web && npx @cyclonedx/cyclonedx-npm --output-file ../runa-web-sbom.json && cd ..
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runa-${{ matrix.target }}
+          path: |
+            runa-*.tar.gz
+            runa-*.tar.gz.sha256
+            runa-*.tar.gz.sig
+            runa-*-sbom.json
+
+  publish:
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist-files
+      - name: Attach to tag release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-files/*

@@ -1,0 +1,33 @@
+[graph]
+all-features = false
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    { name = "rusqlite" },
+    { name = "sqlx" },
+    { name = "sled" },
+    { name = "diesel" },
+    { name = "redis" },
+    { name = "mongodb" },
+    { name = "libsqlite3-sys" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

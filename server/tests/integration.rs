@@ -1,0 +1,515 @@
+use std::time::{Duration, Instant};
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use futures_util::{SinkExt, StreamExt};
+use runa_server::build_router;
+use runa_server::sha2::{Digest, Sha256};
+use serde_json::{json, Value};
+use std::net::SocketAddr;
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::Message;
+
+type Ws = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+async fn spawn_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = runa_server::AppState::new(test_config());
+    let app = build_router(state);
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    });
+    format!("http://{addr}")
+}
+
+fn test_config() -> runa_server::config::Config {
+    runa_server::config::Config {
+        auth_floor: Duration::from_millis(120),
+        dist_dir: "/nonexistent".into(),
+        ..runa_server::config::Config::default()
+    }
+}
+
+fn random_room_id() -> [u8; 16] {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).unwrap();
+    b
+}
+
+struct RoomKeys {
+    room_id_hex: String,
+    auth_key: [u8; 32],
+    salt: [u8; 16],
+}
+
+fn verifier_for(key: &[u8; 32]) -> String {
+    let h: [u8; 32] = Sha256::digest(key).into();
+    B64.encode(h)
+}
+
+async fn create_room(server: &str) -> RoomKeys {
+    let client = reqwest::Client::new();
+    let auth_key: [u8; 32] = rand_bytes_32();
+    let salt: [u8; 16] = {
+        let mut s = [0u8; 16];
+        getrandom::fill(&mut s).unwrap();
+        s
+    };
+    let room_id = random_room_id();
+    let resp = client
+        .post(format!("{server}/api/rooms/unlisted"))
+        .json(&json!({
+            "id": hex::encode(room_id),
+            "verifier": verifier_for(&auth_key),
+            "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(salt) },
+            "ttl": { "kind": "idle-peers", "secs": 3600 },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "room creation failed: {}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], true);
+    RoomKeys { room_id_hex: hex::encode(room_id), auth_key, salt }
+}
+
+fn rand_bytes_32() -> [u8; 32] {
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).unwrap();
+    b
+}
+
+fn join_frame(room_hex: &str, auth_key: Option<&[u8; 32]>, pubkey: &[u8; 32]) -> Message {
+    let header = [
+        0x52u8, 0x55, 0x01, 0x01,
+    ]
+    .iter()
+    .copied()
+    .chain(hex::decode(room_hex).unwrap())
+    .chain([0u8; 4])
+    .chain([1u8, 2, 3, 4])
+    .chain([0u8; 4])
+    .collect::<Vec<u8>>();
+    let body = json!({
+        "auth_key": auth_key.map(|k| B64.encode(k)),
+        "pubkey": B64.encode(pubkey),
+    });
+    let mut frame = header;
+    frame.extend_from_slice(body.to_string().as_bytes());
+    Message::Binary(frame.into())
+}
+
+fn doc_update_frame(room_hex: &str, payload: &[u8]) -> Message {
+    let header = [
+        0x52u8, 0x55, 0x01, 0x03,
+    ]
+    .iter()
+    .copied()
+    .chain(hex::decode(room_hex).unwrap())
+    .chain(7u32.to_be_bytes())
+    .chain([9u8, 9, 9, 9])
+    .chain(1u32.to_be_bytes())
+    .collect::<Vec<u8>>();
+    let mut frame = header;
+    frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(&[0xAB; 16]);
+    Message::Binary(frame.into())
+}
+
+
+async fn next_frame_of(ws: &mut Ws, ft: u8) -> Vec<u8> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!("timed out waiting for frame type {ft:#x}");
+        }
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out")
+            .expect("stream ended")
+            .unwrap();
+        if let Message::Binary(bytes) = msg {
+            if bytes.len() >= 4 && bytes[3] == ft {
+                return bytes.to_vec();
+            }
+        }
+    }
+}
+
+async fn connect(server: &str, room_hex: &str) -> Ws {
+    let url = format!("{}/socket/{room_hex}", server.replacen("http://", "ws://", 1));
+    let request = url.into_client_request().unwrap();
+    let (ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws
+}
+
+async fn recv_json(ws: &mut Ws) -> (u8, Value) {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for frame")
+            .expect("stream ended")
+            .unwrap();
+        match msg {
+            Message::Binary(bytes) => {
+                assert_eq!(&bytes[..2], b"RU");
+                let ft = bytes[3];
+                let v: Value =
+                    serde_json::from_slice(&bytes[32..]).unwrap_or(Value::Null);
+                return (ft, v);
+            }
+            Message::Close(_) => panic!("unexpected close"),
+            _ => continue,
+        }
+    }
+}
+
+#[tokio::test]
+async fn join_requires_correct_auth_key_and_fails_generically() {
+    let server = spawn_server().await;
+    let keys = create_room(&server).await;
+
+    let wrong: [u8; 32] = rand_bytes_32();
+    let mut ws = connect(&server, &keys.room_id_hex).await;
+    let start = Instant::now();
+    ws.send(join_frame(&keys.room_id_hex, Some(&wrong), &[7u8; 32]))
+        .await
+        .unwrap();
+    let (ft, v) = recv_json(&mut ws).await;
+    let elapsed = start.elapsed();
+    assert_eq!(ft, 0x30);
+    assert_eq!(v["code"], 4001);
+
+    let missing_room = hex::encode(random_room_id());
+    let mut ws2 = connect(&server, &missing_room).await;
+    ws2.send(join_frame(&missing_room, Some(&wrong), &[7u8; 32]))
+        .await
+        .unwrap();
+    let started = Instant::now();
+    let (ft2, v2) = recv_json(&mut ws2).await;
+    let elapsed_missing = started.elapsed();
+    assert_eq!(ft2, 0x30);
+    assert_eq!(v2["code"], 4001);
+    assert!(
+        elapsed >= Duration::from_millis(100) && elapsed_missing >= Duration::from_millis(100),
+        "auth floor violated: existing={elapsed:?} missing={elapsed_missing:?}"
+    );
+}
+
+#[tokio::test]
+async fn join_ack_contains_roster_kdf_and_ttl() {
+    let server = spawn_server().await;
+    let keys = create_room(&server).await;
+    let mut ws = connect(&server, &keys.room_id_hex).await;
+    let pubkey: [u8; 32] = rand_bytes_32();
+    ws.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &pubkey))
+        .await
+        .unwrap();
+    let (ft, v) = recv_json(&mut ws).await;
+    assert_eq!(ft, 0x02);
+    assert_eq!(v["epoch"], 0);
+    assert_eq!(v["log_len"], 0);
+    assert_eq!(v["base_index"], 0);
+    assert_eq!(v["ttl"]["kind"], "idle-peers");
+    assert_eq!(v["kdf"]["m_kib"], 65536);
+    assert_eq!(v["kdf"]["salt"], B64.encode(keys.salt));
+    let roster = v["roster"].as_array().unwrap();
+    assert_eq!(roster.len(), 1);
+    assert_eq!(roster[0]["pubkey"], B64.encode(pubkey));
+}
+
+#[tokio::test]
+async fn frames_relay_between_peers_with_sender_envelope() {
+    let server = spawn_server().await;
+    let keys = create_room(&server).await;
+
+    let mut a = connect(&server, &keys.room_id_hex).await;
+    a.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[1u8; 32]))
+        .await
+        .unwrap();
+    let (_, ack_a) = recv_json(&mut a).await;
+    let peer_a = ack_a["peer_id"].as_str().unwrap().to_string();
+
+    let mut b = connect(&server, &keys.room_id_hex).await;
+    b.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[2u8; 32]))
+        .await
+        .unwrap();
+    let (_, ack_b) = recv_json(&mut b).await;
+    let peer_b = ack_b["peer_id"].as_str().unwrap().to_string();
+    assert_ne!(peer_a, peer_b);
+
+    let (ft_join, _) = recv_json(&mut a).await;
+    assert_eq!(ft_join, 0x07, "peer A should see PEER_JOIN");
+
+    let payload = b"ciphertext-not-inspected-by-server";
+    b.send(doc_update_frame(&keys.room_id_hex, payload)).await.unwrap();
+
+    let bytes = next_frame_of(&mut a, 0x03).await;
+    assert_eq!(bytes[3], 0x03);
+    use base64::Engine as _;
+    let sender_decoded = B64.decode(peer_b.as_bytes()).unwrap();
+    assert_eq!(&bytes[32..48], sender_decoded.as_slice(), "envelope must carry sender id");
+    assert_eq!(&bytes[48..56], &(payload.len() as u64).to_be_bytes());
+    assert_eq!(&bytes[56..56 + payload.len()], payload);
+}
+
+#[tokio::test]
+async fn late_joiner_syncs_from_log_and_snapshot_truncates() {
+    let server = spawn_server().await;
+    let keys = create_room(&server).await;
+
+    let mut writer = connect(&server, &keys.room_id_hex).await;
+    writer
+        .send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[3u8; 32]))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut writer).await;
+
+    for i in 0..3u8 {
+        writer.send(doc_update_frame(&keys.room_id_hex, &[i; 40])).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let snapshot_header = [
+        0x52u8, 0x55, 0x01, 0x21,
+    ]
+    .iter()
+    .copied()
+    .chain(hex::decode(&keys.room_id_hex).unwrap())
+    .chain(7u32.to_be_bytes())
+    .chain([9u8, 9, 9, 9])
+    .chain(0u32.to_be_bytes())
+    .collect::<Vec<u8>>();
+    let mut snap = snapshot_header;
+    snap.extend_from_slice(&3u64.to_be_bytes());
+    snap.extend_from_slice(b"SNAPSHOT-BLOB-SUPERCEDING-0-TO-3-XXXXXXXXXXXX");
+    writer.send(Message::Binary(snap.into())).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    writer.send(doc_update_frame(&keys.room_id_hex, &[99; 20])).await.unwrap();
+
+    let mut late = connect(&server, &keys.room_id_hex).await;
+    late.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[4u8; 32]))
+        .await
+        .unwrap();
+    let (_, ack) = recv_json(&mut late).await;
+    assert_eq!(ack["has_snapshot"], true);
+    assert_eq!(ack["log_len"], 4);
+    assert_eq!(ack["base_index"], 3);
+
+    late.send(Message::Binary(
+        {
+            let h = [
+                0x52u8, 0x55, 0x01, 0x04,
+            ]
+            .iter()
+            .copied()
+            .chain(hex::decode(&keys.room_id_hex).unwrap())
+            .chain([0u8; 12])
+            .collect::<Vec<u8>>();
+            let mut f = h;
+            f.extend_from_slice(br#"{"from_index":0}"#);
+            f
+        }
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let snap_bytes = next_frame_of(&mut late, 0x21).await;
+    let covers = u64::from_be_bytes([
+        snap_bytes[48], snap_bytes[49], snap_bytes[50], snap_bytes[51],
+        snap_bytes[52], snap_bytes[53], snap_bytes[54], snap_bytes[55],
+    ]);
+    assert_eq!(covers, 3, "snapshot must carry covers=3");
+
+    let tail_bytes = next_frame_of(&mut late, 0x03).await;
+    assert_eq!(&tail_bytes[56..76], &[99u8; 20], "tail update content");
+    assert!(snap_bytes.windows(10).any(|w| w == b"SNAPSHOT-B"));
+}
+
+#[tokio::test]
+async fn named_room_without_passphrase_is_refused_at_api() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let salt: [u8; 16] = {
+        let mut s = [0u8; 16];
+        getrandom::fill(&mut s).unwrap();
+        s
+    };
+    let resp = client
+        .post(format!("{server}/api/rooms/named"))
+        .json(&json!({
+            "name": "copper-lantern",
+            "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(salt) },
+            "ttl": { "kind": "idle-peers", "secs": 3600 },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422, "named rooms MUST require a passphrase");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "PASSPHRASE_REQUIRED");
+}
+
+#[tokio::test]
+async fn named_room_lifecycle_with_passphrase() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let passphrase = b"harbor thistle quartz nine";
+    let auth_key: [u8; 32] = Sha256::digest(passphrase).into();
+    let salt: [u8; 16] = {
+        let mut s = [0u8; 16];
+        getrandom::fill(&mut s).unwrap();
+        s
+    };
+    let resp = client
+        .post(format!("{server}/api/rooms/named"))
+        .json(&json!({
+            "name": "copper-lantern",
+            "suffix": false,
+            "verifier": verifier_for(&auth_key),
+            "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(salt) },
+            "ttl": { "kind": "idle-peers", "secs": 3600 },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let created: Value = resp.json().await.unwrap();
+    assert_eq!(created["name"], "copper-lantern");
+
+    let resolve: Value = client
+        .post(format!("{server}/api/names/resolve"))
+        .json(&json!({ "name": "Copper-Lantern" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resolve["found"], true);
+    assert_eq!(resolve["room_id"], created["room_id"]);
+    assert_eq!(resolve["kdf"]["salt"], B64.encode(salt));
+
+    let dup = client
+        .post(format!("{server}/api/rooms/named"))
+        .json(&json!({
+            "name": "copper-lantern",
+            "suffix": false,
+            "verifier": verifier_for(&rand_bytes_32()),
+            "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(salt) },
+            "ttl": { "kind": "idle-peers", "secs": 3600 },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dup.status(), 409);
+    assert_eq!(dup.json::<Value>().await.unwrap()["code"], 4012);
+
+    let single_word = client
+        .post(format!("{server}/api/rooms/named"))
+        .json(&json!({
+            "name": "standup",
+            "verifier": verifier_for(&rand_bytes_32()),
+            "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(salt) },
+            "ttl": { "kind": "idle-peers", "secs": 3600 },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(single_word.status(), 400);
+
+    let squatter_auth: [u8; 32] = rand_bytes_32();
+    let mut ws = connect(&server, resolve["room_id"].as_str().unwrap()).await;
+    ws.send(join_frame(resolve["room_id"].as_str().unwrap(), Some(&squatter_auth), &[9u8; 32]))
+        .await
+        .unwrap();
+    let (ft, v) = recv_json(&mut ws).await;
+    assert_eq!(ft, 0x30);
+    assert_eq!(v["code"], 4001, "squatter must fail auth, never silently join");
+}
+
+#[tokio::test]
+async fn meta_endpoint_hides_existence_shape_and_content() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let keys = create_room(&server).await;
+
+    let real: Value = client
+        .get(format!("{server}/api/meta/id/{}", keys.room_id_hex))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(real["exists"], true);
+    assert_eq!(real["requires_auth"], true);
+    assert_eq!(real["kdf"]["salt"], B64.encode(keys.salt));
+
+    let ghost_id = hex::encode(random_room_id());
+    let ghost: Value = client
+        .get(format!("{server}/api/meta/id/{ghost_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        ghost.as_object().unwrap().keys().collect::<Vec<_>>(),
+        real.as_object().unwrap().keys().collect::<Vec<_>>(),
+        "identical response shape required"
+    );
+    assert_eq!(ghost["exists"], true);
+    assert_ne!(ghost["kdf"]["salt"], real["kdf"]["salt"]);
+
+    let short: Value = client
+        .get(format!("{server}/api/meta/id/tooshort"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(short["exists"], true, "even malformed ids get the same shape");
+}
+
+#[tokio::test]
+async fn oversized_frame_is_closed_with_4004() {
+    let server = spawn_server().await;
+    let keys = create_room(&server).await;
+    let mut ws = connect(&server, &keys.room_id_hex).await;
+    ws.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[5u8; 32]))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut ws).await;
+
+    let big_payload = vec![0xEE; 300 * 1024];
+    ws.send(doc_update_frame(&keys.room_id_hex, &big_payload)).await.unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(m) = ws.next().await {
+            if let Ok(Message::Close(f)) = m {
+                return f.map(|f| f.code);
+            }
+        }
+        None
+    })
+    .await
+    .unwrap();
+    assert_eq!(result, Some(tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(4004)));
+}
+
+// The peer cap (max_peers_per_room) is enforced by Room::add_peer and
+// unit-tested in room.rs's purge_ack_tests module. A full end-to-end test
+// would require spawning 33 WebSocket connections, which adds complexity
+// without testing anything the unit test doesn't already cover.

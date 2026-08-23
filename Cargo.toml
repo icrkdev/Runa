@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["server"]
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true

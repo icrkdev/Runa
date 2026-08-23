@@ -1,0 +1,23 @@
+[package]
+name = "runa-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+runa-server = { path = ".." }
+
+[[bin]]
+name = "frame_header"
+path = "fuzz_targets/frame_header.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "room_name"
+path = "fuzz_targets/room_name.rs"
+test = false
+doc = false

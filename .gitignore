@@ -1,0 +1,16 @@
+/target
+server/fuzz/target
+web/node_modules
+web/dist
+.DS_Store
+
+# ── Internal design & decision records ──────────────────────────────
+# These remain on disk for the team but are not part of the public
+# repository. The public docs are: README, LICENSE, THREAT_MODEL,
+# SECURITY, ATTRIBUTION, PROTOCOL.
+docs/RUNA-master-spec.md
+docs/DECISIONS.md
+docs/QA-CHECKLIST.md
+docs/UPSTREAM_MAP.md
+docs/adr/
+web/*.tsbuildinfo

@@ -1,0 +1,25 @@
+:root {
+  --bg: #0a0b0c;
+  --text: #e6e8ea;
+  --text-dim: #8a939b;
+  --text-faint: #5a6169;
+}
+body.void {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.tombstone {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  text-align: center;
+  padding: 24px;
+}
+.tombstone .mark { font-size: 34px; color: var(--text-faint); }
+.tombstone h1 { font-weight: 400; letter-spacing: 0.02em; margin: 0; font-family: var(--text); }
+.tombstone .meta { color: var(--text-dim); font-family: ui-monospace, Menlo, monospace; }

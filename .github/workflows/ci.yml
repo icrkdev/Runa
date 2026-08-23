@@ -1,0 +1,120 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * 1"   # every Monday at 04:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check || true
+      - name: Clippy
+        run: cargo clippy -p runa-server --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test -p runa-server
+      - name: Banned patterns in server source (no disk, no plaintext logging)
+        run: |
+          ! grep -riE "sqlite|rusqlite|File::create|fs::write|OpenOptions" server/src
+          ! grep -rE "println!|dbg!" server/src
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Typecheck
+        working-directory: web
+        run: npx tsc -b
+      - name: Lint
+        working-directory: web
+        run: npx eslint src --ext .ts,.tsx
+      - name: Tests
+        working-directory: web
+        run: npx vitest run
+      - name: Build
+        working-directory: web
+        run: npm run build
+      - name: npm audit (high+ fails the build)
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high || npm audit --audit-level=high
+      - name: Third-party origin check on shipped HTML
+        working-directory: web
+        run: node scripts/check-origins.mjs
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install deps
+        working-directory: web
+        run: npm ci
+      - name: Install Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Build web bundle
+        working-directory: web
+        run: npm run build
+      - name: Build server
+        run: cargo build --release -p runa-server
+      - name: Two-peer browser E2E under enforced CSP
+        working-directory: web
+        run: |
+          ../target/release/runa-server &
+          sleep 1
+          node scripts/e2e-smoke.mjs
+          node scripts/e2e-browser.mjs
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo-deny (bans database crates, licence check)
+        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  fuzz:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Run fuzz targets (15 min each)
+        working-directory: server/fuzz
+        run: |
+          cargo fuzz run frame_header -- -max_total_time=900
+          cargo fuzz run room_name -- -max_total_time=900
