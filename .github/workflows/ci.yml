@@ -115,12 +115,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
-      # cargo-fuzz resolves targets at `<cwd>/fuzz/Cargo.toml`, so it runs from
-      # the crate root. Pointing it at server/fuzz made it look for
-      # server/fuzz/fuzz/Cargo.toml, which failed every scheduled run since
-      # the workflow was written.
+      # Three things this invocation has to get right, each hidden behind the
+      # previous one:
+      #   1. cargo-fuzz resolves targets at `<cwd>/fuzz/Cargo.toml`, so it runs
+      #      from the crate root — not from server/fuzz, which made it look for
+      #      server/fuzz/fuzz/Cargo.toml.
+      #   2. The manifest needs `[package.metadata] cargo-fuzz = true`.
+      #   3. `+nightly` is explicit because rust-toolchain.toml pins 1.98.0 at
+      #      the repo root, and that pin overrides the nightly this job
+      #      installs. cargo-fuzz needs -Z flags, so it fails without it.
       - name: Run fuzz targets (15 min each)
         working-directory: server
         run: |
-          cargo fuzz run frame_header -- -max_total_time=900
-          cargo fuzz run room_name -- -max_total_time=900
+          cargo +nightly fuzz run frame_header -- -max_total_time=900
+          cargo +nightly fuzz run room_name -- -max_total_time=900
