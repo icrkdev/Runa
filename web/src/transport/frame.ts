@@ -111,14 +111,6 @@ export function snapshotCovers(body: Uint8Array): bigint {
   return c;
 }
 
-export function padToBucket(data: Uint8Array, bucket = 256): Uint8Array {
-  const rem = data.length % bucket;
-  if (rem === 0) return data;
-  const padded = new Uint8Array(data.length + (bucket - rem));
-  padded.set(data);
-  return padded;
-}
-
 export function concatBytes(...parts: Uint8Array[]): Uint8Array {
   const total = parts.reduce((n, p) => n + p.length, 0);
   const out = new Uint8Array(total);

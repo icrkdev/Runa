@@ -24,11 +24,13 @@ jobs:
       - name: Clippy
         run: cargo clippy -p runa-server --all-targets -- -D warnings
       - name: Tests
-        run: cargo test -p runa-server
+        run: cargo test -p runa-server --locked
       - name: Banned patterns in server source (no disk, no plaintext logging)
         run: |
           ! grep -riE "sqlite|rusqlite|File::create|fs::write|OpenOptions" server/src
           ! grep -rE "println!|dbg!" server/src
+      - name: Server-authored frames are never enveloped, and limits are bounded
+        run: cargo test -p runa-server --locked --test hardening
 
   web:
     runs-on: ubuntu-latest

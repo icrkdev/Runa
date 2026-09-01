@@ -389,3 +389,49 @@ describe("counted policies — arrival order and early exit (review fix 3)", () 
     expect(h.machine.state).toBe("APPROVED");
   });
 });
+
+describe("machine hardening", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /// A machine belonging to the second peer, sharing the harness roster.
+  function responderFor(h: Harness): ShredMachine {
+    const key = [...h.identities.keys()][1];
+    return new ShredMachine(h.identities.get(key)!, key, () => h.roster, h.hooks);
+  }
+
+  it("accepts a fresh request after a settled one", async () => {
+    const h = await makeHarness(2);
+    const responder = responderFor(h);
+
+    const first = await h.machine.createRequest("room", 0, "UNANIMOUS", null, 60_000);
+    expect(await responder.onRequestIncoming(first)).toBe(true);
+    await responder.castMyVote(first.requestId, "REJECT");
+    expect(responder.state).toBe("REJECTED");
+
+    // Previously this returned false with "busy" forever: nothing resets the
+    // machine after a settled vote, so the room could never shred again.
+    const second = await h.machine.createRequest("room", 0, "UNANIMOUS", null, 60_000);
+    expect(await responder.onRequestIncoming(second)).toBe(true);
+    expect(responder.state).toBe("VOTING");
+  });
+
+  it("refuses a malformed request without changing state", async () => {
+    const h = await makeHarness(2);
+    const responder = responderFor(h);
+    const req = await h.machine.createRequest("room", 0, "UNANIMOUS", null, 60_000);
+
+    for (const bad of [
+      { ...req, requestId: "" },
+      { ...req, requestId: "x".repeat(200) },
+      { ...req, policy: "WHATEVER" as never },
+      { ...req, deadlineMs: Number.NaN },
+      { ...req, deadlineMs: -1 },
+      { ...req, deadlineMs: 7_200_000 },
+    ]) {
+      expect(await responder.onRequestIncoming(bad)).toBe(false);
+      expect(responder.state).toBe("IDLE");
+    }
+    expect(h.hooks.guardRejects).toContain("malformed-request");
+  });
+});

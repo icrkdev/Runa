@@ -22,6 +22,8 @@ export class Api {
 
   async metaUnlisted(roomIdHex: string): Promise<RoomMeta> {
     const res = await fetch(`${this.baseUrl}/api/meta/id/${roomIdHex}`);
+    if (res.status === 429) throw new ApiError("RATE_LIMITED");
+    if (!res.ok) throw new ApiError("META_FAILED");
     return res.json() as Promise<RoomMeta>;
   }
 
@@ -33,11 +35,11 @@ export class Api {
     });
     if (res.status === 429) throw new ApiError("RATE_LIMITED");
     if (res.status === 400) throw new ApiError("NAME_INVALID");
+    if (!res.ok) throw new ApiError("RESOLVE_FAILED");
     return res.json() as Promise<{ found: boolean; name?: string; room_id?: string; requires_auth?: boolean; kdf?: RoomMeta["kdf"] }>;
   }
 
   async createUnlisted(args: {
-    roomIdHex: string;
     verifierB64: string;
     kdf: { m_kib: number; t: number; p: number; salt: string };
     ttl: TtlBody;
@@ -48,7 +50,6 @@ export class Api {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        id: args.roomIdHex,
         verifier: args.verifierB64,
         kdf: args.kdf,
         ttl: args.ttl,
@@ -58,6 +59,8 @@ export class Api {
     });
     if (res.status === 409) throw new ApiError("UNAVAILABLE");
     if (res.status === 429) throw new ApiError("RATE_LIMITED");
+    if (res.status === 503) throw new ApiError("AT_CAPACITY");
+    if (res.status === 413) throw new ApiError("CONFIG_TOO_LARGE");
     if (!res.ok) throw new ApiError("CREATE_FAILED");
     return res.json() as Promise<CreateRoomResponse>;
   }
@@ -88,6 +91,8 @@ export class Api {
     if (res.status === 422) throw new ApiError("PASSPHRASE_REQUIRED");
     if (res.status === 400) throw new ApiError("NAME_INVALID");
     if (res.status === 429) throw new ApiError("RATE_LIMITED");
+    if (res.status === 503) throw new ApiError("AT_CAPACITY");
+    if (res.status === 413) throw new ApiError("CONFIG_TOO_LARGE");
     if (!res.ok) throw new ApiError("CREATE_FAILED");
     return res.json() as Promise<CreateRoomResponse>;
   }

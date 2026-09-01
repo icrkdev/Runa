@@ -134,7 +134,7 @@ describe("frame AEAD (spec §3.6)", () => {
   it("refuses to wrap past the rekey threshold", async () => {
     const key = await makeContentKey();
     const cipher = new FrameCipher(key, SENDER);
-    (cipher as unknown as { counter: bigint }).counter = MAX_COUNTER;
+    (cipher as unknown as { seq: bigint }).seq = MAX_COUNTER;
     await expect(cipher.encrypt(headerFor(0x03), new Uint8Array(1))).rejects.toThrow(/rekey/);
   });
 
@@ -180,5 +180,40 @@ describe("AAD construction", () => {
     await expect(
       decryptEnvelope(key, forgedHeader, SENDER, env),
     ).rejects.toThrow();
+  });
+});
+
+describe("nonce separation (hardening)", () => {
+  it("randomises the counter prefix so sessions are separated by 64 bits", async () => {
+    const key = await makeContentKey();
+    const prefixes = new Set<string>();
+    for (let i = 0; i < 200; i++) {
+      const c = new FrameCipher(key, SENDER);
+      const env = await c.encrypt(headerFor(0x03), new Uint8Array([1]));
+      // First frame of a session: bytes 4..8 are the random counter prefix.
+      prefixes.add(Array.from(env.slice(4, 8)).join(","));
+      // ...and the low half is the sequence, which does start at zero.
+      expect(Array.from(env.slice(8, 12))).toEqual([0, 0, 0, 0]);
+    }
+    expect(prefixes.size).toBeGreaterThan(190);
+  });
+
+  it("re-binding the peer id does not rewind the nonce stream", async () => {
+    const key = await makeContentKey();
+    const cipher = new FrameCipher(key, SENDER);
+    const seen = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      seen.add(hex((await cipher.encrypt(headerFor(0x03), new Uint8Array([i]))).slice(0, 12)));
+    }
+    // What JOIN_ACK does now. Previously this constructed a fresh cipher with
+    // the same sess and a counter back at zero.
+    cipher.bindPeerId(new Uint8Array(16).fill(0x77));
+    expect(cipher.peerId[0]).toBe(0x77);
+    for (let i = 0; i < 5; i++) {
+      const n = hex((await cipher.encrypt(headerFor(0x03), new Uint8Array([i]))).slice(0, 12));
+      expect(seen.has(n)).toBe(false);
+      seen.add(n);
+    }
+    expect(seen.size).toBe(10);
   });
 });

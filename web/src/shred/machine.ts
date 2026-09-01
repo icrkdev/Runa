@@ -195,8 +195,27 @@ export class ShredMachine {
   }
 
   async onRequestIncoming(request: ShredRequest): Promise<boolean> {
+    // A settled vote is not a vote in progress. Refusing every later request
+    // until something calls reset() left the room unable to shred at all
+    // after one rejection or timeout.
+    if (this.state === "REJECTED" || this.state === "EXPIRED") {
+      this.reset();
+    }
     if (this.state !== "IDLE") {
       this.hooks.onVoteRejectedByGuard("busy");
+      return false;
+    }
+    if (
+      typeof request.requestId !== "string" ||
+      !request.requestId ||
+      request.requestId.length > 128 ||
+      !POLICIES.includes(request.policy) ||
+      typeof request.deadlineMs !== "number" ||
+      !Number.isFinite(request.deadlineMs) ||
+      request.deadlineMs < 0 ||
+      request.deadlineMs > 3_600_000
+    ) {
+      this.hooks.onVoteRejectedByGuard("malformed-request");
       return false;
     }
     if (request.policy === "INITIATOR") {

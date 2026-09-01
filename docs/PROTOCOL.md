@@ -60,6 +60,14 @@ Error codes: 4001 AUTH_FAILED · 4002 RATE_LIMITED · 4003 ROOM_FULL ·
 4004 FRAME_TOO_LARGE · 4005 PROTOCOL_ERROR · 4006 EPOCH_STALE ·
 4010 PURGED · 4011 EXPIRED · 4012 NAME_TAKEN · 4013 NAME_INVALID.
 
+**Join failures are deliberately indistinguishable.** A bad key, an unknown
+room id, a room mid-purge, and a room that has exhausted its auth attempts all
+answer 4001 after the same floor delay. Returning 4002 for the throttled case
+made "does this room exist" a five-guess question. Unlisted room ids are
+assigned by the server for the same reason: a creation endpoint that answered
+409 for a live id and 201 for an unused one is the same oracle by another
+route.
+
 Wrong passphrase and missing room are deliberately the same code (4001) with
 identical timing (250 ms floor on the auth path).
 
@@ -79,7 +87,12 @@ identical timing (250 ms floor on the auth path).
 - SHRED_*: relay verbatim to other peers (sender excluded). Count nothing,
   decide nothing.
 - PURGE_ACK: mark requester as acked for `{request_id}`; when every currently
-  connected socket has acked the same id, execute surtr purge. There is no
+  connected socket has acked the same id, execute surtr purge. An ack counts
+  only while the peer that sent it is still connected, and the ledger is
+  bounded (16 request ids, 128-byte ids, 5-minute expiry) — otherwise a peer
+  could bank approvals from throwaway sockets, drop them to shrink the
+  denominator, and purge a room the remaining occupants never voted on. There
+  is no
   timeout path: an unacknowledged request leaves the room intact.
 
 ## Amendments to the master spec's table (documented honestly)
@@ -109,13 +122,21 @@ it, and are consumed by receivers as an AAD input. Sync responses reuse the
 stored entry's original frame type; frame type 0x05 therefore stays reserved.
 Server-authored event frames (JOIN_ACK, PEER_JOIN, PEER_LEAVE, PURGE, ERROR,
 TTL_EXTEND) are **never enveloped** — receivers read their JSON directly from
-the body; only relayed peer ciphertext carries the sender envelope.
+the body; only relayed peer ciphertext carries the sender envelope. These
+frames also carry epoch 0 by construction, so receivers must exempt them from
+the epoch-staleness check. Both invariants are pinned by tests in
+`server/tests/hardening.rs`.
 
 **D · TTL_EXTEND (0x22).** Any single peer may extend the room's timer
 (shortening still requires shred quorum), but no frame existed for it. Extension pushes the room's effective deadline
-out monotonically (never shortens); the server clamps additions to ≤720 h and
-broadcasts the resulting effective seconds so every client re-anchors its
-monotonic countdown. The clear-text form is acceptable because TTL is public
+out monotonically (never shortens); the server clamps each addition to ≤720 h
+**and the accumulated extension to ≤720 h in total**, so replaying the frame
+cannot pin a room in memory indefinitely. The broadcast carries both
+`effective_secs` (the room's total configured lifetime) and `remaining_secs`
+(what is actually left, measured by the server). Clients re-anchor on
+`remaining_secs`: `add_secs` is a request, not a result, and a client that
+added its own request locally would drift past the real deadline once the
+clamp engaged. The clear-text form is acceptable because TTL is public
 scheduling information by design — the server must know it to enforce it.
 
 All amendments keep the invariant that matters: the server never learns

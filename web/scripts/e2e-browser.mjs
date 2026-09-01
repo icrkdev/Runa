@@ -43,21 +43,20 @@ async function main() {
   // Create an unlisted room with keys the pages will receive via fragment.
   const linkSecret = crypto.getRandomValues(new Uint8Array(32));
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const roomId = crypto.getRandomValues(new Uint8Array(16));
-  const roomIdHex = Buffer.from(roomId).toString("hex");
   const authKey = await hkdf(linkSecret, salt, INFO_AUTH, 32);
   const verifier = createHash("sha256").update(authKey).digest().toString("base64");
   const createRes = await fetch(`${BASE}/api/rooms/unlisted`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      id: roomIdHex,
       verifier,
       kdf: { m_kib: 65536, t: 3, p: 1, salt: b64(salt) },
       ttl: { kind: "idle-peers", secs: 3600 },
     }),
   });
   if (createRes.status !== 201) throw new Error(`create failed ${createRes.status}`);
+  // The server assigns the id.
+  const roomIdHex = (await createRes.json()).room_id;
 
   const b64url = (b) => Buffer.from(b).toString("base64url");
   const roomUrl = `${BASE}/r/${roomIdHex}#k=${b64url(linkSecret)}&s=${b64url(salt)}`;

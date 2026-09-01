@@ -66,8 +66,18 @@ struct KdfMeta {
 /// identical shape filled with deterministic values derived from the id.
 pub async fn meta_unlisted(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Path(room_hex): Path<String>,
 ) -> Response {
+    // Every call parks a task for `auth_floor`; unmetered, that is a cheap way
+    // to hold a lot of them open at once.
+    let ip = rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
+    if !state.name_lookup_ip.check(&ip) {
+        // Same shape as a hit, so throttling is not itself an oracle.
+        tokio::time::sleep(state.cfg.auth_floor).await;
+        return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);
+    }
     tokio::time::sleep(state.cfg.auth_floor).await;
     let meta = match parse_room_hex(&room_hex).and_then(|id| state.rooms.get(&id)) {
         Some(room) => MetaResponse {
@@ -140,6 +150,8 @@ pub async fn names_resolve(
 
 #[derive(Deserialize)]
 pub struct CreateRoomBody {
+    /// Accepted for wire compatibility and ignored: unlisted ids are assigned
+    /// by the server so that creation cannot be used to probe for live rooms.
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -172,6 +184,7 @@ pub struct TtlBody {
 
 struct ValidParams {
     verifier_key: [u8; 32],
+    ceiling_optout: bool,
     salt: [u8; 16],
     m: u32,
     t: u32,
@@ -180,7 +193,10 @@ struct ValidParams {
     config_blob: Option<Vec<u8>>,
 }
 
-fn validate_params(body: &CreateRoomBody) -> Result<ValidParams, Box<Response>> {
+fn validate_params(
+    body: &CreateRoomBody,
+    cfg: &crate::config::Config,
+) -> Result<ValidParams, Box<Response>> {
     let ttl = Ttl {
         kind: match body.ttl.kind.as_str() {
             "absolute" => TtlKind::Absolute,
@@ -221,7 +237,26 @@ fn validate_params(body: &CreateRoomBody) -> Result<ValidParams, Box<Response>> 
         .map(|c| B64.decode(c))
         .transpose()
         .map_err(|_| Box::new(code_response(StatusCode::BAD_REQUEST, "CONFIG_INVALID")))?;
-    Ok(ValidParams { verifier_key: raw, salt, m: body.kdf.m_kib, t: body.kdf.t, p: body.kdf.p, ttl, config_blob })
+    // The blob is opaque to the server and held for the room's whole life, so
+    // it needs its own ceiling independent of the request body limit.
+    if config_blob.as_ref().is_some_and(|b| b.len() > cfg.max_config_blob_bytes) {
+        return Err(Box::new(code_response(StatusCode::PAYLOAD_TOO_LARGE, "CONFIG_TOO_LARGE")));
+    }
+    // `ttl: none` plus `ceiling_optout` is an immortal room: never swept, even
+    // with nobody in it. That is a permanent allocation an anonymous caller
+    // should not be able to make on a shared host, so honour the flag only
+    // when the operator has enabled it.
+    let ceiling_optout = body.ceiling_optout && cfg.allow_ceiling_optout;
+    Ok(ValidParams {
+        verifier_key: raw,
+        ceiling_optout,
+        salt,
+        m: body.kdf.m_kib,
+        t: body.kdf.t,
+        p: body.kdf.p,
+        ttl,
+        config_blob,
+    })
 }
 
 pub async fn create_unlisted(
@@ -234,17 +269,13 @@ pub async fn create_unlisted(
     if !state.rooms_created.check(&ip) {
         return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);
     }
-    let Some(room_id) = body.id.as_deref().and_then(parse_room_hex) else {
-        return code_response(StatusCode::BAD_REQUEST, "ID_INVALID");
-    };
-    let params = match validate_params(&body) {
+    let params = match validate_params(&body, &state.cfg) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
     match state.rooms.create_unlisted(
-        room_id,
         params.ttl,
-        body.ceiling_optout,
+        params.ceiling_optout,
         params.verifier_key,
         params.m,
         params.t,
@@ -255,15 +286,19 @@ pub async fn create_unlisted(
         state.cfg.auth_attempts_per_room_per_min,
         state.cfg.max_peers_per_room,
     ) {
-        Ok(_) => json_response(
+        Ok(room) => json_response(
             StatusCode::CREATED,
-            serde_json::json!({ "ok": true, "room_id": hex::encode(room_id) }),
+            serde_json::json!({ "ok": true, "room_id": hex::encode(room.id) }),
         ),
         Err(CreateError::IdUnavailable) | Err(CreateError::NameTaken) => {
             code_response(StatusCode::CONFLICT, "UNAVAILABLE")
         }
         Err(CreateError::PassphraseRequired) | Err(CreateError::NameInvalid(_)) => {
             code_response(StatusCode::BAD_REQUEST, "PARAMS_INVALID")
+        }
+        Err(CreateError::AtCapacity) => {
+            tracing::warn!(max = state.rooms.max_rooms(), "room budget exhausted");
+            code_response(StatusCode::SERVICE_UNAVAILABLE, "AT_CAPACITY")
         }
     }
 }
@@ -291,7 +326,7 @@ pub async fn create_named(
     if body.verifier.is_none() {
         return code_response(StatusCode::UNPROCESSABLE_ENTITY, "PASSPHRASE_REQUIRED");
     }
-    let params = match validate_params(&body) {
+    let params = match validate_params(&body, &state.cfg) {
         Ok(p) => p,
         Err(resp) => return *resp,
     };
@@ -299,7 +334,7 @@ pub async fn create_named(
         &raw_name,
         body.suffix.unwrap_or(true),
         params.ttl,
-        body.ceiling_optout,
+        params.ceiling_optout,
         params.verifier_key,
         params.m,
         params.t,
@@ -323,6 +358,10 @@ pub async fn create_named(
         }
         Err(CreateError::NameInvalid(_)) | Err(CreateError::PassphraseRequired) => {
             wire_code_response(StatusCode::BAD_REQUEST, WireCode::NameInvalid)
+        }
+        Err(CreateError::AtCapacity) => {
+            tracing::warn!(max = state.rooms.max_rooms(), "room budget exhausted");
+            code_response(StatusCode::SERVICE_UNAVAILABLE, "AT_CAPACITY")
         }
     }
 }

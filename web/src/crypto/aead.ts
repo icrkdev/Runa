@@ -3,7 +3,12 @@ import { concatBytes } from "./keys";
 export const NONCE_SESS_LEN = 4;
 export const COUNTER_LEN = 8;
 export const TAG_LEN = 16;
-export const MAX_COUNTER = 1n << 48n;
+
+/// The wire counter is 8 bytes. Its high 32 bits are a per-session random
+/// prefix and its low 32 bits are the message sequence, so a session may send
+/// 2^32 frames before it must rekey.
+export const COUNTER_SEQ_BITS = 32n;
+export const MAX_COUNTER = 1n << COUNTER_SEQ_BITS;
 
 export class CounterExhaustedError extends Error {
   constructor() {
@@ -17,6 +22,23 @@ export function randomSessionId(): Uint8Array {
   const s = new Uint8Array(NONCE_SESS_LEN);
   crypto.getRandomValues(s);
   return s;
+}
+
+/// Every peer in a room encrypts under the *same* AES-GCM key, so the only
+/// thing keeping two of them off the same nonce is the 12-byte
+/// `sess || counter`. With a 4-byte session id and a counter that always
+/// started at zero, the whole separation rested on 32 random bits — a
+/// birthday collision after roughly 65 000 sessions, and a nonce collision in
+/// AES-GCM is not a degradation, it is total: the XOR of the two plaintexts
+/// falls out and the GHASH key leaks, which lets anyone forge frames.
+///
+/// Randomising the high half of the counter as well costs nothing on the wire
+/// (the counter is already transmitted, already in the AAD) and lifts the
+/// separation to 64 bits, moving the birthday bound out past 2^32 sessions.
+export function randomCounterPrefix(): bigint {
+  const b = new Uint32Array(1);
+  crypto.getRandomValues(b);
+  return BigInt(b[0]);
 }
 
 export function counterToBytes(counter: bigint): Uint8Array {
@@ -70,30 +92,50 @@ export interface FrameEnvelope {
 
 export class FrameCipher {
   readonly sess: Uint8Array;
-  private counter = 0n;
+  private readonly prefix: bigint;
+  private seq = 0n;
+  private peer: Uint8Array;
 
   constructor(
     readonly contentKey: CryptoKey,
-    readonly peerId: Uint8Array,
+    peerId: Uint8Array,
     sess?: Uint8Array,
+    prefix?: bigint,
   ) {
     this.sess = sess ?? randomSessionId();
+    this.prefix = prefix ?? randomCounterPrefix();
+    this.peer = peerId;
+  }
+
+  get peerId(): Uint8Array {
+    return this.peer;
   }
 
   get currentCounter(): bigint {
-    return this.counter;
+    return (this.prefix << COUNTER_SEQ_BITS) | this.seq;
+  }
+
+  /// Re-label the sender without disturbing the nonce stream. JOIN_ACK tells
+  /// a client its server-assigned peer id, which the AAD must carry — but
+  /// rebuilding the cipher to record it also reset the counter to zero while
+  /// keeping the session id, so a second JOIN_ACK on the same socket would
+  /// replay nonces that had already been used. A hostile relay could send
+  /// that second frame whenever it liked, which is exactly the adversary the
+  /// whole end-to-end design exists to stop.
+  bindPeerId(peerId: Uint8Array): void {
+    this.peer = peerId;
   }
 
   nextNonce(): { nonce: Uint8Array; counter: bigint } {
-    if (this.counter >= MAX_COUNTER) throw new CounterExhaustedError();
-    const counter = this.counter;
-    this.counter += 1n;
+    if (this.seq >= MAX_COUNTER) throw new CounterExhaustedError();
+    const counter = (this.prefix << COUNTER_SEQ_BITS) | this.seq;
+    this.seq += 1n;
     return { nonce: nonceFrom(this.sess, counter), counter };
   }
 
   async encrypt(header: Uint8Array, plaintext: Uint8Array, covers = 0n): Promise<Uint8Array> {
     const { nonce, counter } = this.nextNonce();
-    const aad = buildAad(header, this.peerId, counter, covers);
+    const aad = buildAad(header, this.peer, counter, covers);
     const ct = new Uint8Array(
       await crypto.subtle.encrypt(
         {

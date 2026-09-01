@@ -37,7 +37,6 @@ export interface SocketEvents {
   onJoinAck(ack: JoinAck): void;
   onDocUpdate(sender: Uint8Array, envelope: Uint8Array): void;
   onSnapshot(sender: Uint8Array, covers: bigint, envelope: Uint8Array): void;
-  onSyncResponse(sender: Uint8Array, frameType: number, envelope: Uint8Array): void;
   onAwareness(sender: Uint8Array, plaintext: Uint8Array): void;
   onShredFrame(frameType: number, sender: Uint8Array, plaintext: Uint8Array): void;
   onPeerJoin(entry: RosterEntry): void;
@@ -70,6 +69,7 @@ export class RunaSocket {
   private closedByUs = false;
   private epoch = 0;
   private peerId: Uint8Array = new Uint8Array(16);
+  private joined = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   readonly events: SocketEvents;
 
@@ -99,6 +99,7 @@ export class RunaSocket {
     }
     this.ws = new WebSocket(url);
     this.ws.binaryType = "arraybuffer";
+    this.joined = false;
     this.ws.onopen = () => {
       void this.sendJoin();
     };
@@ -116,7 +117,10 @@ export class RunaSocket {
     if (this.closedByUs || this.reconnectTimer) return;
     const jitterBytes = new Uint32Array(1);
     crypto.getRandomValues(jitterBytes);
-    const jitter = jitterBytes[0] % Math.floor(this.backoffMs * 0.3);
+    // `% 0` is NaN, and setTimeout(NaN) fires immediately — a hot reconnect
+    // loop for any backoff under ~4 ms.
+    const spread = Math.max(1, Math.floor(this.backoffMs * 0.3));
+    const jitter = jitterBytes[0] % spread;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
@@ -127,11 +131,27 @@ export class RunaSocket {
 
   close(): void {
     this.closedByUs = true;
+    this.joined = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     this.ws?.close();
     this.ws = null;
     // Final teardown is the only point at which the auth key may be wiped.
     this.opts.authKey.fill(0);
+  }
+
+  /// Release this socket's handle on the content key during a wipe. The
+  /// session clearing its own copy did not reach this one.
+  ///
+  /// Best-effort by nature: the cipher object keeps its own reference, and
+  /// nulling that would leave every send path dereferencing null. What
+  /// actually ends the key's life is the navigation to the tombstone that
+  /// follows immediately — the keys are non-extractable `CryptoKey` handles,
+  /// so they cannot leave the tab in the first place, and tearing down the
+  /// realm takes them with it.
+  dropKeys(): void {
+    this.closedByUs = true;
+    (this.opts as unknown as { contentKey: CryptoKey | null }).contentKey = null;
   }
 
   private async sendJoin(): Promise<void> {
@@ -156,35 +176,83 @@ export class RunaSocket {
       this.events.onError(4005);
       return;
     }
-    if (header.epoch < this.epoch) {
+    // Server-authored event frames carry epoch 0 by construction, so they
+    // must be exempt from the staleness check or every one of them would be
+    // dropped the moment the room's epoch advanced.
+    const isServerEvent =
+      header.frameType === FT.JOIN_ACK ||
+      header.frameType === FT.ERROR ||
+      header.frameType === FT.PEER_JOIN ||
+      header.frameType === FT.PEER_LEAVE ||
+      header.frameType === FT.PURGE ||
+      header.frameType === FT.TTL_EXTEND;
+    if (!isServerEvent && header.epoch < this.epoch) {
       this.events.onEpochStale(header.epoch);
       return;
     }
     if (header.frameType === FT.JOIN_ACK) {
-      const ack = JSON.parse(textDecoder.decode(parsed.body)) as JoinAck;
+      // Exactly one JOIN_ACK per connection. A relay that replays it could
+      // otherwise rewind this connection's nonce stream, and nonce reuse
+      // under a shared AES-GCM key hands the relay the plaintext.
+      if (this.joined) return;
+      let ack: JoinAck;
+      try {
+        ack = JSON.parse(textDecoder.decode(parsed.body)) as JoinAck;
+      } catch {
+        return;
+      }
+      this.joined = true;
       this.epoch = ack.epoch ?? 0;
-      // The AEAD sender component must be the server-assigned 16-byte peer
-      // id (what receivers read from the envelope), not our public key.
-      // Session id and counter carry over: nonce uniqueness depends only on
-      // (key, sess, counter), and nothing encrypted was sent pre-join.
+      // The AEAD sender component must be the server-assigned 16-byte peer id
+      // (what receivers read from the envelope), not our public key. Re-label
+      // in place: the nonce stream must never restart.
       this.peerId = fromB64(ack.peer_id);
-      this.cipher = new FrameCipher(this.opts.contentKey, this.peerId, this.cipher.sess);
+      this.cipher.bindPeerId(this.peerId);
       this.events.onJoinAck(ack);
       return;
     }
     if (header.frameType === FT.ERROR) {
-      const { code } = JSON.parse(textDecoder.decode(parsed.body)) as { code: number };
+      let code = 4005;
+      try {
+        ({ code } = JSON.parse(textDecoder.decode(parsed.body)) as { code: number });
+      } catch {
+        /* malformed error frame: treat as a protocol error */
+      }
+      // 4001 covers "wrong key" and "no such room" — both are terminal. Left
+      // to reconnect, a purged room turned every open tab into a client that
+      // hammered the server every 15 seconds indefinitely.
+      if (code === 4001 || code === 4010 || code === 4011) {
+        this.closedByUs = true;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      }
       this.events.onError(code);
       return;
     }
     if (header.frameType === FT.TTL_EXTEND) {
-      const j = JSON.parse(textDecoder.decode(parsed.body)) as { add_secs: number; effective_secs: number; added_by: string };
-      this.events.onTtlExtended(j.add_secs, j.effective_secs, j.added_by);
+      try {
+        const j = JSON.parse(textDecoder.decode(parsed.body)) as {
+          add_secs: number;
+          effective_secs: number;
+          remaining_secs?: number;
+          added_by: string;
+        };
+        // The server clamps extensions at a ceiling, so re-anchor on the
+        // value it computed rather than adding our own request locally.
+        this.events.onTtlExtended(j.remaining_secs ?? j.effective_secs, j.effective_secs, j.added_by);
+      } catch {
+        return;
+      }
       return;
     }
     if (header.frameType === FT.PURGE) {
-      const { reason } = JSON.parse(textDecoder.decode(parsed.body)) as { reason: string };
-      this.events.onPurge(reason);
+      try {
+        const { reason } = JSON.parse(textDecoder.decode(parsed.body)) as { reason: string };
+        this.closedByUs = true;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.events.onPurge(reason);
+      } catch {
+        return;
+      }
       return;
     }
     if (header.frameType === FT.PEER_JOIN) {
@@ -197,8 +265,12 @@ export class RunaSocket {
       return;
     }
     if (header.frameType === FT.PEER_LEAVE) {
-      const j = JSON.parse(textDecoder.decode(parsed.body)) as { peer_id: string; reason?: number };
-      this.events.onPeerLeave(fromB64(j.peer_id), j.reason);
+      try {
+        const j = JSON.parse(textDecoder.decode(parsed.body)) as { peer_id: string; reason?: number };
+        this.events.onPeerLeave(fromB64(j.peer_id), j.reason);
+      } catch {
+        return;
+      }
       return;
     }
 
@@ -227,6 +299,7 @@ export class RunaSocket {
         return;
       }
       case FT.SNAPSHOT: {
+        if (env.body.length < 8) return;
         const covers = snapshotCoversOf(env.body);
         try {
           const pt = await decryptEnvelope(

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Api, randomRoomIdHex, type TtlBody } from "../api";
+import { Api, type TtlBody } from "../api";
 import {
   deriveRoomKeys,
   encryptRoomConfig,
@@ -82,20 +82,20 @@ function UnlistedForm() {
     setBusy(true);
     setError(null);
     try {
-      const roomIdHex = randomRoomIdHex();
       const salt = randomSalt();
       const linkSecret = randomLinkSecret();
       const { authKey, contentKey } = await deriveRoomKeys(null, linkSecret, salt);
       const verifierB64 = await verifierForAuthKey(authKey);
-      await new Api("").createUnlisted({
-        roomIdHex,
+      // The id is assigned by the server: letting the client pick it made
+      // creation into a probe for which rooms are live.
+      const created = await new Api("").createUnlisted({
         verifierB64,
         kdf: { m_kib: 65536, t: 3, p: 1, salt: b64Of(salt) },
         ttl,
         ceilingOptout: ttl.kind === "none",
         configBlob: await encryptRoomConfig(contentKey, ttl, ttl.kind === "none"),
       });
-      window.location.assign(`/r/${roomIdHex}${fragmentWithKey(linkSecret, salt)}`);
+      window.location.assign(`/r/${created.room_id}${fragmentWithKey(linkSecret, salt)}`);
     } catch (e) {
       setError(describeError(e));
       setBusy(false);
@@ -130,9 +130,13 @@ function NamedForm() {
     setError(null);
     setRefusal(null);
     const v = estimatePassphrase(passphrase);
-    if (!v.dicewareWords || !v.ok) {
+    // Was `!v.dicewareWords || !v.ok`, which refused every passphrase that
+    // was not a run of lowercase words — including anything a password
+    // manager generates, which is stronger than the diceware it insisted on.
+    // Strength is the bar; the shape of it is not.
+    if (!v.ok) {
       setRefusal(
-        "This room's name is public, so the passphrase is the only key protecting it. Use the Generate button to produce a four-word passphrase.",
+        "This room's name is public, so the passphrase is the only key protecting it. Use a longer one, or press Generate for a five-word passphrase.",
       );
       return;
     }
@@ -203,7 +207,7 @@ function NamedForm() {
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
-          <button type="button" onClick={() => setPassphrase(generateDicewarePassphrase(4))}>Generate</button>
+          <button type="button" onClick={() => setPassphrase(generateDicewarePassphrase(5))}>Generate</button>
         </div>
         {verdict && !verdict.ok && (
           <p className="error-text mono">Short passphrase. This room is only as strong as it is.</p>
@@ -235,6 +239,8 @@ function describeError(e: unknown): string {
       return "That name is reserved or too short. Try another.";
     case "RATE_LIMITED":
       return "Too many attempts. Wait a minute and try again.";
+    case "AT_CAPACITY":
+      return "This server is at its room limit right now. Try again shortly.";
     default:
       return `Could not create the room (${code}).`;
   }

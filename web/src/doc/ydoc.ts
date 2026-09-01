@@ -1,4 +1,6 @@
-import * as Y from "yjs";export interface TransportLike {
+import * as Y from "yjs";
+
+export interface TransportLike {
   sendUpdate(plaintext: Uint8Array): Promise<void>;
   sendSnapshot(plaintext: Uint8Array, covers: bigint): Promise<void>;
   sendSyncRequest(fromIndex: number): void;
@@ -97,6 +99,12 @@ export class RunaDoc {
     Y.applyUpdate(this.ydoc, unwrapLengthPrefix(wrapped), "remote");
   }
 
+  /// Resume from what this client has actually seen. Requesting from 0 on
+  /// every reconnect replays the whole room log each time.
+  syncFrom(): number {
+    return this.baseIndex;
+  }
+
   requestSync(): void {
     this.opts.transport.sendSyncRequest(this.baseIndex);
   }
@@ -110,9 +118,16 @@ export class RunaDoc {
 
   async createSnapshot(logLen: bigint): Promise<void> {
     const state = Y.encodeStateAsUpdate(this.ydoc);
+    try {
+      await this.opts.transport.sendSnapshot(wrapWithLengthAndPad(state), logLen);
+    } catch {
+      // The server rejects snapshots from anyone but the elected peer. Moving
+      // baseIndex anyway would make the next sync request start past history
+      // the server still holds, and the missing updates never arrive.
+      return;
+    }
     this.lastSnapshotAt = Date.now();
     this.updateCount = 0;
-    await this.opts.transport.sendSnapshot(wrapWithLengthAndPad(state), logLen);
     this.baseIndex = Number(logLen);
   }
 

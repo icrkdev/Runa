@@ -1,4 +1,54 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use bytes::Bytes;
+
+/// Process-wide ceiling on retained ciphertext.
+///
+/// Per-room limits alone do not bound the process: `max_rooms × max_log_bytes`
+/// is the real worst case, and with the shipped defaults that arithmetic ran
+/// to gigabytes. On a host shared with anything else, "how much RAM can a
+/// stranger make this process hold" has to have an answer the operator chose.
+#[derive(Debug)]
+pub struct LogBudget {
+    used: AtomicU64,
+    max: u64,
+}
+
+impl LogBudget {
+    pub fn new(max: u64) -> Self {
+        LogBudget { used: AtomicU64::new(0), max }
+    }
+
+    pub fn unlimited() -> Arc<Self> {
+        Arc::new(LogBudget::new(u64::MAX))
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    pub fn max(&self) -> u64 {
+        self.max
+    }
+
+    fn try_reserve(&self, n: u64) -> bool {
+        self.used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                let next = cur.saturating_add(n);
+                (next <= self.max).then_some(next)
+            })
+            .is_ok()
+    }
+
+    fn release(&self, n: u64) {
+        self.used
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                Some(cur.saturating_sub(n))
+            })
+            .ok();
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct LogEntry {
@@ -16,6 +66,7 @@ pub struct RoomLog {
     snapshot_covers: u64,
     total_bytes: u64,
     max_bytes: u64,
+    budget: Arc<LogBudget>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -30,6 +81,10 @@ pub struct TailChunk {
 
 impl RoomLog {
     pub fn new(max_bytes: u64) -> Self {
+        RoomLog::with_budget(max_bytes, LogBudget::unlimited())
+    }
+
+    pub fn with_budget(max_bytes: u64, budget: Arc<LogBudget>) -> Self {
         RoomLog {
             entries: Vec::new(),
             start_index: 0,
@@ -37,6 +92,7 @@ impl RoomLog {
             snapshot_covers: 0,
             total_bytes: 0,
             max_bytes,
+            budget,
         }
     }
 
@@ -64,7 +120,10 @@ impl RoomLog {
         frame: Bytes,
     ) -> Result<u64, AppendError> {
         let entry_len = frame.len() as u64;
-        if self.total_bytes + entry_len > self.max_bytes {
+        if self.total_bytes.saturating_add(entry_len) > self.max_bytes {
+            return Err(AppendError::LogFull);
+        }
+        if !self.budget.try_reserve(entry_len) {
             return Err(AppendError::LogFull);
         }
         let index = self.log_len();
@@ -80,15 +139,23 @@ impl RoomLog {
         if covers < self.start_index || covers > self.log_len() {
             return false;
         }
+        let new_len = snapshot_entry.frame.len() as u64;
+        if !self.budget.try_reserve(new_len) {
+            return false;
+        }
         let drop_count = (covers - self.start_index) as usize;
         let dropped: Vec<LogEntry> = self.entries.drain(..drop_count).collect();
         for e in &dropped {
-            self.total_bytes = self.total_bytes.saturating_sub(e.frame.len() as u64);
+            let n = e.frame.len() as u64;
+            self.total_bytes = self.total_bytes.saturating_sub(n);
+            self.budget.release(n);
         }
         if let Some(old) = self.snapshot.replace(snapshot_entry) {
-            self.total_bytes = self.total_bytes.saturating_sub(old.frame.len() as u64);
+            let n = old.frame.len() as u64;
+            self.total_bytes = self.total_bytes.saturating_sub(n);
+            self.budget.release(n);
         }
-        self.total_bytes += self.snapshot.as_ref().unwrap().frame.len() as u64;
+        self.total_bytes += new_len;
         self.snapshot_covers = covers;
         self.start_index = covers;
         true
@@ -116,10 +183,19 @@ impl RoomLog {
     /// (spec §6.5); real wiping effort is spent on auth material in
     /// `heimdall::verifier`, which uses `Zeroizing`.
     pub fn drain_and_drop(&mut self) {
+        // `start_index` has to advance before the entries go, or `log_len()`
+        // reads back the old base and the rebase is a no-op.
+        self.start_index = self.log_len();
         drop(std::mem::take(&mut self.entries));
         drop(self.snapshot.take());
+        self.budget.release(self.total_bytes);
         self.total_bytes = 0;
-        self.start_index = self.log_len();
+    }
+}
+
+impl Drop for RoomLog {
+    fn drop(&mut self) {
+        self.budget.release(self.total_bytes);
     }
 }
 
@@ -234,5 +310,65 @@ mod boundary_tests {
         log.append([1; 16], 0x03, 0, frame(99)).unwrap();
         assert_eq!(log.log_len(), 1);
         assert_eq!(log.byte_size(), 99);
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn frame(n: usize) -> Bytes {
+        Bytes::from(vec![0xAB; n])
+    }
+
+    #[test]
+    fn the_process_wide_budget_bounds_every_room_together() {
+        let budget = Arc::new(LogBudget::new(300));
+        let mut a = RoomLog::with_budget(1_000_000, budget.clone());
+        let mut b = RoomLog::with_budget(1_000_000, budget.clone());
+        a.append([1; 16], 0x03, 0, frame(200)).unwrap();
+        // Room B has plenty of its own headroom, but the process does not.
+        assert_eq!(b.append([2; 16], 0x03, 0, frame(200)), Err(AppendError::LogFull));
+        b.append([2; 16], 0x03, 0, frame(100)).unwrap();
+        assert_eq!(budget.used(), 300);
+    }
+
+    #[test]
+    fn purging_a_room_returns_its_share() {
+        let budget = Arc::new(LogBudget::new(1000));
+        let mut a = RoomLog::with_budget(1_000_000, budget.clone());
+        a.append([1; 16], 0x03, 0, frame(400)).unwrap();
+        assert_eq!(budget.used(), 400);
+        a.drain_and_drop();
+        assert_eq!(budget.used(), 0);
+        assert_eq!(a.base_index(), 1, "drain must rebase past the dropped entries");
+    }
+
+    #[test]
+    fn dropping_a_room_returns_its_share() {
+        let budget = Arc::new(LogBudget::new(1000));
+        {
+            let mut a = RoomLog::with_budget(1_000_000, budget.clone());
+            a.append([1; 16], 0x03, 0, frame(400)).unwrap();
+            assert_eq!(budget.used(), 400);
+        }
+        assert_eq!(budget.used(), 0, "a room dropped without a purge must not leak budget");
+    }
+
+    #[test]
+    fn snapshots_account_against_the_budget_too() {
+        let budget = Arc::new(LogBudget::new(1000));
+        let mut a = RoomLog::with_budget(1_000_000, budget.clone());
+        for _ in 0..4 {
+            a.append([1; 16], 0x03, 0, frame(100)).unwrap();
+        }
+        assert!(a.apply_snapshot(4, LogEntry {
+            sender: [2; 16],
+            frame_type: 0x21,
+            epoch: 0,
+            frame: frame(50),
+        }));
+        assert_eq!(budget.used(), 50);
+        assert_eq!(a.byte_size(), 50);
     }
 }

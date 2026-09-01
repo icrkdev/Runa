@@ -21,7 +21,17 @@ pub async fn ws_route(
     headers: HeaderMap,
 ) -> Response {
     let ip = crate::heimdall::clientip::rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
-    ws.on_upgrade(move |socket| bifrost::handle_socket(socket, state, room_id, ip))
+    // Without this the websocket layer will happily buffer its own default
+    // (64 MiB) before the application ever gets to compare against
+    // `max_frame_bytes`, so one socket could pin two orders of magnitude more
+    // memory than the configured frame limit allows.
+    // Twice the application limit: modest overshoot still reaches the handler
+    // and gets a semantic 4004 FRAME_TOO_LARGE, while anything wilder is cut
+    // off by the transport instead of being buffered.
+    let cap = state.cfg.max_frame_bytes.saturating_mul(2);
+    ws.max_message_size(cap)
+        .max_frame_size(cap)
+        .on_upgrade(move |socket| bifrost::handle_socket(socket, state, room_id, ip))
 }
 
 async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
@@ -35,10 +45,18 @@ async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
         .unwrap_or(false);
     let status_ok = res.status() == StatusCode::OK;
     let headers = res.headers_mut();
+    // `trusted-types *` accepted a policy under any name, which combined with
+    // a pass-through `default` policy made the directive decorative. The
+    // allow-list is `default` (the compatibility shim in web/src/trusted-types.ts)
+    // plus the nine policies monaco-editor creates for its own DOM writes —
+    // enumerated from `createTrustedTypesPolicy` call sites in the package.
+    // web/scripts/e2e-browser.mjs fails on any Trusted Types violation, so a
+    // Monaco upgrade that adds a policy name is caught in CI rather than in
+    // production.
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types *;",
+            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types default defaultWorkerFactory diffEditorWidget diffReview domLineBreaksComputer editorGhostText editorViewLayer standaloneColorizer stickyScrollViewLayer tokenizeToString;",
         ),
     );
     headers.insert(
@@ -79,7 +97,25 @@ pub fn build_router(state: AppState) -> Router {
 
     let static_service = ServeDir::new(&dist);
 
-    let index_html = std::fs::read_to_string(&index_path).unwrap_or_default();
+    // Serving an empty 200 for the SPA shell turns a missing/mis-pointed
+    // RUNA_DIST into a blank white page with no diagnostic anywhere. Fail
+    // loudly at boot instead — this is the single most common deploy mistake.
+    let index_html = match std::fs::read_to_string(&index_path) {
+        Ok(html) if !html.trim().is_empty() => html,
+        Ok(_) => {
+            tracing::error!(path = %index_path.display(), "index.html is empty");
+            String::new()
+        }
+        Err(e) => {
+            tracing::error!(
+                path = %index_path.display(),
+                error = %e,
+                "cannot read index.html — set RUNA_DIST to the built web bundle \
+                 (`web/dist`). The API and websocket still work; the UI will not."
+            );
+            String::new()
+        }
+    };
 
     async fn index_page(axum::extract::State(html): axum::extract::State<std::sync::Arc<String>>) -> Response {
         (

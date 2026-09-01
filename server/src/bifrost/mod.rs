@@ -28,6 +28,9 @@ use crate::surtr;
 use crate::AppState;
 
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Slot count only. The real bound on a peer's outbound queue is
+/// `max_queued_bytes_per_conn`, enforced by `PeerTx` — 512 slots of
+/// `max_frame_bytes` each would be 128 MiB that nothing accounts for.
 const OUTBOUND_CAPACITY: usize = 512;
 
 fn json_frame(room_id: [u8; 16], frame_type: u8, body: &impl Serialize) -> Bytes {
@@ -91,6 +94,20 @@ struct KdfJson {
     salt: String,
 }
 
+/// Seconds left before the scheduler will sweep this room, from now. For
+/// absolute TTLs that is the deadline minus elapsed time; for idle TTLs it is
+/// the length of the window the next activity restarts.
+fn remaining_secs(room: &Room) -> u64 {
+    match room.ttl.kind {
+        TtlKind::None => 0,
+        TtlKind::Absolute => {
+            let elapsed = crate::runar::room::unix_now().saturating_sub(room.created_unix);
+            room.effective_ttl_secs().saturating_sub(elapsed)
+        }
+        _ => room.effective_ttl_secs(),
+    }
+}
+
 fn ttl_json(room: &Room) -> TtlJson {
     let kind = match room.ttl.kind {
         crate::runar::room::TtlKind::Absolute => "absolute",
@@ -98,12 +115,7 @@ fn ttl_json(room: &Room) -> TtlJson {
         crate::runar::room::TtlKind::IdlePeers => "idle-peers",
         crate::runar::room::TtlKind::None => "none",
     };
-    let elapsed = crate::runar::room::unix_now().saturating_sub(room.created_unix);
-    let secs = match room.ttl.kind {
-        crate::runar::room::TtlKind::None => 0,
-        _ => room.ttl.secs.saturating_sub(if room.ttl.kind == crate::runar::room::TtlKind::Absolute { elapsed } else { 0 }),
-    };
-    TtlJson { kind, secs }
+    TtlJson { kind, secs: remaining_secs(room) }
 }
 
 struct ConnLimits {
@@ -129,6 +141,22 @@ impl ConnLimits {
 }
 
 pub async fn handle_socket(socket: WebSocket, state: AppState, room_hex: String, ip: String) {
+    // Process-wide first: the per-IP guard bounds one address, not the sum.
+    let max = state.cfg.max_connections;
+    if state
+        .live_conns
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| (n < max).then_some(n + 1),
+        )
+        .is_err()
+    {
+        tracing::warn!(max, "connection ceiling reached; refusing socket");
+        return;
+    }
+    let _conn_slot = ConnSlot(state.live_conns.clone());
+
     if !state.conn_guard.acquire(&ip) {
         return;
     }
@@ -138,6 +166,22 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, room_hex: String,
     state.conn_guard.release(&ip_for_release);
     if let Err(code) = result {
         tracing::debug!(closed_by = u16::from(code), "socket closed");
+    }
+}
+
+/// Returns the process-wide connection slot on every exit path, including
+/// the early returns above.
+struct ConnSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        self.0
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| Some(n.saturating_sub(1)),
+            )
+            .ok();
     }
 }
 
@@ -200,11 +244,15 @@ async fn run_connection(
         #[allow(unused_variables)]
         let header_ref = &header;
 
+    // A room mid-purge is, from outside, indistinguishable from one that was
+    // never here. Peers already inside learn about the purge over their live
+    // socket; a new connection gets the same answer as any bad id.
     match room.current_state() {
         RoomState::Active | RoomState::Draining => {}
         _ => {
-            let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::Purged))).await;
-            return Err(WireCode::Purged);
+            floor_delay(cfg.auth_floor).await;
+            let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::AuthFailed))).await;
+            return Err(WireCode::AuthFailed);
         }
     }
     if first.len() > cfg.max_frame_bytes {
@@ -220,10 +268,14 @@ async fn run_connection(
     let join: JoinBody = serde_json::from_slice(&first[HEADER_LEN..])
         .unwrap_or(JoinBody { auth_key: None, pubkey: None });
 
+    // A throttled room must not answer differently from a room that does not
+    // exist. Returning 4002 here was a clean existence oracle: five bad
+    // guesses at a real room id flipped the code to RateLimited, while a
+    // missing id answered 4001 forever. Same code, same delay, either way.
     if !room.auth_allowed() {
         floor_delay(cfg.auth_floor).await;
-        let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::RateLimited))).await;
-        return Err(WireCode::RateLimited);
+        let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::AuthFailed))).await;
+        return Err(WireCode::AuthFailed);
     }
 
     let presented = join.auth_key.as_deref().unwrap_or("");
@@ -233,8 +285,8 @@ async fn run_connection(
 
     if !state.auth_per_ip.check(&ip) {
         floor_delay(cfg.auth_floor).await;
-        let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::RateLimited))).await;
-        return Err(WireCode::RateLimited);
+        let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::AuthFailed))).await;
+        return Err(WireCode::AuthFailed);
     }
 
     if !auth_ok {
@@ -253,16 +305,18 @@ async fn run_connection(
         .filter(|v| v.len() == 32 || v.len() == 65);
 
     let (tx, mut rx) = mpsc::channel::<Bytes>(OUTBOUND_CAPACITY);
-    let entry = match room.add_peer(session_pubkey.clone(), tx) {
+    let peer_tx = crate::runar::room::PeerTx::new(tx, cfg.max_queued_bytes_per_conn);
+    let queue_meter = peer_tx.meter();
+    let entry = match room.add_peer(session_pubkey.clone(), peer_tx) {
         Ok(e) => e,
         Err(JoinError::Full) => {
             let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::RoomFull))).await;
             return Err(WireCode::RoomFull);
         }
-        Err(JoinError::AuthLockedOut(backoff)) => {
-            let _ = tokio::time::sleep(backoff.min(Duration::from_secs(5))).await;
-            let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::RateLimited))).await;
-            return Err(WireCode::RateLimited);
+        Err(JoinError::AuthLockedOut(_)) => {
+            floor_delay(cfg.auth_floor).await;
+            let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::AuthFailed))).await;
+            return Err(WireCode::AuthFailed);
         }
     };
     let peer_id = entry.peer_id;
@@ -310,10 +364,19 @@ async fn run_connection(
             "joined_at_seq": entry.joined_at_seq,
         }),
     );
-    room.broadcast(&join_evt, None).await;
+    room.broadcast_event(&join_evt, None).await;
+
+    if room.current_state() == RoomState::Draining {
+        // Somebody came back before the grace window closed.
+        room.mark_state(RoomState::Active);
+    }
 
     let limits = ConnLimits::new(&cfg);
     let mut conn_ok: ConnResult = Ok(());
+    // One sync replay in flight per connection. Each DOC_SYNC_REQ can pull the
+    // whole room log, so letting them queue turns one small frame into an
+    // unbounded fan-out of spawned tasks and egress.
+    let sync_slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
 
     loop {
         tokio::select! {
@@ -328,7 +391,7 @@ async fn run_connection(
                             conn_ok = Err(WireCode::RateLimited);
                             break;
                         }
-                        match process_frame(&state, &room, peer_id, &data).await {
+                        match process_frame(&state, &room, peer_id, &data, &sync_slot).await {
                             Ok(()) => {}
                             Err(Some(code)) => { conn_ok = Err(code); break; }
                             Err(None) => {}
@@ -346,7 +409,11 @@ async fn run_connection(
                 match outbound {
                     Some(bytes) => {
                         let is_purge = bytes.len() >= HEADER_LEN && bytes[3] == FT_PURGE;
-                        if sink.send(Message::Binary(bytes)).await.is_err() {
+                        let n = bytes.len();
+                        let sent = sink.send(Message::Binary(bytes)).await;
+                        // Quota returns once the frame is off our hands.
+                        queue_meter.release(n);
+                        if sent.is_err() {
                             break;
                         }
                         if is_purge {
@@ -378,7 +445,7 @@ async fn run_connection(
             "reason": conn_ok.err().map(u16::from),
         }),
     );
-    room.broadcast(&leave, Some(peer_id)).await;
+    room.broadcast_event(&leave, Some(peer_id)).await;
     if room.peer_count() == 0 && room.current_state() == RoomState::Active {
         room.mark_state(RoomState::Draining);
     }
@@ -391,6 +458,7 @@ async fn process_frame(
     room: &std::sync::Arc<Room>,
     sender: [u8; 16],
     data: &[u8],
+    sync_slot: &std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), Option<WireCode>> {
     let Some(header) = Header::decode(data) else {
         return Err(Some(WireCode::ProtocolError));
@@ -486,9 +554,16 @@ async fn process_frame(
                 // Spawn off the connection's critical path so `send().await`
                 // exerts real backpressure; the select loop is free to drain
                 // rx concurrently because process_frame has already returned.
+                // The permit caps this at one replay per connection: without
+                // it, a peer could fire sync requests at the frame limit and
+                // have the server clone and push the whole log for each one.
+                let Ok(permit) = sync_slot.clone().try_acquire_owned() else {
+                    return Ok(());
+                };
                 tokio::spawn(async move {
+                    let _permit = permit;
                     for entry in chunk.snapshot.into_iter().chain(chunk.entries) {
-                        if tx.send(envelop_entry(&entry)).await.is_err() {
+                        if tx.send_backpressured(envelop_entry(&entry)).await.is_err() {
                             break;
                         }
                     }
@@ -516,6 +591,12 @@ async fn process_frame(
                     TtlKind::None => 0,
                     _ => room.effective_ttl_secs(),
                 };
+                // The server clamps extensions at a ceiling, so `add_secs` is
+                // a request, not a result. Clients must re-anchor on a value
+                // the server computed — otherwise the extender's local clock
+                // drifts past the real deadline (and double-counts its own
+                // request on top of the broadcast).
+                let remaining = remaining_secs(room);
                 let evt = json_frame(
                     room.id,
                     FT_TTL_EXTEND,
@@ -523,6 +604,7 @@ async fn process_frame(
                         "added_by": B64.encode(sender),
                         "add_secs": add,
                         "effective_secs": effective,
+                        "remaining_secs": remaining,
                         "kind": match room.ttl.kind {
                             TtlKind::Absolute => "absolute",
                             TtlKind::IdleEdit => "idle-edit",
@@ -531,7 +613,7 @@ async fn process_frame(
                         },
                     }),
                 );
-                room.broadcast(&evt, None).await;
+                room.broadcast_event(&evt, None).await;
             }
             Ok(())
         }
@@ -541,8 +623,10 @@ async fn process_frame(
                 .ok()
                 .and_then(|v| v.get("request_id").and_then(|x| x.as_str()).map(str::to_string));
             if let Some(request_id) = request_id {
-                let total = room.peer_count().max(1);
-                match room.note_purge_ack(&request_id, sender, total) {
+                if request_id.len() > crate::runar::room::MAX_PURGE_REQUEST_ID_LEN {
+                    return Err(None);
+                }
+                match room.note_purge_ack(&request_id, sender) {
                     PurgeAckStatus::Pending => {}
                     PurgeAckStatus::AllAcked(id) => {
                         tracing::info!(request = %id, "all connected peers acked; purging");

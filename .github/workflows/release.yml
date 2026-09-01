@@ -26,6 +26,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -52,7 +55,7 @@ jobs:
           RUNA_COMMIT: ${{ github.sha }}
           RUNA_BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
           SOURCE_DATE_EPOCH: "0"
-        run: cargo build --release --target ${{ matrix.target }} -p runa-server
+        run: cargo build --release --locked --target ${{ matrix.target }} -p runa-server
 
       - name: Package
         shell: bash
