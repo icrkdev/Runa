@@ -4,22 +4,34 @@ This is the path for a small VM shared with other services. It is what the
 `scripts/deploy-oracle.sh` script automates; read this once, then use the
 script.
 
-## Why native systemd and not Docker
+> **Just want to deploy?** Follow
+> [`detailed_instructions.md`](../detailed_instructions.md) — every command
+> labelled with where it runs. This file is the reasoning behind it.
 
-The repo ships a `Dockerfile` and it works. It is not the right choice for a
-box that already runs something else:
+## Two supported paths
 
-- A Docker daemon is another root process, and it rewrites `iptables` on
-  install — on a host with an existing firewall and another live service,
-  that is a real risk for a marginal gain.
-- Building the image on a 2-core ARM VM is *slower* than building natively,
-  because it builds Rust and Node in separate stages with no shared cache.
-- The service is one static binary and one directory of assets. systemd
-  confines it more tightly than a container does, with `DynamicUser=yes`,
-  a syscall filter, and a memory cgroup.
+| | Command | Needs on the box |
+|---|---|---|
+| **Docker** — own image, own namespace, nothing else installed | `./scripts/deploy-docker.sh` | Docker |
+| **systemd** — no daemon added, tighter syscall confinement | `./scripts/deploy-oracle.sh` | rustup |
 
-Use the Dockerfile if you are deploying to a container platform. Use this
-path if you are deploying to a VM.
+Both bind to loopback and sit behind the same reverse proxy. Neither is
+obviously better; they isolate different things.
+
+**Docker** keeps RÚNA's filesystem, processes and toolchain entirely separate
+from whatever else the box runs, and `docker rm -f runa` leaves nothing
+behind. The honest cost is that installing Docker adds a root daemon and
+rewrites `iptables`. That is a real change to a shared machine, and it is why
+the deploy publishes to `127.0.0.1:3000` rather than `0.0.0.0:3000` — bound
+to loopback, the container is unreachable from outside whatever happens to
+the firewall rules.
+
+**systemd** adds no daemon and confines the process more tightly than a
+default container does: `DynamicUser=yes`, an empty capability bounding set,
+a syscall filter, `ProtectSystem=strict`. The cost is a Rust toolchain on the
+box and a build that competes for CPU with whatever else runs there.
+
+Pick Docker for operational isolation, systemd for process confinement.
 
 ## What you need
 
