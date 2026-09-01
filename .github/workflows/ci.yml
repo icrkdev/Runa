@@ -93,6 +93,60 @@ jobs:
           node scripts/e2e-smoke.mjs
           node scripts/e2e-browser.mjs
 
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: runa:ci
+          build-args: |
+            RUNA_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: It must actually start, serve, and stay up
+        run: |
+          # These are the EXACT flags scripts/deploy-docker.sh uses. Testing a
+          # looser configuration would prove nothing about the one we ship:
+          # --read-only and --cap-drop=ALL are each capable of stopping the
+          # container from starting at all.
+          docker run -d --name runa-ci \
+            -p 127.0.0.1:3000:3000 \
+            --memory=256m --memory-swap=256m \
+            --pids-limit=256 \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            -e RUNA_BIND=0.0.0.0:3000 \
+            -e RUNA_TRUSTED_PROXY=1 \
+            runa:ci
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/version || true)
+            [ "$code" = "200" ] && break
+            sleep 1
+          done
+          [ "$code" = "200" ] || { echo "no response from /version"; docker logs runa-ci; exit 1; }
+          # The SPA shell must be real, not the empty-string fallback that a
+          # mis-pointed RUNA_DIST produces.
+          curl -sf http://127.0.0.1:3000/ | grep -q '<div id="root">' \
+            || { echo "index.html not served from the image"; docker logs runa-ci; exit 1; }
+          curl -s http://127.0.0.1:3000/version | grep -q '${{ github.sha }}' \
+            || { echo "RUNA_COMMIT build-arg did not reach the binary"; exit 1; }
+          uid=$(docker inspect -f '{{.Config.User}}' runa-ci)
+          [ "$uid" = "nonroot:nonroot" ] || { echo "image runs as $uid, expected nonroot"; exit 1; }
+          # Still up after the checks — catches a container that starts, serves
+          # once, then dies (read-only filesystem hitting a late write, say).
+          sleep 5
+          [ "$(docker inspect -f '{{.State.Running}}' runa-ci)" = "true" ] \
+            || { echo "container did not stay up"; docker logs runa-ci; exit 1; }
+          docker logs runa-ci | tail -5
+          docker rm -f runa-ci
+
   supply-chain:
     runs-on: ubuntu-latest
     steps:
