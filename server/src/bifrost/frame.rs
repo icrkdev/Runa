@@ -125,6 +125,39 @@ mod tests {
         assert_eq!(bytes[28..32], 0b101u32.to_be_bytes());
     }
 
+    /// The invariant `server/fuzz/fuzz_targets/frame_header.rs` asserts. It
+    /// only ran in a weekly cron — one that had never once succeeded — so it
+    /// is checked here on every run as well.
+    #[test]
+    fn decode_encode_roundtrips_for_any_accepted_input() {
+        let mut seed = 0x243F6A8885A308D3u64;
+        let mut accepted = 0u32;
+        for len in [0usize, 1, 31, 32, 33, 64, 200, 1024] {
+            for _ in 0..2000 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let mut data: Vec<u8> = (0..len)
+                    .map(|i| ((seed >> ((i % 8) * 8)) as u8) ^ (i as u8))
+                    .collect();
+                // Force valid magic half the time so decode actually accepts.
+                if len >= 2 && seed & 1 == 0 {
+                    data[0] = MAGIC[0];
+                    data[1] = MAGIC[1];
+                }
+                if let Some(h) = Header::decode(&data) {
+                    accepted += 1;
+                    assert_eq!(
+                        &h.encode()[..],
+                        &data[..HEADER_LEN],
+                        "re-encoding a decoded header must reproduce its bytes"
+                    );
+                }
+            }
+        }
+        assert!(accepted > 1000, "test did not exercise the accepting path");
+    }
+
     #[test]
     fn never_panics_on_arbitrary_input() {
         let mut seed = 0x12345678u64;
