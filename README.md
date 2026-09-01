@@ -387,8 +387,8 @@ npm ci          # only needed once, or if package.json changed
 npx vitest run
 ```
 
-You should see all tests pass. The server has 31 unit tests and 8 integration
-tests. The web suite has over 100 tests covering cryptography, transport,
+You should see all tests pass. The server has 47 unit tests and 23 integration
+tests. The web suite has over 130 tests covering cryptography, transport,
 document convergence, rendering security, and shred consensus.
 
 ---
@@ -426,6 +426,69 @@ This runs the server with:
 - Process count limited to 256
 
 The container serves the built frontend and the API/WebSocket on port 3000.
+
+### Sizing it for the host
+
+Rooms live entirely in RAM, so "how much memory can strangers make this process
+hold" is a number you set, not one you discover. The server prints its ceiling
+at startup:
+
+```
+resource ceiling: retained ciphertext will not exceed max_total_log_mib across
+all rooms  max_rooms=512 max_log_mib_per_room=32 max_total_log_mib=512
+```
+
+`RUNA_MAX_TOTAL_LOG_MB` is the one that actually bounds the process. The
+per-room limit only caps a single document; the total is what a host shared
+with anything else needs.
+
+| Variable | Default | What it bounds |
+|---|---|---|
+| `RUNA_MAX_TOTAL_LOG_MB` | `512` | **Ciphertext retained across all rooms.** The real memory ceiling |
+| `RUNA_MAX_ROOMS` | `512` | Live rooms. Creation returns `503 AT_CAPACITY` past this |
+| `RUNA_MAX_LOG` | `33554432` | Bytes of history in one room, before snapshot compaction |
+| `RUNA_MAX_PEERS` | `32` | Connections per room |
+| `RUNA_MAX_FRAME` | `262144` | Bytes in one WebSocket message |
+| `RUNA_MAX_CONFIG_BLOB` | `4096` | Bytes of encrypted room config held for the room's life |
+| `RUNA_MAX_CONNECTIONS` | `1024` | Concurrent sockets, process-wide. The per-IP limit bounds one address; this bounds the sum |
+| `RUNA_MAX_QUEUE_KB` | `4096` | Bytes one connection may have queued but not yet written to its socket |
+| `RUNA_ROOMS_PER_HR` | `20` | Unlisted rooms one address may create per hour |
+| `RUNA_NAMED_PER_HR` | `5` | Named rooms one address may create per hour |
+| `RUNA_IDLE_CEILING` | `43200` | Seconds an unattended `ttl: none` room survives |
+| `RUNA_ALLOW_CEILING_OPTOUT` | unset | Set to `1` to let clients create rooms that never expire. **Off by default** — an immortal room is a permanent memory reservation any anonymous caller could make |
+
+Sizing for a small shared VM — say 1 GB, with other services on it:
+
+```sh
+RUNA_MAX_TOTAL_LOG_MB=128 RUNA_MAX_ROOMS=64 RUNA_MAX_PEERS=16 \
+RUNA_MAX_CONNECTIONS=256 RUNA_MAX_QUEUE_KB=512 \
+RUNA_TRUSTED_PROXY=1 RUNA_BIND=127.0.0.1:3000 RUNA_DIST=web/dist \
+  ./runa-server
+```
+
+That works out to roughly `25 + 179 + 128 + 32 ≈ 364 MB` worst case, which
+fits a `MemoryMax=512M` unit with room to spare.
+
+The worst case has a closed form, which is the point of the last two:
+
+```
+peak ≈ 25 MB baseline
+     + 1.4 × RUNA_MAX_TOTAL_LOG_MB      (entry overhead and allocator slack)
+     + RUNA_MAX_CONNECTIONS × RUNA_MAX_QUEUE_KB
+     + ~32 MB rate-limiter tables, fully saturated
+```
+
+The 1.4 factor is because the budget counts frame bytes; each log entry also
+carries a 56-byte record and its own allocation. Frames queued for a peer that
+has stopped reading are *not* retained history, so nothing else accounts for
+them — hence the per-connection byte cap rather than a frame count.
+
+> On Linux the server calls `mlockall(MCL_CURRENT | MCL_FUTURE)` so key
+> material cannot reach swap. It needs a raised `RLIMIT_MEMLOCK` (or
+> `CAP_IPC_LOCK`) to take effect; the distroless image runs as `nonroot` with
+> Docker's default 64 KB limit, so the call fails and is ignored. If you want
+> the guarantee, run with `--ulimit memlock=-1` and keep the log budget well
+> under the host's RAM — locked pages cannot be reclaimed under pressure.
 
 ### Behind a reverse proxy
 
@@ -530,6 +593,10 @@ docker run -d --name runa \
 | `npm: command not found` | Node.js isn't installed or PATH issue | Reinstall Node.js, restart terminal |
 | Port 3000 already in use | Something else is listening on that port | Kill the other process or set `RUNA_BIND=127.0.0.1:3001` and update the Vite proxy target |
 | Browser shows blank page | The web app isn't running | Make sure `npm run dev` is still running in its own terminal |
+| Blank page from a deployed server | `RUNA_DIST` does not point at a built bundle | Run `npm run build` in `web/` and set `RUNA_DIST=web/dist`. The server logs a warning at startup when it cannot find `index.html` |
+| "This page is not on HTTPS" | Serving over plain `http://` on a public hostname | Browsers refuse `ws://` from such a page. Put TLS in front — see [Behind a reverse proxy](#behind-a-reverse-proxy). `localhost` is exempt |
+| Room creation fails with `AT_CAPACITY` | The server is at `RUNA_MAX_ROOMS` | Raise it if the host has the memory, or wait for rooms to expire |
+| Only one client can connect behind a proxy | `RUNA_TRUSTED_PROXY` is not set | Every request appears to come from the proxy, so all clients share one rate-limit bucket. Set `RUNA_TRUSTED_PROXY=1` |
 | Browser shows "Connection refused" | The Rust server isn't running | Check that `cargo run --release -p runa-server` is still active |
 | "This link is missing its key" | The `#k=…&s=…` part was stripped from the URL | Ask whoever shared the room for the full link including everything after the `#` |
 | Compilation errors mentioning OpenSSL | Missing system libraries | macOS: `brew install openssl` · Ubuntu: `sudo apt install libssl-dev pkg-config` · Fedora: `sudo dnf install openssl-devel` |

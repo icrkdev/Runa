@@ -1,5 +1,16 @@
 use std::time::Duration;
 
+/// Rooms are pure RAM. Every one of these is a ceiling on how much of the
+/// host a stranger can claim, which is what makes the process safe to run
+/// next to other services.
+pub const DEFAULT_MAX_ROOMS: usize = 512;
+
+/// Process-wide ceiling on retained ciphertext, across every room. This, not
+/// `max_rooms × max_log_bytes`, is the number that bounds the process — the
+/// product of the two per-unit limits is 16 GiB at the shipped defaults,
+/// which is not a budget anyone can plan a host around.
+pub const DEFAULT_TOTAL_LOG_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
@@ -23,6 +34,27 @@ pub struct Config {
     pub named_rooms_created_per_ip_per_hour: u32,
     pub name_lookups_per_ip_per_min: u32,
     pub name_lookups_global_per_min: u32,
+    /// Hard ceiling on live rooms. Creation returns 503 past this.
+    pub max_rooms: usize,
+    /// Hard ceiling on ciphertext retained across all rooms combined.
+    pub max_total_log_bytes: u64,
+    /// Bytes a single connection may have queued but not yet written to its
+    /// socket. Frames in flight are not retained history, so nothing else
+    /// accounts for them.
+    pub max_queued_bytes_per_conn: usize,
+    /// Hard ceiling on concurrent websocket connections, process-wide. The
+    /// per-IP limit bounds one address, not the sum of all of them, and each
+    /// live connection carries an outbound queue — so without this the memory
+    /// ceiling has no closed form.
+    pub max_connections: usize,
+    /// Ceiling on the encrypted room-config blob a client may park on the
+    /// server. Bounded separately from the body limit because it is retained
+    /// for the room's whole life.
+    pub max_config_blob_bytes: usize,
+    /// Allow clients to opt a room out of the idle ceiling (`ttl: none` +
+    /// `ceiling_optout`). Off by default: an immortal, never-swept room is a
+    /// permanent memory reservation that any anonymous caller could make.
+    pub allow_ceiling_optout: bool,
 }
 
 impl Default for Config {
@@ -47,6 +79,12 @@ impl Default for Config {
             named_rooms_created_per_ip_per_hour: 5,
             name_lookups_per_ip_per_min: 20,
             name_lookups_global_per_min: 200,
+            max_rooms: DEFAULT_MAX_ROOMS,
+            max_total_log_bytes: DEFAULT_TOTAL_LOG_BYTES,
+            max_queued_bytes_per_conn: 4 * 1024 * 1024,
+            max_connections: 1024,
+            max_config_blob_bytes: 4096,
+            allow_ceiling_optout: false,
         }
     }
 }
@@ -83,6 +121,26 @@ impl Config {
             env("RUNA_NAME_LOOKUP_IP_MIN", c.name_lookups_per_ip_per_min);
         c.name_lookups_global_per_min =
             env("RUNA_NAME_LOOKUP_GLOBAL_MIN", c.name_lookups_global_per_min);
+        c.max_rooms = env::<usize>("RUNA_MAX_ROOMS", c.max_rooms).max(1);
+        // Expressed in MiB: nobody wants to write a byte count in a unit file.
+        if let Some(mb) = std::env::var("RUNA_MAX_TOTAL_LOG_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+            c.max_total_log_bytes = mb.saturating_mul(1024 * 1024).max(1024 * 1024);
+        }
+        c.max_config_blob_bytes = env("RUNA_MAX_CONFIG_BLOB", c.max_config_blob_bytes);
+        if let Some(kb) = std::env::var("RUNA_MAX_QUEUE_KB").ok().and_then(|v| v.parse::<usize>().ok()) {
+            c.max_queued_bytes_per_conn = kb.saturating_mul(1024);
+        }
+        c.max_connections = env::<usize>("RUNA_MAX_CONNECTIONS", c.max_connections).max(1);
+        c.allow_ceiling_optout =
+            std::env::var("RUNA_ALLOW_CEILING_OPTOUT").is_ok_and(|v| v == "1");
+        // A zero rate would brick the endpoint it guards rather than throttle
+        // it, and the frame limiter multiplies by two, so keep both in range.
+        c.frames_per_conn_per_sec = c.frames_per_conn_per_sec.clamp(1, u32::MAX / 2);
+        c.bytes_per_conn_per_sec = c.bytes_per_conn_per_sec.clamp(1, u64::from(u32::MAX) / 2);
+        c.max_frame_bytes = c.max_frame_bytes.clamp(1024, 8 * 1024 * 1024);
+        c.max_peers_per_room = c.max_peers_per_room.max(1);
+        // A queue smaller than one frame could never accept anything.
+        c.max_queued_bytes_per_conn = c.max_queued_bytes_per_conn.max(c.max_frame_bytes * 2);
         c
     }
 }

@@ -4,6 +4,12 @@ version = "0.0.0"
 publish = false
 edition = "2021"
 
+# cargo-fuzz refuses to run without this marker: "does not look like a
+# cargo-fuzz manifest". It was missing, so fixing the job's working directory
+# alone would have swapped one red scheduled run for another.
+[package.metadata]
+cargo-fuzz = true
+
 [workspace]
 
 [dependencies]

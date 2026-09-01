@@ -49,6 +49,13 @@ What can be done, and what RÚNA does:
 
 - Zero third-party script origins. No CDN, no analytics, no hosted fonts.
 - Strict CSP with `script-src 'self'` and Subresource Integrity on every asset.
+- Trusted Types enforced, with the policy allow-list naming only `default` and
+  the nine policies monaco-editor creates. **Honest limit:** the `default`
+  policy's `createHTML` is a pass-through compatibility shim for Monaco's own
+  DOM writes — it is not a sanitiser. The control that protects document
+  content is `rehype-sanitize` in `web/src/render/pipeline.ts`. What the
+  `default` policy does enforce is `createScriptURL`, which is restricted to
+  same-origin URLs.
 - Reproducible builds, with the SHA-256 of the release bundle published in the
   git tag and served at `/version`.
 - Release artifacts signed with `cosign`.
@@ -56,6 +63,23 @@ What can be done, and what RÚNA does:
   anyone whose threat model includes the operator.
 
 What must **not** be done: claim this problem is solved.
+
+## The honest limit: nonce separation rests on 64 bits
+
+Every peer in a room encrypts under the same AES-256-GCM key. The only thing
+keeping two of them off the same nonce is the 12-byte `sess || counter`, of
+which 8 bytes are random per session (a 4-byte session id and a 4-byte counter
+prefix). Nonce reuse in GCM is not a degradation but a total break: the XOR of
+the two plaintexts falls out and the authentication key leaks.
+
+64 bits puts the birthday bound past 2^32 sessions, which is far beyond any
+room's lifetime. It is not, however, the 96 bits a random-nonce scheme would
+give, and it is worth knowing which number the guarantee rests on. Widening the
+session id is a wire-format change and is deferred to a protocol revision.
+
+The counter never restarts within a session — a client that rebuilt its cipher
+mid-connection would replay nonces, which is why JOIN_ACK re-labels the sender
+in place and is accepted only once per connection.
 
 ## The honest limit: consensus shred is not a confidentiality control
 

@@ -65,8 +65,22 @@ function capNestingDepth() {
 
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const SAFE_SCHEME = /^(https:|mailto:)/i;
-const isSafeHref = (href: string): boolean =>
-  !HAS_SCHEME.test(href) || SAFE_SCHEME.test(href);
+/// Leading C0 control characters and spaces are stripped by the HTML parser
+/// before the scheme is read, so `\tjavascript:` runs. Strip them here too
+/// before deciding, rather than letting the regex miss.
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const stripLeadingControl = (href: string): string => href.replace(/^[\u0000-\u0020]+/, "");
+const isSafeHref = (href: string): boolean => {
+  const h = stripLeadingControl(href);
+  return !HAS_SCHEME.test(h) || SAFE_SCHEME.test(h);
+};
+/// Scheme-relative (`//host/path`) leaves the origin just as surely as an
+/// absolute URL does. Treating it as internal meant it got no `noopener`,
+/// no `noreferrer`, and no "you are leaving RÚNA" confirmation.
+export const isExternalHref = (href: string): boolean => {
+  const h = stripLeadingControl(href);
+  return /^https?:\/\//i.test(h) || h.startsWith("//");
+};
 
 function enforceLinkProtocols() {
   return (tree: Root) => {
@@ -76,7 +90,7 @@ function enforceLinkProtocols() {
         if (!isSafeHref(href)) {
           delete el.properties.href;
         }
-        if (el.properties.href && /^https?:/i.test(href)) {
+        if (el.properties.href && isExternalHref(href)) {
           el.properties.rel = ["noopener", "noreferrer", "nofollow"];
           el.properties.target = "_blank";
         }
@@ -101,7 +115,12 @@ function restoreInlineImages() {
           (c): c is { type: "text"; value: string } =>
             c.type === "text" && typeof c.value === "string",
         );
-        if (textChild) {
+        // Re-check the scheme. This runs *after* rehype-sanitize, so it is
+        // reconstructing an element the sanitiser has already signed off on
+        // and will not see again. The value should only ever be a data URI
+        // that `prepareImagesAndLinks` vetted, but a pass that rebuilds a
+        // URL-bearing node behind the sanitiser has to carry its own check.
+        if (textChild && SAFE_IMAGE_DATA.test(textChild.value)) {
           const altAttr = String(el.properties?.dataAlt ?? "");
           parent.children[index] = {
             type: "element",

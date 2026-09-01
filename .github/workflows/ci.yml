@@ -14,7 +14,7 @@ jobs:
   server:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -24,16 +24,18 @@ jobs:
       - name: Clippy
         run: cargo clippy -p runa-server --all-targets -- -D warnings
       - name: Tests
-        run: cargo test -p runa-server
+        run: cargo test -p runa-server --locked
       - name: Banned patterns in server source (no disk, no plaintext logging)
         run: |
           ! grep -riE "sqlite|rusqlite|File::create|fs::write|OpenOptions" server/src
           ! grep -rE "println!|dbg!" server/src
+      - name: Server-authored frames are never enveloped, and limits are bounded
+        run: cargo test -p runa-server --locked --test hardening
 
   web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -64,7 +66,7 @@ jobs:
   browser-e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
@@ -94,7 +96,7 @@ jobs:
   supply-chain:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo-deny (bans database crates, licence check)
@@ -108,13 +110,22 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Three things this invocation has to get right, each hidden behind the
+      # previous one:
+      #   1. cargo-fuzz resolves targets at `<cwd>/fuzz/Cargo.toml`, so it runs
+      #      from the crate root — not from server/fuzz, which made it look for
+      #      server/fuzz/fuzz/Cargo.toml.
+      #   2. The manifest needs `[package.metadata] cargo-fuzz = true`.
+      #   3. `+nightly` is explicit because rust-toolchain.toml pins 1.98.0 at
+      #      the repo root, and that pin overrides the nightly this job
+      #      installs. cargo-fuzz needs -Z flags, so it fails without it.
       - name: Run fuzz targets (15 min each)
-        working-directory: server/fuzz
+        working-directory: server
         run: |
-          cargo fuzz run frame_header -- -max_total_time=900
-          cargo fuzz run room_name -- -max_total_time=900
+          cargo +nightly fuzz run frame_header -- -max_total_time=900
+          cargo +nightly fuzz run room_name -- -max_total_time=900

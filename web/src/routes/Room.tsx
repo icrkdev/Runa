@@ -17,7 +17,7 @@ import {
   passphraseMaterial,
 } from "../keys-session";
 import { Api } from "../api";
-import { renderMarkdown } from "../render/pipeline";
+import { renderMarkdown, isExternalHref } from "../render/pipeline";
 import { type TemperState } from "../ui/temper";
 import { QuorumDial, useAccent } from "../ui/dial";
 import { ShredModal, THRESHOLD_K } from "../ui/ShredModal";
@@ -41,6 +41,7 @@ type Phase =
   | { kind: "connecting" }
   | { kind: "missing-key" }
   | { kind: "auth-failed" }
+  | { kind: "insecure-origin" }
   | { kind: "live"; session: Session; peerCount: number }
   | { kind: "purged" };
 
@@ -101,8 +102,16 @@ function JoinableRoom(props: RoomProps) {
           linkSecret: keys.linkSecret,
           roomSalt: keys.roomSalt,
         });
-      } catch {
-        if (!cancelled) setPhase({ kind: "auth-failed" });
+      } catch (e) {
+        if (cancelled) return;
+        // The browser refuses ws:// from a non-loopback page, so an operator
+        // who has not put TLS in front gets a hard failure here. Saying
+        // "wrong passphrase" sends them looking in entirely the wrong place.
+        setPhase(
+          e instanceof Error && e.message === "INSECURE_ORIGIN"
+            ? { kind: "insecure-origin" }
+            : { kind: "auth-failed" },
+        );
       }
     };
     void boot();
@@ -124,13 +133,10 @@ function JoinableRoom(props: RoomProps) {
         args.linkSecret,
         args.roomSalt,
       );
+      const wsInfo = websocketUrl(args.roomIdHex);
       const session = await Session.create(
         {
-          url: (() => {
-          const wsInfo = websocketUrl(args.roomIdHex);
-          sessionRef.current?.setInsecure(wsInfo.insecure);
-          return wsInfo.url;
-        })(),
+          url: wsInfo.url,
           roomIdHex: args.roomIdHex,
           authKey,
           contentKey,
@@ -182,6 +188,9 @@ function JoinableRoom(props: RoomProps) {
         },
       );
       sessionRef.current = session;
+      // Was previously called on `sessionRef.current` before it was assigned,
+      // so the plain-ws warning could never fire.
+      session.setInsecure(wsInfo.insecure);
     },
     [],
   );
@@ -303,6 +312,27 @@ function JoinableRoom(props: RoomProps) {
     );
   }
 
+  if (phase.kind === "insecure-origin") {
+    return (
+      <main className="landing">
+        <h1 className="mono">RÚNA</h1>
+        <p className="micro-label tag">THIS PAGE IS NOT ON HTTPS</p>
+        <div className="panel">
+          <p>
+            RÚNA will not open an unencrypted WebSocket from a page served over
+            plain HTTP, so the editor cannot connect. This is a deployment
+            problem, not a problem with your link.
+          </p>
+          <p style={{ marginBottom: 0 }}>
+            Whoever runs this server needs to put HTTPS in front of it — see
+            <code className="mono"> Deploying to the internet </code> in the
+            README. <code className="mono">localhost</code> is exempt.
+          </p>
+        </div>
+      </main>
+    );
+  }
+
   if (phase.kind === "auth-failed") {
     return (
       <main className="landing">
@@ -316,8 +346,7 @@ function JoinableRoom(props: RoomProps) {
   }
 
   if (phase.kind === "purged") {
-    window.location.replace("/gone.html");
-    return null;
+    return <Purged />;
   }
 
   if (phase.kind !== "live") {
@@ -460,7 +489,7 @@ function JoinableRoom(props: RoomProps) {
             const anchor = (e.target as HTMLElement).closest("a");
             if (!anchor) return;
             const href = anchor.getAttribute("href") ?? "";
-            if (!/^https?:\/\//i.test(href)) return;
+            if (!isExternalHref(href)) return;
             if (externalConfirmed) return;
             e.preventDefault();
             if (window.confirm("This leaves RÚNA and tells that site you were here.")) {
@@ -523,6 +552,13 @@ const TEMBER_LABEL: Partial<Record<TemperState, string>> = {
   BURN: "BURN",
 };
 
+function Purged() {
+  useEffect(() => {
+    window.location.replace("/gone.html");
+  }, []);
+  return null;
+}
+
 function ShredVotePrompt({ onDecide }: { onDecide(choice: "APPROVE" | "REJECT"): void }) {
   return (
     <div className="modal-backdrop">
@@ -552,13 +588,18 @@ function PassphraseGate({ name, onSubmit }: { name: string; onSubmit(p: string):
         className="panel"
         onSubmit={(e) => {
           e.preventDefault();
+          if (busy) return;
           setBusy(true);
-          void onSubmit(value);
+          // Without the reset the button stays stuck on "Deriving keys…" for
+          // any path that returns without replacing this component.
+          void onSubmit(value).finally(() => setBusy(false));
         }}
       >
         <div className="field">
           <label className="micro-label" htmlFor="pp">PASSPHRASE</label>
-          <input id="pp" type="password" autoComplete="current-passphrase" value={value} onChange={(e) => setValue(e.target.value)} />
+          {/* Not a real autocomplete token: browsers fall back to "on" and
+              may offer to remember a passphrase for an ephemeral room. */}
+          <input id="pp" type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} />
         </div>
         <button disabled={busy}>{busy ? "Deriving keys…" : "Enter room"}</button>
       </form>

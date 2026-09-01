@@ -197,8 +197,8 @@ function connectWs(base, roomIdHex) {
 async function main() {
   const linkSecret = crypto.getRandomValues(new Uint8Array(32));
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const roomId = crypto.getRandomValues(new Uint8Array(16));
-  const roomIdHex = hex(roomId);
+  let roomId = crypto.getRandomValues(new Uint8Array(16));
+  let roomIdHex = hex(roomId);
 
   const { authKey, contentKey } = await deriveKeys(linkSecret, salt);
   const verifier = createHash("sha256").update(authKey).digest().toString("base64");
@@ -208,7 +208,6 @@ async function main() {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      id: roomIdHex,
       verifier,
       kdf: { m_kib: 65536, t: 3, p: 1, salt: b64(salt) },
       ttl: { kind: "idle-peers", secs: 3600 },
@@ -217,6 +216,10 @@ async function main() {
   if (createRes.status !== 201) {
     throw new Error(`create failed: ${createRes.status} ${await createRes.text()}`);
   }
+  // Unlisted ids are assigned by the server so creation cannot be used to
+  // probe which rooms are live.
+  roomIdHex = (await createRes.json()).room_id;
+  roomId = Buffer.from(roomIdHex, "hex");
 
   const makeJoinBody = async () =>
     JSON.stringify({

@@ -13,7 +13,11 @@ export const RUNA_SCHEMA = {
     "dl", "dt", "dd",
     "input",
     "img", "picture", "source",
-    "svg", "math", "annotation", "semantics", "mrow", "mi", "mn", "mo", "msup", "msub", "mfrac", "mroot", "msqrt", "mtext", "mspace", "mstyle", "munderover", "munder", "mover", "mmultiscripts", "mprescripts", "mtable", "mtr", "mtd", "mphantom",
+    // KaTeX draws radicals, stretchy delimiters and rules as inline SVG.
+    // Allowing <svg> but not its children left every √ and every big brace
+    // rendering as an empty box.
+    "svg", "path", "line", "rect", "g", "defs", "use",
+    "math", "annotation", "semantics", "mrow", "mi", "mn", "mo", "msup", "msub", "mfrac", "mroot", "msqrt", "mtext", "mspace", "mstyle", "munderover", "munder", "mover", "mmultiscripts", "mprescripts", "mtable", "mtr", "mtd", "mphantom",
     "details", "summary", "time", "var",
   ],
   attributes: {
@@ -41,20 +45,28 @@ export const RUNA_SCHEMA = {
       ["aria-hidden"],
     ],
     path: ["d", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin"],
+    line: ["x1", "y1", "x2", "y2", "stroke", "strokeWidth", "strokeLinecap"],
+    rect: ["x", "y", "width", "height", "fill"],
+    g: ["fill", "stroke", "transform"],
+    use: ["x", "y", "width", "height", "fill"],
     annotation: [["encoding"]],
     math: [["xmlns", "http://www.w3.org/1998/Math/MathML"], "display"],
     details: ["open"],
   },
-  strip: ["script", "style", "iframe", "object", "embed", "link", "meta", "base", "form", "button"],
+  strip: [
+    "script", "style", "iframe", "object", "embed", "link", "meta", "base",
+    "form", "button", "foreignObject", "animate", "set", "handler",
+  ],
+  /// hast-util-sanitize only filters URL schemes for attributes named here.
+  /// The schema replaces the library default wholesale, so omitting this key
+  /// silently disabled protocol checking entirely and left `enforceLinkProtocols`
+  /// as the only thing between a `javascript:` href and the DOM.
+  protocols: {
+    href: ["http", "https", "mailto"],
+    src: ["http", "https"],
+    cite: ["http", "https"],
+  },
   clobberPrefix: "runa-clobber-",
 } as unknown as Schema;
 
 export const MAX_NESTING_DEPTH = 100;
-
-export function exceedsNestingDepth(node: unknown, depth = 0): boolean {
-  if (depth > MAX_NESTING_DEPTH) return true;
-  if (node === null || typeof node !== "object") return false;
-  const children = (node as { children?: unknown[] }).children;
-  if (!Array.isArray(children)) return false;
-  return children.some((child) => exceedsNestingDepth(child, depth + 1));
-}

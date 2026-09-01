@@ -65,11 +65,9 @@ async fn create_room(server: &str) -> RoomKeys {
         getrandom::fill(&mut s).unwrap();
         s
     };
-    let room_id = random_room_id();
     let resp = client
         .post(format!("{server}/api/rooms/unlisted"))
         .json(&json!({
-            "id": hex::encode(room_id),
             "verifier": verifier_for(&auth_key),
             "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(salt) },
             "ttl": { "kind": "idle-peers", "secs": 3600 },
@@ -80,7 +78,9 @@ async fn create_room(server: &str) -> RoomKeys {
     assert_eq!(resp.status(), 201, "room creation failed: {}", resp.status());
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["ok"], true);
-    RoomKeys { room_id_hex: hex::encode(room_id), auth_key, salt }
+    // Unlisted ids are assigned by the server so creation cannot be used to
+    // probe which ids are live.
+    RoomKeys { room_id_hex: body["room_id"].as_str().unwrap().to_string(), auth_key, salt }
 }
 
 fn rand_bytes_32() -> [u8; 32] {

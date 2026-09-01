@@ -245,3 +245,43 @@ describe("positive render corpus — safe content must survive", () => {
     });
   }
 });
+
+describe("hardening regressions", () => {
+  it("keeps KaTeX radical and delimiter paths", async () => {
+    const { html } = await renderMarkdown("$$\\sqrt{\\frac{a}{b}}$$");
+    expect(html).toContain("<svg");
+    expect(html).toContain("<path");
+  });
+
+  it("still refuses script-bearing and control-prefixed schemes", async () => {
+    for (const src of [
+      "[a](javascript:alert(1))",
+      "[a](JaVaScRiPt:alert(1))",
+      "[a](\tjavascript:alert(1))",
+      "[a]( javascript:alert(1))",
+      "[a](vbscript:msgbox(1))",
+      "[a](data:text/html,<script>alert(1)</script>)",
+    ]) {
+      const { html } = await renderMarkdown(src);
+      expect(html).not.toMatch(/href=/);
+    }
+  });
+
+  it("marks scheme-relative links as leaving the origin", async () => {
+    const { html } = await renderMarkdown("[a](//evil.example/x)");
+    expect(html).toContain('href="//evil.example/x"');
+    expect(html).toContain("noopener");
+    expect(html).toContain("noreferrer");
+  });
+
+  it("does not restore a non-image data URI behind the sanitiser", async () => {
+    const { html } = await renderMarkdown("![alt](data:image/svg+xml;base64,AAAA)");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("svg+xml");
+  });
+
+  it("keeps safe inline raster images", async () => {
+    const { html } = await renderMarkdown("![alt](data:image/png;base64,AAAA)");
+    expect(html).toContain('<img src="data:image/png;base64,AAAA"');
+  });
+});

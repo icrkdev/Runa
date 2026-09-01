@@ -104,7 +104,6 @@ export class Session {
         onDocUpdate: (sender, envelope) =>
           sessionRef?.handleRemoteUpdate(envelope) ?? void sender,
         onSnapshot: (sender, covers, blob) => sessionRef?.handleSnapshot(sender, covers, blob),
-        onSyncResponse: () => {},
         onAwareness: (sender, pt) => sessionRef?.awareness?.receive(sender, pt),
         onShredFrame: (ft, sender, pt) => void sessionRef?.handleShredFrame(ft, sender, pt),
         onPeerJoin: (entry) => {
@@ -117,8 +116,8 @@ export class Session {
           events.onPeersChanged(roster.size);
         },
         onPurge: (reason) => events.onPurge(reason),
-        onTtlExtended: (addSecs, _effective, addedBy) =>
-          sessionRef?.handleTtlExtended(addSecs, addedBy),
+        onTtlExtended: (remaining, effective, addedBy) =>
+          sessionRef?.handleTtlExtended(remaining, effective, addedBy),
         onError: () => events.onTemper("WATCH"),
         onEpochStale: () => events.onTemper("WATCH"),
         onDisconnected: () => events.onTemper("COLD"),
@@ -214,7 +213,9 @@ export class Session {
     this.events.onPeersChanged(this.internals.roster.size);
     this.events.onTemper("SECURE");
     this.events.onJoinAck(ack);
-    this.socket.sendSyncRequest(0);
+    // Resume rather than replay: asking from 0 on every reconnect pulls the
+    // entire room log down again each time.
+    this.socket.sendSyncRequest(this.doc.syncFrom());
   }
 
   private async decryptConfigBlob(
@@ -247,12 +248,22 @@ export class Session {
   /// remote update or peer change refreshes it, so a tab never
   /// self-destructs mid-session while the server still considers the room
   /// alive.
+  private visibilityHandler: (() => void) | null = null;
+
   private armExpiryClock(model: ExpiryModel): void {
     this.expiry = model;
     if (this.expiryTimer) clearInterval(this.expiryTimer);
+    this.expiryTimer = null;
+    // Re-armed on every JOIN_ACK, so every reconnect used to add another
+    // listener that was never removed.
+    if (this.visibilityHandler) {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+      this.visibilityHandler = null;
+    }
     if (model.kind === "none") return;
     this.expiryTimer = setInterval(() => this.tickExpiry(), 250);
-    document.addEventListener("visibilitychange", () => this.tickExpiry());
+    this.visibilityHandler = () => this.tickExpiry();
+    document.addEventListener("visibilitychange", this.visibilityHandler);
     this.tickExpiry();
   }
 
@@ -293,10 +304,16 @@ export class Session {
     }
   }
 
-  handleTtlExtended(addSecs: number, addedBy: string): void {
-    if (this.expiry.kind === "absolute") {
-      this.expiry.deadlinePerfMs += addSecs * 1000;
+  /// `remainingSecs` is what the server says is left, not what we asked for.
+  /// The server clamps extensions at a ceiling, so adding our own request to
+  /// the local clock would drift past the real deadline — and the extender
+  /// used to count its own request twice, once locally and once from the
+  /// broadcast it also receives.
+  handleTtlExtended(remainingSecs: number, addSecs: number, addedBy: string): void {
+    if (this.expiry.kind === "absolute" && remainingSecs > 0) {
+      this.expiry.deadlinePerfMs = performance.now() + remainingSecs * 1000;
     } else if (this.expiry.kind === "idle") {
+      if (remainingSecs > 0) this.expiry.windowMs = remainingSecs * 1000;
       this.refreshActivity();
     }
     this.wiped = false;
@@ -304,8 +321,9 @@ export class Session {
   }
 
   extendExpiry(addSecs = 1800): void {
+    // Fire and wait: the server echoes the authoritative deadline back to
+    // every peer, this one included.
     this.socket.sendTtlExtend(addSecs);
-    this.handleTtlExtended(addSecs, this.internals.myPeerId);
   }
 
   tallySummary(): { approved: number; total: number; waitingOn?: string } {
@@ -315,16 +333,29 @@ export class Session {
   }
 
   private handleRemoteUpdate(envelope: Uint8Array): void {
-    const len = envelope.length >= 4 ? new DataView(envelope.buffer, envelope.byteOffset).getUint32(0, false) : 0;
+    if (envelope.length < 4) return;
+    const len = new DataView(envelope.buffer, envelope.byteOffset, envelope.byteLength)
+      .getUint32(0, false);
     if (len === 0) return;
-    this.doc.applyRemote(envelope);
+    // A peer holding the room key can still send a malformed CRDT update.
+    // These handlers run from an unawaited promise, so a throw here becomes
+    // an unhandled rejection and silently stops the rest of the pipeline.
+    try {
+      this.doc.applyRemote(envelope);
+    } catch {
+      return;
+    }
     this.refreshActivity();
-    this.refreshOwnHash();
+    void this.refreshOwnHash();
   }
 
   private handleSnapshot(_sender: Uint8Array, _covers: bigint, blobWithPrefix: Uint8Array): void {
-    this.doc.applyRemote(blobWithPrefix);
-    this.refreshOwnHash();
+    try {
+      this.doc.applyRemote(blobWithPrefix);
+    } catch {
+      return;
+    }
+    void this.refreshOwnHash();
   }
 
   /// Deterministic snapshot election (spec §5.8): the peer with the lowest
@@ -356,11 +387,30 @@ export class Session {
     }
     if (!on) return;
     this.steadyTimer = setInterval(() => {
-      void this.socket.sendUpdate(wrapWithLengthAndPad(new Uint8Array(0)));
+      // Cover traffic goes out as AWARENESS, not DOC_UPDATE. The server
+      // appends every DOC_UPDATE to the room log and cannot tell padded cover
+      // frames from padded real edits — that is the point of the padding — so
+      // sending it as an update quietly ate the room's log budget until real
+      // edits started being refused. AWARENESS is relayed and never stored.
+      void this.socket.sendAwareness(wrapWithLengthAndPad(new Uint8Array(0)));
     }, intervalMs);
   }
 
+  private hashPending = false;
+
   private async refreshOwnHash(): Promise<void> {
+    // Digesting the whole document on every remote update is O(doc) per
+    // keystroke. One in flight at a time is enough for a divergence check.
+    if (this.hashPending) return;
+    this.hashPending = true;
+    try {
+      await this.computeOwnHash();
+    } finally {
+      this.hashPending = false;
+    }
+  }
+
+  private async computeOwnHash(): Promise<void> {
     const text = this.doc.value;
     const digest = await crypto.subtle.digest(
       "SHA-256",
@@ -380,7 +430,13 @@ export class Session {
   }
 
   private async handleShredFrame(frameType: number, sender: Uint8Array, plaintext: Uint8Array): Promise<void> {
-    const decoded = cbor2.decode(plaintext) as Record<string, unknown>;
+    let decoded: Record<string, unknown>;
+    try {
+      decoded = cbor2.decode(plaintext) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    if (!decoded || typeof decoded !== "object") return;
     if (frameType === FT.SHRED_REQUEST) {
       const request = decoded as unknown as ShredRequest;
       if (request.initiatorPeerIdB64 === this.internals.myPeerId) return;
@@ -453,7 +509,11 @@ export class Session {
   dropKeys(): void {
     // CryptoKey references are dropped so the runtime can reclaim the last
     // handles; non-extractable keys cannot be serialised out of the tab.
+    // The socket and its cipher hold their own references, so clearing only
+    // the session's copy left the key reachable for the tab's lifetime.
     (this as unknown as { cfg: { contentKey: CryptoKey | null } }).cfg.contentKey = null;
+    this.socket.dropKeys();
+    this.awareness?.dispose();
     this.awareness = null;
   }
 

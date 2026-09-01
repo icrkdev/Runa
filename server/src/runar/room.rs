@@ -8,7 +8,7 @@ use secrecy::{ExposeSecret, SecretBox as Secret};
 use tokio::sync::mpsc;
 
 use crate::bifrost::frame::Header;
-use crate::runar::log::RoomLog;
+use crate::runar::log::{LogBudget, RoomLog};
 use crate::runar::names;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,12 +57,109 @@ pub struct ConnectedPeer {
     pub peer_id: [u8; 16],
     pub pubkey: Option<Vec<u8>>,
     pub joined_at_seq: u64,
-    pub tx: mpsc::Sender<Bytes>,
+    pub tx: PeerTx,
 }
 
+/// A peer's outbound queue, bounded in **bytes** rather than frames.
+///
+/// A plain 512-slot channel of `Bytes` sounds bounded and is not: each slot
+/// may hold a whole `max_frame_bytes` frame, so one peer that stops reading
+/// can park 512 × 256 KiB = 128 MiB that no per-room or process log budget
+/// accounts for. Frames in flight are not retained history, so the log budget
+/// never sees them. Counting bytes here is what makes the process ceiling in
+/// `LogBudget` an actual ceiling rather than an estimate.
+#[derive(Clone)]
+pub struct PeerTx {
+    tx: mpsc::Sender<Bytes>,
+    queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    max_bytes: usize,
+}
+
+impl PeerTx {
+    pub fn new(tx: mpsc::Sender<Bytes>, max_bytes: usize) -> Self {
+        PeerTx {
+            tx,
+            queued: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_bytes,
+        }
+    }
+
+    /// A handle the reader uses to give bytes back as it drains them.
+    pub fn meter(&self) -> QueueMeter {
+        QueueMeter { queued: self.queued.clone() }
+    }
+
+    /// Non-blocking. `Err` means the peer is not keeping up and should be
+    /// dropped — the same contract the raw channel's `try_send` had.
+    pub fn try_send(&self, frame: Bytes) -> Result<(), PeerBacklogged> {
+        let n = frame.len();
+        if self.queued.fetch_add(n, Ordering::SeqCst) + n > self.max_bytes {
+            self.queued.fetch_sub(n, Ordering::SeqCst);
+            return Err(PeerBacklogged);
+        }
+        if self.tx.try_send(frame).is_err() {
+            self.queued.fetch_sub(n, Ordering::SeqCst);
+            return Err(PeerBacklogged);
+        }
+        Ok(())
+    }
+
+    /// Waits for room, so a log replay exerts real backpressure instead of
+    /// dropping history on the floor. Gives up once the reader has clearly
+    /// stopped draining.
+    pub async fn send_backpressured(&self, frame: Bytes) -> Result<(), PeerBacklogged> {
+        for _ in 0..600 {
+            match self.try_send(frame.clone()) {
+                Ok(()) => return Ok(()),
+                Err(_) if self.tx.is_closed() => return Err(PeerBacklogged),
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        Err(PeerBacklogged)
+    }
+
+    #[cfg(test)]
+    pub fn queued_bytes(&self) -> usize {
+        self.queued.load(Ordering::SeqCst)
+    }
+}
+
+/// The peer is not keeping up and should be dropped.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PeerBacklogged;
+
+/// Held by the connection's read loop; returns quota as frames are written
+/// out to the socket.
+pub struct QueueMeter {
+    queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl QueueMeter {
+    pub fn release(&self, n: usize) {
+        self.queued
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                Some(cur.saturating_sub(n))
+            })
+            .ok();
+    }
+}
+
+/// Per-room attempt limiter.
+///
+/// A sliding window, and deliberately nothing more. `record_failure` computes
+/// an escalating backoff that is reported but never armed, and that is the
+/// right call rather than an oversight:
+///
+/// The credential the server checks is SHA-256 over a 32-byte HKDF output, so
+/// there is nothing here to brute-force directly. An attacker guessing
+/// *passphrases* pays 64 MiB of Argon2id per attempt in their own browser
+/// before they can even send one, and the window already caps them at five
+/// per minute. An escalating lockout would therefore buy almost nothing
+/// against an attacker — while handing anyone who knows a room id a way to
+/// lock its actual occupants out for a quarter of an hour by failing auth on
+/// purpose. The window is per room, so that cost lands on the wrong people.
 struct AuthGuard {
     hits: Mutex<std::collections::VecDeque<Instant>>,
-    locked_until: Mutex<Option<Instant>>,
     max_per_min: u32,
 }
 
@@ -70,20 +167,11 @@ impl AuthGuard {
     fn new(max_per_min: u32) -> Self {
         AuthGuard {
             hits: Mutex::new(std::collections::VecDeque::new()),
-            locked_until: Mutex::new(None),
             max_per_min,
         }
     }
 
     fn allow(&self) -> bool {
-        let mut lock = self.locked_until.lock().unwrap();
-        if let Some(t) = *lock {
-            if Instant::now() < t {
-                return false;
-            }
-            *lock = None;
-        }
-        drop(lock);
         let mut hits = self.hits.lock().unwrap();
         let now = Instant::now();
         while hits.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60)) {
@@ -96,6 +184,8 @@ impl AuthGuard {
         true
     }
 
+    /// Advisory only — see the note on `AuthGuard`. Reported so operators can
+    /// see pressure on a room in the logs; not used to gate anything.
     fn record_failure(&self) -> Duration {
         let n = self.hits.lock().unwrap().len() as u64;
         Duration::from_secs(30u64.saturating_mul(n.saturating_sub(1).max(1)).min(15 * 60))
@@ -103,7 +193,6 @@ impl AuthGuard {
 
     fn reset(&self) {
         self.hits.lock().unwrap().clear();
-        *self.locked_until.lock().unwrap() = None;
     }
 }
 
@@ -129,8 +218,27 @@ pub struct Room {
     pub epoch: AtomicU32,
     pub ttl_extension_secs: AtomicU64,
     auth_guard: AuthGuard,
-    purge_acks: Mutex<std::collections::HashMap<String, std::collections::HashSet<[u8; 16]>>>,
+    purge_acks: Mutex<std::collections::HashMap<String, PurgeAckSet>>,
 }
+
+/// Acks for one request id, with the instant they were first seen so the
+/// ledger can be swept. Unbounded growth here was a remote memory-exhaustion
+/// vector: one peer could mint a new entry per frame, forever.
+struct PurgeAckSet {
+    peers: std::collections::HashSet<[u8; 16]>,
+    opened: Instant,
+}
+
+/// Hard caps on the purge-ack ledger. A request id is a client-chosen string;
+/// nothing about it is trusted.
+pub const MAX_PURGE_REQUEST_IDS: usize = 16;
+pub const MAX_PURGE_REQUEST_ID_LEN: usize = 128;
+const PURGE_ACK_TTL: Duration = Duration::from_secs(300);
+
+/// A room may never be extended past this, no matter how many peers ask.
+/// Without it a single peer could pin a room — and its log — in memory
+/// forever by replaying TTL_EXTEND, which defeats the entire expiry model.
+pub const MAX_TTL_EXTENSION_SECS: u64 = 720 * 3600;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum JoinError {
@@ -157,6 +265,31 @@ impl Room {
         auth_max_per_min: u32,
         max_peers: usize,
     ) -> Self {
+        Room::with_budget(
+            id, class, created_unix, ttl, ceiling_optout, verifier, kdf_m_kib, kdf_t, kdf_p,
+            salt, config_blob, log_max_bytes, auth_max_per_min, max_peers,
+            LogBudget::unlimited(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_budget(
+        id: [u8; 16],
+        class: RoomClass,
+        created_unix: u64,
+        ttl: Ttl,
+        ceiling_optout: bool,
+        verifier: Option<[u8; 32]>,
+        kdf_m_kib: u32,
+        kdf_t: u32,
+        kdf_p: u32,
+        salt: [u8; 16],
+        config_blob: Option<Bytes>,
+        log_max_bytes: u64,
+        auth_max_per_min: u32,
+        max_peers: usize,
+        budget: std::sync::Arc<LogBudget>,
+    ) -> Self {
         let now = Instant::now();
         Room {
             id,
@@ -173,7 +306,7 @@ impl Room {
             kdf_p,
             salt,
             config_blob,
-            log: std::sync::RwLock::new(RoomLog::new(log_max_bytes)),
+            log: std::sync::RwLock::new(RoomLog::with_budget(log_max_bytes, budget)),
             peers: Mutex::new(Vec::new()),
             max_peers,
             next_seq: AtomicU64::new(1),
@@ -208,7 +341,7 @@ impl Room {
         *self.last_edit.lock().unwrap() = Instant::now();
     }
 
-    pub fn add_peer(&self, pubkey: Option<Vec<u8>>, tx: mpsc::Sender<Bytes>) -> Result<RosterEntry, JoinError> {
+    pub fn add_peer(&self, pubkey: Option<Vec<u8>>, tx: PeerTx) -> Result<RosterEntry, JoinError> {
         let mut peers = self.peers.lock().unwrap();
         if peers.len() >= self.max_peers {
             return Err(JoinError::Full);
@@ -237,7 +370,7 @@ impl Room {
         peers.len() != before
     }
 
-    pub fn sender_for(&self, peer_id: &[u8; 16]) -> Option<tokio::sync::mpsc::Sender<Bytes>> {
+    pub fn sender_for(&self, peer_id: &[u8; 16]) -> Option<PeerTx> {
         self.peers.lock().unwrap()
             .iter().find(|p| p.peer_id == *peer_id)
             .map(|p| p.tx.clone())
@@ -252,9 +385,31 @@ impl Room {
             .collect()
     }
 
-    /// Fan out a frame to every connected peer except the origin. The outbound
-    /// copy carries a 16-byte sender envelope between header and body so that
-    /// receivers can rebuild their AEAD (docs/PROTOCOL.md amendment C).
+    /// Fan out a **server-authored** frame verbatim. PROTOCOL.md amendment C
+    /// is explicit that JOIN_ACK, PEER_JOIN, PEER_LEAVE, PURGE, ERROR and
+    /// TTL_EXTEND are never enveloped — receivers read their JSON straight
+    /// out of the body. `broadcast` would prepend 16 sender bytes and make
+    /// that JSON unparseable, so event frames must come through here.
+    pub async fn broadcast_event(&self, frame: &Bytes, exclude: Option<[u8; 16]>) {
+        let peers = self.peers.lock().unwrap();
+        let mut dead = Vec::new();
+        for p in peers.iter() {
+            if Some(p.peer_id) == exclude {
+                continue;
+            }
+            if p.tx.try_send(frame.clone()).is_err() {
+                dead.push(p.peer_id);
+            }
+        }
+        drop(peers);
+        for id in dead {
+            self.remove_peer(&id);
+        }
+    }
+
+    /// Fan out a relayed peer frame to every connected peer except the origin.
+    /// The outbound copy carries a 16-byte sender envelope between header and
+    /// body so that receivers can rebuild their AEAD (amendment C).
     pub async fn broadcast(&self, frame: &Bytes, sender: Option<[u8; 16]>) {
         let peers = self.peers.lock().unwrap();
         let mut dead = Vec::new();
@@ -281,16 +436,40 @@ impl Room {
     /// a lone hostile peer must never be able to destroy the shared copy,
     /// and the server holds no keys that would make premature destruction
     /// "safe". Fail-closed means fail-forever until real consensus.
-    pub fn note_purge_ack(
-        &self,
-        request_id: &str,
-        peer_id: [u8; 16],
-        total_peers: usize,
-    ) -> PurgeAckStatus {
+    pub fn note_purge_ack(&self, request_id: &str, peer_id: [u8; 16]) -> PurgeAckStatus {
+        if request_id.is_empty() || request_id.len() > MAX_PURGE_REQUEST_ID_LEN {
+            return PurgeAckStatus::Pending;
+        }
+        // The quorum is measured against the peers connected *right now*, and
+        // an ack only counts while its peer is still one of them. Previously
+        // the ledger kept every ack forever and compared its size against a
+        // live count, so one peer could bank acks from throwaway connections,
+        // drop them to shrink the denominator, and purge a room whose other
+        // occupants had never agreed to anything.
+        let live: std::collections::HashSet<[u8; 16]> =
+            self.peers.lock().unwrap().iter().map(|p| p.peer_id).collect();
+        if !live.contains(&peer_id) {
+            return PurgeAckStatus::Pending;
+        }
+
         let mut acks = self.purge_acks.lock().unwrap();
-        let set = acks.entry(request_id.to_string()).or_default();
-        set.insert(peer_id);
-        if set.len() >= total_peers.max(1) {
+        let now = Instant::now();
+        acks.retain(|_, set| now.duration_since(set.opened) < PURGE_ACK_TTL);
+        if !acks.contains_key(request_id) && acks.len() >= MAX_PURGE_REQUEST_IDS {
+            // Full of unresolved votes: drop the oldest rather than grow.
+            if let Some(oldest) =
+                acks.iter().min_by_key(|(_, s)| s.opened).map(|(k, _)| k.clone())
+            {
+                acks.remove(&oldest);
+            }
+        }
+        let set = acks.entry(request_id.to_string()).or_insert_with(|| PurgeAckSet {
+            peers: std::collections::HashSet::new(),
+            opened: now,
+        });
+        set.peers.insert(peer_id);
+        let acked_and_live = set.peers.intersection(&live).count();
+        if acked_and_live >= live.len() && !live.is_empty() {
             PurgeAckStatus::AllAcked(request_id.to_string())
         } else {
             PurgeAckStatus::Pending
@@ -300,18 +479,32 @@ impl Room {
     /// Any single peer may extend the timer (spec §5.9.4). Extension pushes
     /// the effective deadline out without ever shortening it.
     pub fn extend_ttl(&self, add_secs: u64) -> u64 {
+        // Clamp against the ceiling before mutating anything, so replaying the
+        // frame cannot push the deadline out without limit.
+        let mut granted = 0u64;
         let total = self
             .ttl_extension_secs
-            .fetch_add(add_secs, Ordering::SeqCst)
-            .saturating_add(add_secs);
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                granted = add_secs.min(MAX_TTL_EXTENSION_SECS.saturating_sub(cur));
+                Some(cur.saturating_add(granted))
+            })
+            .map(|prev| prev.saturating_add(granted))
+            .unwrap_or(0);
+        if granted == 0 {
+            return total;
+        }
         match self.ttl.kind {
             TtlKind::IdleEdit => {
-                *self.last_edit.lock().unwrap() +=
-                    Duration::from_secs(add_secs.min(86_400));
+                let mut last = self.last_edit.lock().unwrap();
+                *last = last
+                    .checked_add(Duration::from_secs(granted.min(86_400)))
+                    .unwrap_or(*last);
             }
             TtlKind::IdlePeers => {
-                *self.last_peer_left.lock().unwrap() =
-                    Instant::now() + Duration::from_secs(add_secs.min(86_400));
+                let mut last = self.last_peer_left.lock().unwrap();
+                *last = Instant::now()
+                    .checked_add(Duration::from_secs(granted.min(86_400)))
+                    .unwrap_or(*last);
             }
             _ => {}
         }
@@ -371,18 +564,65 @@ pub enum CreateError {
     NameTaken,
     NameInvalid(names::NameError),
     PassphraseRequired,
+    /// The process-wide room budget is full. Rooms are pure RAM, so this is
+    /// the backstop that keeps a shared host from being driven into the OOM
+    /// killer by anyone who can reach the create endpoint.
+    AtCapacity,
 }
 
-#[derive(Default)]
 pub struct RoomRegistry {
     rooms: DashMap<[u8; 16], std::sync::Arc<Room>>,
     names: DashMap<String, [u8; 16]>,
     retired: DashMap<[u8; 16], std::time::Instant>,
+    max_rooms: usize,
+    max_retired: usize,
+    log_budget: std::sync::Arc<LogBudget>,
+}
+
+impl Default for RoomRegistry {
+    fn default() -> Self {
+        RoomRegistry::with_limits(
+            crate::config::DEFAULT_MAX_ROOMS,
+            crate::config::DEFAULT_TOTAL_LOG_BYTES,
+        )
+    }
 }
 
 impl RoomRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_capacity(max_rooms: usize) -> Self {
+        RoomRegistry::with_limits(max_rooms, crate::config::DEFAULT_TOTAL_LOG_BYTES)
+    }
+
+    pub fn with_limits(max_rooms: usize, total_log_bytes: u64) -> Self {
+        RoomRegistry {
+            rooms: DashMap::new(),
+            names: DashMap::new(),
+            retired: DashMap::new(),
+            log_budget: std::sync::Arc::new(LogBudget::new(total_log_bytes)),
+            max_rooms: max_rooms.max(1),
+            // Retired ids exist only to stop id reuse; bound the tombstones
+            // so they cannot become their own memory leak.
+            max_retired: max_rooms.saturating_mul(8).max(1024),
+        }
+    }
+
+    pub fn max_rooms(&self) -> usize {
+        self.max_rooms
+    }
+
+    /// Live ciphertext held across every room, and the ceiling it is measured
+    /// against. Exposed so operators can see the real number rather than
+    /// reason about `max_rooms × max_log_bytes`.
+    pub fn log_bytes_used(&self) -> u64 {
+        self.log_budget.used()
+    }
+
+    pub fn log_bytes_max(&self) -> u64 {
+        self.log_budget.max()
     }
 
     pub fn get(&self, id: &[u8; 16]) -> Option<std::sync::Arc<Room>> {
@@ -398,10 +638,14 @@ impl RoomRegistry {
         self.retired.contains_key(id)
     }
 
+    /// Unlisted room ids are **server-assigned**. Letting the caller name the
+    /// id turned this endpoint into an existence oracle — 409 meant "that room
+    /// is live", 201 meant "it is not" — which undid the care taken to hide
+    /// exactly that on `/api/meta/id/{id}`. It also allowed squatting an id
+    /// somebody else was about to use.
     #[allow(clippy::too_many_arguments)]
     pub fn create_unlisted(
         &self,
-        id: [u8; 16],
         ttl: Ttl,
         ceiling_optout: bool,
         verifier: [u8; 32],
@@ -414,10 +658,20 @@ impl RoomRegistry {
         auth_max: u32,
         max_peers: usize,
     ) -> Result<std::sync::Arc<Room>, CreateError> {
+        if self.rooms.len() >= self.max_rooms {
+            return Err(CreateError::AtCapacity);
+        }
+        let mut id = random_room_id();
+        for _ in 0..8 {
+            if !self.exists(&id) {
+                break;
+            }
+            id = random_room_id();
+        }
         if self.exists(&id) {
             return Err(CreateError::IdUnavailable);
         }
-        let room = std::sync::Arc::new(Room::new(
+        let room = std::sync::Arc::new(Room::with_budget(
             id,
             RoomClass::Unlisted,
             unix_now(),
@@ -432,6 +686,7 @@ impl RoomRegistry {
             log_max_bytes,
             auth_max,
             max_peers,
+            self.log_budget.clone(),
         ));
         self.rooms.insert(id, room.clone());
         Ok(room)
@@ -456,12 +711,23 @@ impl RoomRegistry {
     ) -> Result<(std::sync::Arc<Room>, String), CreateError> {
         let normalized = names::normalize(name);
         names::validate(&normalized).map_err(CreateError::NameInvalid)?;
+        if self.rooms.len() >= self.max_rooms {
+            return Err(CreateError::AtCapacity);
+        }
         let final_name = if suffix {
-            loop {
+            // Bounded search: the suffix space is 16 bits, so an unbounded
+            // loop here is a request that never returns once it saturates.
+            let mut found = None;
+            for _ in 0..64 {
                 let candidate = format!("{}-{}", normalized, random_suffix());
                 if !self.names.contains_key(&candidate) {
-                    break candidate;
+                    found = Some(candidate);
+                    break;
                 }
+            }
+            match found {
+                Some(c) => c,
+                None => return Err(CreateError::NameTaken),
             }
         } else if self.names.contains_key(&normalized) {
             return Err(CreateError::NameTaken);
@@ -469,7 +735,7 @@ impl RoomRegistry {
             normalized.clone()
         };
         let id = random_room_id();
-        let room = std::sync::Arc::new(Room::new(
+        let room = std::sync::Arc::new(Room::with_budget(
             id,
             RoomClass::Named(final_name.clone()),
             unix_now(),
@@ -484,6 +750,7 @@ impl RoomRegistry {
             log_max_bytes,
             auth_max,
             max_peers,
+            self.log_budget.clone(),
         ));
         self.rooms.insert(id, room.clone());
         self.names.insert(final_name.clone(), id);
@@ -558,6 +825,10 @@ impl RoomRegistry {
         });
         if let Some(n) = &name {
             self.names.remove(n);
+        }
+        if self.retired.len() >= self.max_retired {
+            let cutoff = std::time::Instant::now() - Duration::from_secs(24 * 3600);
+            self.retired.retain(|_, t| *t > cutoff);
         }
         self.retired.insert(*id, std::time::Instant::now());
         removed.map(|r| (r, name))
@@ -662,13 +933,20 @@ mod purge_ack_tests {
         )
     }
 
+    fn connect(room: &Room) -> [u8; 16] {
+        let (tx, rx) = mpsc::channel(8);
+        // Hold the receiver open for the lifetime of the test.
+        std::mem::forget(rx);
+        room.add_peer(None, PeerTx::new(tx, 1 << 20)).unwrap().peer_id
+    }
+
     #[test]
     fn lone_peer_can_never_trigger_purge_via_deadline_or_fake_ids() {
         let r = room();
-        // Two peers are connected per roster; one hostile peer acks repeatedly
-        // under invented request ids and waits past any conceivable timeout.
+        let hostile = connect(&r);
+        let _honest = connect(&r);
         for _ in 0..50 {
-            match r.note_purge_ack("invented-id", [9u8; 16], 2) {
+            match r.note_purge_ack("invented-id", hostile) {
                 PurgeAckStatus::Pending => {}
                 PurgeAckStatus::AllAcked(_) => panic!("single ack must never satisfy quorum"),
             }
@@ -678,18 +956,82 @@ mod purge_ack_tests {
     #[test]
     fn purge_fires_only_when_every_connected_peer_acks_same_id() {
         let r = room();
+        let a = connect(&r);
+        let b = connect(&r);
+        assert_eq!(r.note_purge_ack("req", a), PurgeAckStatus::Pending);
         assert_eq!(
-            r.note_purge_ack("req", [1u8; 16], 2),
-            PurgeAckStatus::Pending
-        );
-        assert_eq!(
-            r.note_purge_ack("other-req", [2u8; 16], 2),
+            r.note_purge_ack("other-req", b),
             PurgeAckStatus::Pending,
             "different request id must not count"
         );
+        assert_eq!(r.note_purge_ack("req", b), PurgeAckStatus::AllAcked("req".into()));
+    }
+
+    /// The bug this pins: acks used to be banked forever and compared against
+    /// a live peer count taken at ack time, so one peer could approve from
+    /// throwaway sockets, drop them to shrink the denominator, and destroy a
+    /// room its remaining occupants had never voted on.
+    #[test]
+    fn banked_acks_from_departed_peers_do_not_form_a_quorum() {
+        let r = room();
+        let honest = connect(&r);
+        let mut throwaways = Vec::new();
+        for _ in 0..4 {
+            throwaways.push(connect(&r));
+        }
+        for id in &throwaways {
+            assert_eq!(r.note_purge_ack("consensus", *id), PurgeAckStatus::Pending);
+        }
+        // The attacker drops every socket but one.
+        for id in throwaways.iter().skip(1) {
+            r.remove_peer(id);
+        }
         assert_eq!(
-            r.note_purge_ack("req", [2u8; 16], 2),
-            PurgeAckStatus::AllAcked("req".into())
+            r.note_purge_ack("consensus", throwaways[0]),
+            PurgeAckStatus::Pending,
+            "stale acks must not stand in for the honest peer's vote"
+        );
+        // Only the honest peer's own ack completes it.
+        assert_eq!(
+            r.note_purge_ack("consensus", honest),
+            PurgeAckStatus::AllAcked("consensus".into())
+        );
+    }
+
+    #[test]
+    fn acks_from_peers_who_are_not_connected_are_ignored() {
+        let r = room();
+        let _a = connect(&r);
+        assert_eq!(r.note_purge_ack("req", [0xEE; 16]), PurgeAckStatus::Pending);
+    }
+
+    #[test]
+    fn request_id_ledger_is_bounded() {
+        let r = room();
+        let a = connect(&r);
+        let _b = connect(&r);
+        for i in 0..(MAX_PURGE_REQUEST_IDS * 8) {
+            let _ = r.note_purge_ack(&format!("id-{i}"), a);
+        }
+        assert!(
+            r.purge_acks.lock().unwrap().len() <= MAX_PURGE_REQUEST_IDS,
+            "ledger must not grow without bound"
+        );
+        let long = "x".repeat(MAX_PURGE_REQUEST_ID_LEN + 1);
+        assert_eq!(r.note_purge_ack(&long, a), PurgeAckStatus::Pending);
+        assert!(!r.purge_acks.lock().unwrap().contains_key(&long));
+    }
+
+    #[test]
+    fn ttl_extension_stops_at_the_ceiling() {
+        let r = room();
+        for _ in 0..100 {
+            r.extend_ttl(MAX_TTL_EXTENSION_SECS);
+        }
+        assert_eq!(
+            r.ttl_extension_secs.load(Ordering::SeqCst),
+            MAX_TTL_EXTENSION_SECS,
+            "extension must saturate, not accumulate"
         );
     }
 }
@@ -704,7 +1046,6 @@ mod scheduler_tests {
         let registry = RoomRegistry::new();
         let room = registry
             .create_unlisted(
-                [7u8; 16],
                 Ttl { kind: TtlKind::Absolute, secs: 0 },
                 false,
                 [1u8; 32],
@@ -727,5 +1068,38 @@ mod scheduler_tests {
         crate::surtr::purge(&registry, &room.id, "ttl-expired").await;
         assert!(registry.get(&room.id).is_none(), "room must be removed from the registry");
         assert!(registry.retired_contains(&room.id), "id must never be reissued");
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_outbound_queue_is_bounded_in_bytes_not_frames() {
+        let (tx, rx) = mpsc::channel(512);
+        let peer = PeerTx::new(tx, 4096);
+        // Four 1 KiB frames fit; the fifth does not, even though the channel
+        // has 508 free slots.
+        for _ in 0..4 {
+            assert!(peer.try_send(Bytes::from(vec![0u8; 1024])).is_ok());
+        }
+        assert!(peer.try_send(Bytes::from(vec![0u8; 1024])).is_err());
+        assert_eq!(peer.queued_bytes(), 4096);
+
+        // Draining returns quota.
+        let meter = peer.meter();
+        meter.release(2048);
+        assert!(peer.try_send(Bytes::from(vec![0u8; 1024])).is_ok());
+        drop(rx);
+    }
+
+    #[tokio::test]
+    async fn a_closed_peer_stops_accepting_immediately() {
+        let (tx, rx) = mpsc::channel(4);
+        let peer = PeerTx::new(tx, 1 << 20);
+        drop(rx);
+        assert!(peer.try_send(Bytes::from_static(b"x")).is_err());
+        assert!(peer.send_backpressured(Bytes::from_static(b"x")).await.is_err());
     }
 }

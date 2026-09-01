@@ -33,8 +33,7 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
     pub fn check_n(&self, key: &K, n: u32) -> bool {
         let mut buckets = self.buckets.lock().unwrap();
         if buckets.len() >= self.max_tracked {
-            let cutoff = Instant::now() - Duration::from_secs(3600);
-            buckets.retain(|_, b| b.last > cutoff);
+            self.evict(&mut buckets);
         }
         let now = Instant::now();
         let b = buckets.entry(key.clone()).or_insert(Bucket {
@@ -51,53 +50,40 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
             false
         }
     }
-}
 
-#[derive(Clone)]
-pub struct AuthWindows {
-    hits: std::collections::VecDeque<Instant>,
-}
-
-pub struct AuthGuard {
-    pub max_per_min: u32,
-    pub lockout: Duration,
-    inner: Mutex<AuthWindows>,
-}
-
-impl AuthGuard {
-    pub fn new(max_per_min: u32, lockout: Duration) -> Self {
-        AuthGuard {
-            max_per_min,
-            lockout,
-            inner: Mutex::new(AuthWindows {
-                hits: std::collections::VecDeque::new(),
-            }),
-        }
+    /// Projected token count for a bucket at `now`, without mutating it.
+    fn projected(&self, b: &Bucket, now: Instant) -> f64 {
+        (b.tokens + now.duration_since(b.last).as_secs_f64() * self.refill_per_sec)
+            .min(self.capacity)
     }
 
-    pub fn allow(&self) -> bool {
-        let mut g = self.inner.lock().unwrap();
+    /// The old sweep used a fixed one-hour cutoff. Against a limiter whose
+    /// window is a minute that evicts nothing, so once the table filled —
+    /// trivial for anyone with an IPv6 allocation — every subsequent call
+    /// walked all `max_tracked` entries under a global lock, on every request.
+    ///
+    /// Evict by how full a bucket is, never by how old it is. A bucket that
+    /// has refilled to capacity carries no information: forgetting it and
+    /// recreating it later are the same thing. Evicting the *oldest* instead
+    /// is what lets a flood of fresh keys push a throttled one out and hand it
+    /// a full bucket back — the limiter would then be bypassable by anyone
+    /// with addresses to spare, which is the failure this whole table exists
+    /// to prevent.
+    fn evict(&self, buckets: &mut HashMap<K, Bucket>) {
         let now = Instant::now();
-        let cutoff = now - Duration::from_secs(60);
-        while g.hits.front().is_some_and(|t| *t < cutoff) {
-            g.hits.pop_front();
+        buckets.retain(|_, b| self.projected(b, now) < self.capacity);
+        if buckets.len() < self.max_tracked {
+            return;
         }
-        if g.hits.len() >= self.max_per_min as usize {
-            false
-        } else {
-            g.hits.push_back(now);
-            true
-        }
-    }
-
-    pub fn record_failure(&self) -> Duration {
-        let g = self.inner.lock().unwrap();
-        let n = g.hits.len() as u32;
-        let backoff = self
-            .lockout
-            .mul_f64((n.saturating_sub(1)) as f64)
-            .min(self.lockout * 30);
-        backoff.max(Duration::ZERO)
+        // Still full of genuinely throttled keys. Halve the table, keeping the
+        // most-throttled, so this scan cannot recur on the next call.
+        let keep = self.max_tracked / 2;
+        let mut ranked: Vec<(K, f64)> =
+            buckets.iter().map(|(k, b)| (k.clone(), self.projected(b, now))).collect();
+        ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let survivors: std::collections::HashSet<K> =
+            ranked.into_iter().take(keep).map(|(k, _)| k).collect();
+        buckets.retain(|k, _| survivors.contains(k));
     }
 }
 
@@ -126,13 +112,29 @@ mod tests {
     }
 
     #[test]
-    fn auth_guard_blocks_after_max() {
-        let g = AuthGuard::new(5, Duration::from_secs(30));
-        for _ in 0..5 {
-            assert!(g.allow());
+    fn eviction_keeps_the_table_bounded_without_a_full_scan_per_call() {
+        let rl: RateLimiter<u64> = RateLimiter::new(5, Duration::from_millis(50), 64);
+        for k in 0..4096u64 {
+            rl.check(&k);
         }
-        assert!(!g.allow());
-        let backoff = g.record_failure();
-        assert!(backoff >= Duration::from_secs(30));
+        assert!(
+            rl.buckets.lock().unwrap().len() <= 64,
+            "table must stay within max_tracked"
+        );
+    }
+
+    #[test]
+    fn eviction_does_not_hand_out_free_tokens_inside_the_window() {
+        // The throttled key must survive a flood of fresh ones. Evicting by
+        // age instead of by fullness would let an attacker with many source
+        // addresses reset anybody's bucket, including their own.
+        let rl: RateLimiter<u64> = RateLimiter::new(2, Duration::from_secs(600), 16);
+        assert!(rl.check(&1));
+        assert!(rl.check(&1));
+        assert!(!rl.check(&1));
+        for k in 100..4000u64 {
+            rl.check(&k);
+        }
+        assert!(!rl.check(&1), "an evicted bucket would refill and let this through");
     }
 }
