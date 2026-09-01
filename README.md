@@ -395,10 +395,22 @@ document convergence, rendering security, and shred consensus.
 
 ## Deploying to the internet
 
+> **Deploying to a VM you share with other services?** Use
+> [`docs/DEPLOY.md`](docs/DEPLOY.md) and the one command it wraps:
+>
+> ```sh
+> ./scripts/deploy-oracle.sh
+> ```
+>
+> It builds the bundle locally, ships the committed tree, builds on the box,
+> installs a hardened systemd unit with a bounded memory ceiling, wires the
+> reverse-proxy vhost behind a validate-and-rollback guard, and then proves
+> the deployment from outside. Re-run it to ship an update.
+
 The instructions above run RÚNA locally. To put it on the internet where
 other people can reach it, you have two options:
 
-### Docker (recommended)
+### Docker
 
 This is the easiest way to deploy. You need [Docker](https://docs.docker.com/get-docker/)
 installed on your server.
