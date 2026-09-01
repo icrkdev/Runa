@@ -48,7 +48,9 @@ jobs:
       - name: Bundle hash
         id: bundle
         working-directory: web/dist
-        run: echo "sha256=$(find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        # `shasum` is present on both runner images; `sha256sum` and GNU
+        # `sort -z` are not guaranteed on macOS. Same digest either way.
+        run: echo "sha256=$(find . -type f | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Build server
         env:
@@ -65,7 +67,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/runa-server" "$dir/" 2>/dev/null || \
             cp "target/${{ matrix.target }}/release/runa" "$dir/"
           tar czf "$dir.tar.gz" "$dir"
-          sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3

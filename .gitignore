@@ -1,5 +1,8 @@
 /target
 server/fuzz/target
+server/fuzz/corpus
+server/fuzz/artifacts
+server/fuzz/coverage
 web/node_modules
 web/dist
 .DS_Store
