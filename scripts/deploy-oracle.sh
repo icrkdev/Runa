@@ -81,6 +81,21 @@ ok "$HOST -> $BOX_IP, unproxied"
 $SSH true 2>/dev/null || die "cannot ssh to $BOX_IP. Try: ssh-add $SSH_KEY"
 ok "ssh reachable"
 
+# Both of these fail at the *end* of a build that takes 10-20 minutes on a
+# small instance, which is a miserable way to find out. Check them in one
+# second instead.
+$SSH "test -f \$HOME/.cargo/env || command -v cargo >/dev/null" \
+  || die "cargo not found on the box. Install it:
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+ok "cargo present"
+
+$SSH "command -v cc >/dev/null" \
+  || die "no C toolchain on the box — rustc uses 'cc' as its linker driver, so
+        the build will run for many minutes and then fail at the link step.
+        Ubuntu Minimal images ship without it. Install it:
+        sudo apt update && sudo apt install -y build-essential"
+ok "C toolchain present"
+
 # ── 2. Build the web bundle ──────────────────────────────────────────────
 bold "2/8  Web bundle"
 if [ "$SKIP_WEB_BUILD" = "1" ]; then

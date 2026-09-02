@@ -39,9 +39,16 @@ Pick Docker for operational isolation, systemd for process confinement.
 - A reverse proxy terminating TLS. The browser refuses `ws://` on anything
   but loopback, so without TLS the editor will not connect at all.
 - SSH access with `sudo`.
-- Rust on the box (`rustup`), and Node on your **local** machine. The box
-  never needs Node — the frontend is built locally and shipped as static
-  files.
+- Rust on the box (`rustup`), **and a C toolchain** — `rustc` shells out to
+  `cc` as its linker driver, and Ubuntu Minimal images ship without one:
+  `sudo apt install -y build-essential`. No dependency compiles C code; this
+  is only needed for the final link.
+- Node on your **local** machine. The box never needs Node — the frontend is
+  built locally and shipped as static files.
+
+The deploy script checks both before shipping anything, because otherwise a
+missing linker surfaces at the end of a build that takes 10-20 minutes on a
+small instance.
 
 ## The one command
 
