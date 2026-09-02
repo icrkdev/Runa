@@ -95,8 +95,6 @@ pub fn build_router(state: AppState) -> Router {
     let dist = state.cfg.dist_dir.clone();
     let index_path = std::path::Path::new(&dist).join("index.html");
 
-    let static_service = ServeDir::new(&dist);
-
     // Serving an empty 200 for the SPA shell turns a missing/mis-pointed
     // RUNA_DIST into a blank white page with no diagnostic anywhere. Fail
     // loudly at boot instead — this is the single most common deploy mistake.
@@ -117,6 +115,25 @@ pub fn build_router(state: AppState) -> Router {
         }
     };
 
+    /// Serves the SPA shell for anything that could be a room name, and a
+    /// plain 404 otherwise. Reached only after ServeDir has failed to find a
+    /// file, so it can never shadow a real asset.
+    async fn spa_shell(
+        axum::extract::State(html): axum::extract::State<std::sync::Arc<String>>,
+        uri: axum::http::Uri,
+    ) -> Response {
+        let path = uri.path().trim_start_matches('/').trim_end_matches('/');
+        if !path.contains('/') && crate::runar::names::validate(path).is_ok() {
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                (*html).clone(),
+            )
+                .into_response();
+        }
+        (StatusCode::NOT_FOUND, "not found").into_response()
+    }
+
     async fn index_page(axum::extract::State(html): axum::extract::State<std::sync::Arc<String>>) -> Response {
         (
             StatusCode::OK,
@@ -127,6 +144,15 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     let index_state = std::sync::Arc::new(index_html);
+
+    // A named room is reachable at the root: /copper-lantern rather than
+    // /n/copper-lantern. ServeDir answers first, so a real file always wins;
+    // only when nothing matches do we consider whether the path could be a
+    // room name. Names cannot contain a dot or a slash and must carry a
+    // hyphen or digit, so /gone.html, /assets/x.js and every reserved single
+    // word are excluded before this is reached.
+    let static_service =
+        ServeDir::new(&dist).fallback(get(spa_shell).with_state(index_state.clone()));
 
     Router::new()
         .route("/", get(index_page).with_state(index_state.clone()))

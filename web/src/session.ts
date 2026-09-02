@@ -46,9 +46,21 @@ export interface SessionConfig {
   insecureAllowed?: boolean;
 }
 
+/// How long a departed peer is still shown as "away" rather than gone. A
+/// phone that locks its screen drops the websocket within seconds, so without
+/// this the person simply vanishes and the rest of the room can reach quorum
+/// without ever knowing they were excluded.
+const AWAY_GRACE_MS = 10 * 60_000;
+
+export interface AwayPeer {
+  peerIdB64: string;
+  leftAt: number;
+}
+
 interface SocketInternals {
   ws?: WebSocket;
   roster: Map<string, RosterEntry>;
+  away: Map<string, number>;
   myPeerId: string;
   myJoinedSeq: number;
   joinPerfMs: number;
@@ -91,7 +103,8 @@ export class Session {
     const identity = await generateIdentity();
     const roomId = hexToBytes(cfg.roomIdHex);
     const roster = new Map<string, RosterEntry>();
-    const internals: SocketInternals = { roster, myPeerId: "", myJoinedSeq: 0, joinPerfMs: 0 };
+    const away = new Map<string, number>();
+    const internals: SocketInternals = { roster, away, myPeerId: "", myJoinedSeq: 0, joinPerfMs: 0 };
     let sessionRef: Session | null = null;
 
     const socket = new RunaSocket({
@@ -109,12 +122,21 @@ export class Session {
         onAwareness: (sender, pt) => sessionRef?.awareness?.receive(sender, pt),
         onShredFrame: (ft, sender, pt) => void sessionRef?.handleShredFrame(ft, sender, pt),
         onPeerJoin: (entry) => {
-          roster.set(toB64(entry.peerId), entry);
+          const id = toB64(entry.peerId);
+          roster.set(id, entry);
+          // They are back; stop showing them as away.
+          away.delete(id);
           events.onPeersChanged(roster.size);
         },
 
         onPeerLeave: (peerId) => {
-          roster.delete(toB64(peerId));
+          const id = toB64(peerId);
+          if (roster.delete(id)) {
+            // Remember them briefly. A locked phone is indistinguishable on
+            // the wire from someone closing the tab, and the difference
+            // matters when a shred is about to be proposed.
+            away.set(id, Date.now());
+          }
           events.onPeersChanged(roster.size);
         },
         onPurge: (reason) => events.onPurge(reason),
@@ -549,6 +571,19 @@ export class Session {
 
   get peerCount(): number {
     return this.internals.roster.size;
+  }
+
+  /// Peers who were here within the grace window and are not now. Shown to
+  /// whoever is about to start a shred, so the choice to proceed without them
+  /// is made deliberately rather than by accident of timing.
+  awayPeers(): AwayPeer[] {
+    const cutoff = Date.now() - AWAY_GRACE_MS;
+    const out: AwayPeer[] = [];
+    for (const [peerIdB64, leftAt] of this.internals.away) {
+      if (leftAt < cutoff) this.internals.away.delete(peerIdB64);
+      else out.push({ peerIdB64, leftAt });
+    }
+    return out;
   }
 
   /// Set when consensus is reached; acted on only once whatever frame

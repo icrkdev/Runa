@@ -11,6 +11,7 @@ import {
 } from "../keys-session";
 import { generateDicewarePassphrase, generateRoomName } from "../crypto/fingerprint";
 import { estimatePassphrase } from "../crypto/passphrase";
+import { nameProblem } from "./name-rules";
 
 type Class = "unlisted" | "named";
 
@@ -31,18 +32,23 @@ export function Landing() {
       <div className="panel" role="radiogroup" aria-label="Room class">
         <label className="row" style={{ justifyContent: "space-between" }}>
           <span>
-            <strong>UNLISTED</strong>
-            <div className="hint">Nobody can find this room. The link contains the key.</div>
+            <strong>Private link</strong>
+            <div className="hint">
+              Nobody can find this room by guessing. The link is the key — send
+              the whole thing to the people you want in it.
+            </div>
           </span>
           <input type="radio" name="cls" checked={cls === "unlisted"} onChange={() => setCls("unlisted")} />
         </label>
         <hr style={{ border: "none", borderTop: "1px solid var(--hairline)", margin: "12px 0" }} />
         <label className="row" style={{ justifyContent: "space-between" }}>
           <span>
-            <strong>NAMED</strong>
+            <strong>Shared name</strong>
             <div className="hint">
-              Anyone can find this room by name. The passphrase is the key.
-              A passphrase is mandatory.
+              Gets a memorable address you can say out loud, like
+              <span className="mono"> runa.vardrlabs.com/copper-lantern</span>.
+              Anyone can reach that address, so a passphrase is required — it
+              is the only thing keeping the room private.
             </div>
           </span>
           <input type="radio" name="cls" checked={cls === "named"} onChange={() => setCls("named")} />
@@ -108,7 +114,9 @@ function UnlistedForm() {
       <button onClick={create} disabled={busy}>{busy ? "Creating…" : "Create unlisted room"}</button>
       {error && <p className="error-text mono">{error}</p>}
       <p className="hint" style={{ marginTop: 14 }}>
-        The part of the link after the # is the key. Send the whole thing.
+        Everything after the <span className="mono">#</span> in the link is the
+        key. If it gets stripped — some chat apps do that — the room cannot be
+        opened. Send the whole thing.
       </p>
     </div>
   );
@@ -125,10 +133,16 @@ function NamedForm() {
 
   const verdict = passphrase ? estimatePassphrase(passphrase) : null;
   const [degraded, setDegraded] = useState(false);
+  const nameIssue = name ? nameProblem(suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")) : null;
 
   const create = async () => {
     setError(null);
     setRefusal(null);
+    const finalNameCheck = nameProblem(suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, ""));
+    if (finalNameCheck) {
+      setRefusal(finalNameCheck);
+      return;
+    }
     const v = estimatePassphrase(passphrase);
     // Was `!v.dicewareWords || !v.ok`, which refused every passphrase that
     // was not a run of lowercase words — including anything a password
@@ -159,7 +173,7 @@ function NamedForm() {
         ceilingOptout: ttl.kind === "none",
         configBlob: await encryptRoomConfig(contentKey, ttl, ttl.kind === "none"),
       });
-      window.location.assign(`/n/${finalName}`);
+      window.location.assign(`/${finalName}`);
     } catch (e) {
       setError(describeError(e));
       setBusy(false);
@@ -181,7 +195,13 @@ function NamedForm() {
           />
           <button type="button" onClick={() => setName(generateRoomName(suffixOn))}>↻</button>
         </div>
-        <p className="hint">Two words speak better than a string of characters.</p>
+        {nameIssue ? (
+          <p className="error-text">{nameIssue}</p>
+        ) : (
+          <p className="hint">
+            This becomes the address: <span className="mono">runa.vardrlabs.com/{suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")}</span>
+          </p>
+        )}
       </div>
       <label className="row field">
         <input
@@ -193,8 +213,9 @@ function NamedForm() {
           }}
         />
         <span className="hint">
-          Disambiguating suffix. Dropping the suffix makes this name easier to guess.
-          The passphrase still protects the contents.
+          Add a few random characters to the end. Without them, someone could
+          guess the address and see that a room exists — they still could not
+          read it without the passphrase.
         </span>
       </label>
       <div className="field">
@@ -210,10 +231,14 @@ function NamedForm() {
           <button type="button" onClick={() => setPassphrase(generateDicewarePassphrase(5))}>Generate</button>
         </div>
         {verdict && !verdict.ok && (
-          <p className="error-text mono">Short passphrase. This room is only as strong as it is.</p>
+          <p className="error-text">Too easy to guess. Press Generate, or add more words.</p>
         )}
         {verdict?.ok && (
-          <p className="hint mono">{verdict.dicewareWords > 0 ? `${verdict.dicewareWords} diceware words · ~${verdict.bits} bits` : `~${verdict.bits} bits`}</p>
+          <p className="hint">
+            {verdict.dicewareWords > 0
+              ? `${verdict.dicewareWords} random words — strong, and easy to read aloud.`
+              : "Strong enough."}
+          </p>
         )}
       </div>
       {degraded && (
@@ -234,11 +259,11 @@ function describeError(e: unknown): string {
   switch (code) {
     case "NAME_TAKEN":
     case "UNAVAILABLE":
-      return "That name is in use by a room this passphrase does not open.";
+      return "Someone already has that name, and this passphrase does not open their room. Pick another.";
     case "NAME_INVALID":
-      return "That name is reserved or too short. Try another.";
+      return "The server would not accept that name. Try another.";
     case "RATE_LIMITED":
-      return "Too many attempts. Wait a minute and try again.";
+      return "Too many rooms created from here just now. Wait a minute.";
     case "AT_CAPACITY":
       return "This server is at its room limit right now. Try again shortly.";
     default:

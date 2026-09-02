@@ -84,6 +84,7 @@ function JoinableRoom(props: RoomProps) {
   } | null>(null);
   const previewPaneRef = useRef<HTMLDivElement | null>(null);
   const [steady, setSteady] = useState(false);
+  const [awayCount, setAwayCount] = useState(0);
 
   useAccent(temper);
 
@@ -160,7 +161,10 @@ function JoinableRoom(props: RoomProps) {
               } catch { void 0; }
             })();
           },
-          onPeersChanged: (n) => setPeerCount(n),
+          onPeersChanged: (n) => {
+            setPeerCount(n);
+            setAwayCount(sessionRef.current?.awayPeers().length ?? 0);
+          },
           onTemper: (t) => setTemper(t),
           onShredPrompt: (req) => {
             setShredPrompt(req);
@@ -260,6 +264,7 @@ function JoinableRoom(props: RoomProps) {
   );
 
   const startShred = useCallback(() => {
+    setAwayCount(sessionRef.current?.awayPeers().length ?? 0);
     setShredOpen(true);
     setTemper("ARMED");
     void sessionRef.current
@@ -442,7 +447,18 @@ function JoinableRoom(props: RoomProps) {
         <span className="micro-label" style={{ color: "var(--accent)" }}>{TEMBER_LABEL[temper]}</span>
         <span className="sep micro-label" aria-hidden="true" />
         <span className="sep micro-label" aria-hidden="true" />
-        <span className="micro-label mono">{peerCount} PEERS</span>
+        <span className="micro-label mono">
+          {peerCount} {peerCount === 1 ? "PERSON" : "PEOPLE"}
+        </span>
+        {awayCount > 0 && (
+          <span
+            className="micro-label mono"
+            style={{ color: "var(--text-faint)" }}
+            title="Recently here, not connected now — a locked phone looks the same as a closed tab"
+          >
+            · {awayCount} AWAY
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         {ladder.kind !== "normal" && ladder.kind !== "none" && (
           <span className="micro-label mono" style={{ color: "var(--accent)" }}>
@@ -538,6 +554,7 @@ function JoinableRoom(props: RoomProps) {
 
       <ShredModal
         open={shredOpen}
+        awayCount={awayCount}
         policy={shredPolicy}
         onPolicyChange={(p) => setShredPolicy(p)}
         peers={
