@@ -48,6 +48,12 @@ MemoryHigh=1700M
 MemoryMax=2G
 TasksMax=256
 LimitNOFILE=16384
+# Lets mlockall(2) actually succeed, which is what keeps room ciphertext and
+# the room verifier out of swap. Unprivileged processes may lock memory up to
+# RLIMIT_MEMLOCK, so no capability is needed — and MemoryMax still bounds the
+# total, so this cannot be used to exhaust the host. Without it the call fails
+# with ENOMEM and the no-swap guarantee is not real.
+LimitMEMLOCK=infinity
 Restart=on-failure
 RestartSec=2
 

@@ -6,13 +6,16 @@ use runa_server::{build_router, memguard, AppState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    memguard::harden()?;
+    // Harden first — before any allocation that could hold key material —
+    // but report afterwards, because the subscriber does not exist yet.
+    let hardening = memguard::harden()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "runa_server=info".into()),
         )
         .init();
+    hardening.log();
 
     let cfg = Config::from_env();
     if cfg.trusted_proxy {

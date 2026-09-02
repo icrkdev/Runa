@@ -497,10 +497,21 @@ them — hence the per-connection byte cap rather than a frame count.
 
 > On Linux the server calls `mlockall(MCL_CURRENT | MCL_FUTURE)` so key
 > material cannot reach swap. It needs a raised `RLIMIT_MEMLOCK` (or
-> `CAP_IPC_LOCK`) to take effect; the distroless image runs as `nonroot` with
-> Docker's default 64 KB limit, so the call fails and is ignored. If you want
-> the guarantee, run with `--ulimit memlock=-1` and keep the log budget well
-> under the host's RAM — locked pages cannot be reclaimed under pressure.
+> `CAP_IPC_LOCK`) to take effect, and gets neither by default — under Docker's
+> 64 KB limit, or systemd's `DynamicUser=yes`, the call fails with `ENOMEM`.
+>
+> Both shipped deploy paths now raise it (`--ulimit memlock=-1:-1` for the
+> container, `LimitMEMLOCK=infinity` for the unit), and the server says at
+> startup which way it went:
+>
+> ```
+> INFO  memory locked; this process will not be swapped
+> WARN  mlockall failed: this process CAN be swapped to disk …
+> ```
+>
+> If you see the warning on a host with swap enabled, the no-swap guarantee is
+> not holding. Keep the log budget well under the host's RAM either way —
+> locked pages cannot be reclaimed under pressure.
 
 ### Behind a reverse proxy
 

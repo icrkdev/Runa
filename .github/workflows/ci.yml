@@ -119,6 +119,7 @@ jobs:
             -p 127.0.0.1:3000:3000 \
             --memory=256m --memory-swap=256m \
             --pids-limit=256 \
+            --ulimit memlock=-1:-1 \
             --read-only \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
@@ -144,6 +145,11 @@ jobs:
           sleep 5
           [ "$(docker inspect -f '{{.State.Running}}' runa-ci)" = "true" ] \
             || { echo "container did not stay up"; docker logs runa-ci; exit 1; }
+          # mlockall backs the "never swapped" claim in the threat model. It
+          # fails silently without a memlock ulimit, so assert it succeeded
+          # rather than trusting the flag is present.
+          docker logs runa-ci 2>&1 | grep -q 'memory locked' \
+            || { echo "mlockall did not take inside the container"; docker logs runa-ci; exit 1; }
           docker logs runa-ci | tail -5
           docker rm -f runa-ci
 

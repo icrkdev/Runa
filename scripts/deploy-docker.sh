@@ -99,6 +99,7 @@ $SSH "MEM=$MEM LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS MAX_PEERS=$MAX_PEERS \
     -p 127.0.0.1:3000:3000 \
     --memory="$MEM" --memory-swap="$MEM" \
     --pids-limit=256 \
+    --ulimit memlock=-1:-1 \
     --read-only \
     --cap-drop=ALL \
     --security-opt=no-new-privileges \
