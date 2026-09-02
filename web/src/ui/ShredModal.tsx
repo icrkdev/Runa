@@ -9,9 +9,9 @@ export interface ShredModalProps {
   /// How many people are in the room, so the dialog can state the actual bar
   /// rather than a constant that stopped being true as people joined.
   peerCount: number;
-  /// People who were in the room within the last few minutes and are not
-  /// connected now — a locked phone looks exactly like a closed tab.
-  awayCount?: number;
+  /// Handles of people who were in the room within the last few minutes and
+  /// are not connected now — a locked phone looks exactly like a closed tab.
+  awayNames?: string[];
   policy: Policy;
   onPolicyChange(policy: Policy): void;
   peers: DialPeer[];
@@ -72,13 +72,15 @@ export function ShredModal(props: ShredModalProps) {
       >
         <h2 id="shred-title" className="micro-label">SHRED · {props.policy}</h2>
         <p id="shred-desc">{LIMIT_COPY}</p>
-        {props.state === "IDLE" && (props.awayCount ?? 0) > 0 && (
+        {props.state === "IDLE" && (props.awayNames?.length ?? 0) > 0 && (
           <p className="error-text" role="alert">
-            {props.awayCount === 1
-              ? "Someone who was here a moment ago is not connected right now"
-              : `${props.awayCount} people who were here a moment ago are not connected right now`}
-            {" "}— a locked phone looks the same as a closed tab. They cannot
-            vote while away. Shredding now decides without them.
+            <strong>{formatNames(props.awayNames ?? [])}</strong>{" "}
+            {props.awayNames?.length === 1 ? "was" : "were"} here a moment ago
+            and {props.awayNames?.length === 1 ? "is" : "are"} not connected
+            now — a locked phone looks the same as a closed tab.{" "}
+            {props.awayNames?.length === 1 ? "They cannot" : "They cannot"} vote
+            while away, so shredding now decides without{" "}
+            {props.awayNames?.length === 1 ? "them" : "them"}.
           </p>
         )}
         {props.policy === "UNANIMOUS" && (
@@ -133,7 +135,9 @@ export function ShredModal(props: ShredModalProps) {
         )}
         <div style={{ margin: "14px 0" }}>
           <QuorumInline peers={props.peers} />
-          <p className="mono micro-label">{props.state}</p>
+          {humanState(props.state) && (
+            <p className="micro-label">{humanState(props.state)}</p>
+          )}
         </div>
         <div className="row" style={{ justifyContent: "flex-end" }}>
           <button ref={cancelRef} onClick={props.onCancel}>Cancel</button>
@@ -142,6 +146,38 @@ export function ShredModal(props: ShredModalProps) {
       </div>
     </div>
   );
+}
+
+/// The machine's state names are for the machine. Anything unrecognised is
+/// passed through, because the session also routes human messages (an
+/// extension notice, say) down this same channel.
+/// "COPPER-LANTERN", "COPPER-LANTERN and TIN-HARBOUR", "A, B and C".
+function formatNames(names: string[]): string {
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+function humanState(state: string): string {
+  switch (state) {
+    case "IDLE":
+      return "";
+    case "VOTING":
+      return "Waiting for everyone to decide…";
+    case "STALLED":
+      return "Waiting on someone who is away";
+    case "APPROVED":
+      return "Everyone agreed — destroying the room";
+    case "REJECTED":
+      return "Someone declined. The room stays.";
+    case "EXPIRED":
+      return "Nobody answered in time. The room stays.";
+    case "PURGING":
+    case "GONE":
+      return "Destroying the room";
+    default:
+      return state;
+  }
 }
 
 function QuorumInline({ peers }: { peers: DialPeer[] }) {

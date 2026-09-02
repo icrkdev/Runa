@@ -1,4 +1,18 @@
-export const MIN_PASSPHRASE_BITS = 40;
+/// Raised from 40.
+///
+/// Forty bits is ample against the join endpoint, which allows five attempts
+/// per room per minute. It is not the binding case. An attacker who reaches
+/// the server captures three things at once: the room's ciphertext log, its
+/// salt, and its verifier. From there the passphrase is ground offline at
+/// whatever rate they can afford, and the room being ephemeral does not help
+/// — they already hold the bytes.
+///
+/// Against Argon2id at 64 MiB / t=3, a serious farm managing ~10^5 guesses a
+/// second clears a 40-bit space in about four months. Fifty bits puts the
+/// same effort past three centuries. The Generate button produces five
+/// diceware words (55 bits), so the default comfortably clears the new bar;
+/// what this rejects is a four-word passphrase someone typed themselves.
+export const MIN_PASSPHRASE_BITS = 50;
 
 const CHAR_POOLS = [
   { re: /[a-z]/, bits: 26 },

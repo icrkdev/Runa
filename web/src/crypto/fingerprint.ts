@@ -39,6 +39,15 @@ export function randomWordIndices(count: number): number[] {
   return Array.from(raw, (v) => v & 2047);
 }
 
+/// Four hex characters. Exported so the suffix can be added or removed from
+/// a name someone has already typed, rather than regenerating the whole name
+/// and throwing their words away.
+export function randomHexSuffix(): string {
+  const b = new Uint8Array(2);
+  crypto.getRandomValues(b);
+  return Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
 export function generateRoomName(withSuffix: boolean): string {
   const [a, b] = randomWordIndices(2);
   if (!withSuffix) return `${WORDS[a]}-${WORDS[b]}`;

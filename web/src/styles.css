@@ -253,6 +253,25 @@ table, blockquote, figure, .katex-display { break-inside: avoid; }
 h1, h2, h3, h4 { break-after: avoid; }
 p, li { orphans: 3; widows: 3; }
 
+/* A 13px default checkbox is easy to miss and hard to hit, especially on a
+   phone. This one carries a real decision — whether the address is guessable
+   — so it should look like one. */
+.checkbox-row input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin-right: 4px;
+}
+.checkbox-row { align-items: flex-start; gap: 10px; cursor: pointer; }
+.checkbox-row .hint { margin: 0; }
+
+@media (max-width: 560px) {
+  /* Comfortably above the 44px touch-target floor once padding counts. */
+  .checkbox-row input[type="checkbox"] { width: 24px; height: 24px; flex: 0 0 24px; }
+}
+
 /* ── Small screens ────────────────────────────────────────────────────────
    There were no breakpoints at all: the room forced a two-column grid into
    whatever width existed, and the landing page kept desktop padding, so a

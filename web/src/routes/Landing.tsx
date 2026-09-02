@@ -9,7 +9,11 @@ import {
   randomSalt,
   verifierForAuthKey,
 } from "../keys-session";
-import { generateDicewarePassphrase, generateRoomName } from "../crypto/fingerprint";
+import {
+  generateDicewarePassphrase,
+  generateRoomName,
+  randomHexSuffix,
+} from "../crypto/fingerprint";
 import { estimatePassphrase } from "../crypto/passphrase";
 import { nameProblem } from "./name-rules";
 
@@ -203,13 +207,19 @@ function NamedForm() {
           </p>
         )}
       </div>
-      <label className="row field">
+      <label className="row field checkbox-row">
         <input
           type="checkbox"
           checked={suffixOn}
           onChange={(e) => {
-            setSuffixOn(e.target.checked);
-            setName(generateRoomName(e.target.checked));
+            // Add or remove the suffix on whatever is already in the box.
+            // This used to regenerate the entire name, so unticking it after
+            // typing something silently replaced your words with two random
+            // ones.
+            const on = e.target.checked;
+            setSuffixOn(on);
+            const base = name.replace(/-[0-9a-f]{4}$/, "");
+            setName(on ? `${base}-${randomHexSuffix()}` : base);
           }}
         />
         <span className="hint">
