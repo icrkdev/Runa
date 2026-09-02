@@ -148,7 +148,7 @@ jobs:
           # mlockall backs the "never swapped" claim in the threat model. It
           # fails silently without a memlock ulimit, so assert it succeeded
           # rather than trusting the flag is present.
-          docker logs runa-ci 2>&1 | grep -q 'memory locked' \\
+          docker logs runa-ci 2>&1 | grep -q 'memory locked' \
             || { echo "mlockall did not take inside the container"; docker logs runa-ci; exit 1; }
           docker logs runa-ci | tail -5
           docker rm -f runa-ci
