@@ -497,7 +497,11 @@ async fn oversized_frame_is_closed_with_4004() {
         .unwrap();
     let _ = recv_json(&mut ws).await;
 
-    let big_payload = vec![0xEE; 300 * 1024];
+    // Sized from the config rather than hardcoded: this used to be 300 KiB
+    // against a 256 KiB cap, so raising the cap for snapshot headroom made a
+    // correctness test silently start passing an oversized frame as normal.
+    let cap = test_config().max_frame_bytes;
+    let big_payload = vec![0xEE; cap + 4096];
     ws.send(doc_update_frame(&keys.room_id_hex, &big_payload)).await.unwrap();
 
     let result = tokio::time::timeout(Duration::from_secs(5), async {

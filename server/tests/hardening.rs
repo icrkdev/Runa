@@ -552,3 +552,50 @@ async fn bare_room_names_resolve_without_shadowing_real_paths() {
 
     std::fs::remove_dir_all(&dist).ok();
 }
+
+/// A SNAPSHOT carries the whole document state, so the frame cap is really a
+/// ceiling on how large a document's history can still be compacted. At
+/// 256 KiB that sat around 4,000 lines — and past it the elected snapshotter
+/// was disconnected for an oversized frame every ten minutes, forever, while
+/// the log grew until edits stopped being relayed at all.
+#[tokio::test]
+async fn the_frame_cap_leaves_room_for_a_real_documents_snapshot() {
+    let cfg = runa_server::config::Config::from_env();
+    // Measured with yjs: ~58 bytes of encoded state per line of code, and a
+    // heavily co-edited document runs about 1.16x that.
+    let bytes_per_line = 58.0 * 1.16;
+    let lines = (cfg.max_frame_bytes as f64 - 64.0) / bytes_per_line;
+    assert!(
+        lines > 10_000.0,
+        "frame cap {} only allows a ~{:.0}-line document to compact its history",
+        cfg.max_frame_bytes,
+        lines
+    );
+}
+
+/// Oversized frames must be refused, not silently truncated — the client is
+/// expected to never send one, and this is the backstop.
+#[tokio::test]
+async fn an_oversized_frame_still_closes_the_connection() {
+    let s = spawn(runa_server::config::Config { max_frame_bytes: 4096, ..cfg() }).await;
+    let k = create(&s).await;
+    let mut a = join(&s, &k).await;
+
+    let mut big: Vec<u8> = vec![0x52, 0x55, 0x01, 0x03];
+    big.extend_from_slice(&hex::decode(&k.hex).unwrap());
+    big.extend_from_slice(&[0u8; 12]);
+    big.extend_from_slice(&vec![0xAB; 8192]);
+    let _ = a.send(Message::Binary(big.into())).await;
+
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(msg) = a.next().await {
+            match msg {
+                Ok(Message::Close(_)) | Err(_) => return true,
+                _ => continue,
+            }
+        }
+        true
+    })
+    .await;
+    assert!(closed.unwrap_or(false), "an oversized frame must close the socket");
+}

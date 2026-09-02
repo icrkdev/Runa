@@ -34,6 +34,8 @@ export interface SessionEvents {
   onPurge(reason: string): void;
   onCountdown(phase: LadderPhase): void;
   onTtlMismatch(): void;
+  /// Edits are no longer reaching other people, or soon will not be.
+  onHistoryPressure(message: string): void;
   onDivergence(): void;
   onRoomUnavailable(code: number): void;
 }
@@ -172,9 +174,24 @@ export class Session {
             events.onRoomUnavailable(code);
             return;
           }
+          if (code === 4004) {
+            // The room's history is full, so this edit was neither stored nor
+            // relayed. Nobody else saw it. A colour change is not enough
+            // warning for silent data loss.
+            events.onHistoryPressure(
+              "This room is full and your latest edits did not reach anyone. " +
+                "Copy your work out and start a new room.",
+            );
+          }
           events.onTemper("WATCH");
         },
         onEpochStale: () => events.onTemper("WATCH"),
+        onSnapshotTooLarge: () => {
+          events.onHistoryPressure(
+            "This document has grown too large to compact its edit history. " +
+              "Editing still works, but consider splitting it across rooms.",
+          );
+        },
         onDisconnected: () => events.onTemper("COLD"),
       },
     });

@@ -64,7 +64,13 @@ impl Default for Config {
             dist_dir: "dist".into(),
             allow_insecure_ws: false,
             trusted_proxy: false,
-            max_frame_bytes: 256 * 1024,
+            // Sized for SNAPSHOT, not for keystrokes. A snapshot carries the
+            // whole document state and has to fit in one frame or the log can
+            // never be compacted — at 256 KiB that ceiling was around 4,000
+            // lines, past which the elected snapshotter was disconnected for
+            // an oversized frame every ten minutes, forever. 1 MiB puts the
+            // ceiling near 17,000 lines.
+            max_frame_bytes: 1024 * 1024,
             max_log_bytes: 32 * 1024 * 1024,
             max_peers_per_room: 32,
             drain_grace: Duration::from_secs(60),

@@ -72,6 +72,7 @@ function JoinableRoom(props: RoomProps) {
   const [mode, setMode] = useState<"split" | "editor" | "preview">("split");
   const [ladder, setLadder] = useState<LadderPhase>({ kind: "normal", remainingMs: 0 });
   const [ttlMismatch, setTtlMismatch] = useState(false);
+  const [historyPressure, setHistoryPressure] = useState<string | null>(null);
   const [tally, setTally] = useState<{ approved: number; total: number; waitingOn?: string } | null>(null);
   const [diverged, setDiverged] = useState(false);
   const [showExtNotice, setShowExtNotice] = useState(() => !extNoticeShown);
@@ -189,6 +190,7 @@ function JoinableRoom(props: RoomProps) {
             }
           },
           onTtlMismatch: () => setTtlMismatch(true),
+          onHistoryPressure: (m) => setHistoryPressure(m),
           onDivergence: () => setDiverged(true),
           onPurge: () => setPhase({ kind: "purged" }),
           onRoomUnavailable: () => setPhase({ kind: "unavailable" }),
@@ -456,6 +458,12 @@ function JoinableRoom(props: RoomProps) {
         <div className="banner" role="alert">
           <span>Your copy differs from other peers.</span>
           <button onClick={() => setDiverged(false)}>Dismiss</button>
+        </div>
+      )}
+      {historyPressure && (
+        <div className="banner" role="alert">
+          <span className="error-text">{historyPressure}</span>
+          <button onClick={() => setHistoryPressure(null)}>Dismiss</button>
         </div>
       )}
       {ttlMismatch && (
