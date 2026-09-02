@@ -193,8 +193,29 @@ ok "binary, assets, unit installed and service restarted"
 bold "7/8  Caddy vhost"
 $SSH "RUNA_HOST=$HOST bash -euo pipefail -s" <<'REMOTE'
   CADDYFILE=/etc/caddy/Caddyfile
+
+  # Whether the vhost is in the *running* config, which is not the same
+  # question as whether it is in the file. Caddy's reload goes through its
+  # admin API and can no-op silently, leaving the packaged default loaded:
+  # port 80 answers, 443 does not, and no ACME attempt is ever made — which
+  # looks exactly like a certificate problem and is not one.
+  vhost_is_live() {
+    curl -sf --max-time 3 http://127.0.0.1:2019/config/ 2>/dev/null \
+      | grep -q "$RUNA_HOST"
+  }
+
   if sudo grep -q "^${RUNA_HOST}[[:space:]]*{" "$CADDYFILE"; then
-    echo "vhost already present; leaving it alone"
+    if vhost_is_live; then
+      echo "  vhost present and live; leaving it alone"
+      exit 0
+    fi
+    echo "  vhost is in the file but NOT in the running config — restarting Caddy"
+    sudo caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 \
+      || { echo "  Caddyfile does not validate; refusing to restart" >&2; exit 1; }
+    sudo systemctl restart caddy
+    sleep 3
+    vhost_is_live && echo "  vhost now live" \
+      || echo "  WARNING: still not in the running config; check 'systemctl status caddy'" >&2
     exit 0
   fi
 

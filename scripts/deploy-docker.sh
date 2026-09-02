@@ -128,8 +128,24 @@ ok "container running, published to 127.0.0.1:3000 only"
 bold "5/6  Caddy vhost"
 $SSH "RUNA_HOST=$HOST bash -euo pipefail -s" <<'REMOTE'
   CADDYFILE=/etc/caddy/Caddyfile
+
+  # Being in the file is not the same as being in the running config: Caddy's
+  # reload goes through its admin API and can no-op silently.
+  vhost_is_live() {
+    curl -sf --max-time 3 http://127.0.0.1:2019/config/ 2>/dev/null \
+      | grep -q "$RUNA_HOST"
+  }
+
   if sudo grep -q "^${RUNA_HOST}[[:space:]]*{" "$CADDYFILE"; then
-    echo "  vhost already present; leaving it alone"
+    if vhost_is_live; then
+      echo "  vhost present and live; leaving it alone"
+      exit 0
+    fi
+    echo "  vhost is in the file but NOT in the running config — restarting Caddy"
+    sudo caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null 2>&1 \
+      || { echo "  Caddyfile does not validate; refusing to restart" >&2; exit 1; }
+    sudo systemctl restart caddy
+    sleep 3
     exit 0
   fi
   # A broken Caddyfile drops TLS for every site on this box, so: back up,
@@ -143,8 +159,8 @@ $SSH "RUNA_HOST=$HOST bash -euo pipefail -s" <<'REMOTE'
     sudo cp "$BACKUP" "$CADDYFILE"
     exit 1
   fi
-  sudo systemctl reload caddy
-  echo "  vhost appended, validated, Caddy reloaded (backup: $BACKUP)"
+  sudo systemctl restart caddy
+  echo "  vhost appended, validated, Caddy restarted (backup: $BACKUP)"
 REMOTE
 ok "Caddy configured"
 
