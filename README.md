@@ -463,7 +463,7 @@ with anything else needs.
 | `RUNA_MAX_FRAME` | `262144` | Bytes in one WebSocket message |
 | `RUNA_MAX_CONFIG_BLOB` | `4096` | Bytes of encrypted room config held for the room's life |
 | `RUNA_MAX_CONNECTIONS` | `1024` | Concurrent sockets, process-wide. The per-IP limit bounds one address; this bounds the sum |
-| `RUNA_MAX_QUEUE_KB` | `4096` | Bytes one connection may have queued but not yet written to its socket |
+| `RUNA_MAX_QUEUE_KB` | `4096` | Bytes one connection may have queued but not yet written to its socket. Floored at twice `RUNA_MAX_FRAME`, so raising the frame cap raises this too |
 | `RUNA_ROOMS_PER_HR` | `20` | Unlisted rooms one address may create per hour |
 | `RUNA_NAMED_PER_HR` | `5` | Named rooms one address may create per hour |
 | `RUNA_IDLE_CEILING` | `43200` | Seconds an unattended `ttl: none` room survives |
@@ -473,13 +473,15 @@ Sizing for a small shared VM — say 1 GB, with other services on it:
 
 ```sh
 RUNA_MAX_TOTAL_LOG_MB=128 RUNA_MAX_ROOMS=64 RUNA_MAX_PEERS=16 \
-RUNA_MAX_CONNECTIONS=256 RUNA_MAX_QUEUE_KB=512 \
+RUNA_MAX_CONNECTIONS=256 RUNA_MAX_QUEUE_KB=2048 \
 RUNA_TRUSTED_PROXY=1 RUNA_BIND=127.0.0.1:3000 RUNA_DIST=web/dist \
   ./runa-server
 ```
 
-That works out to roughly `25 + 179 + 128 + 32 ≈ 364 MB` worst case, which
-fits a `MemoryMax=512M` unit with room to spare.
+That works out to roughly `25 + 179 + 512 + 32 ≈ 748 MB` worst case. The
+queue term dominates once `RUNA_MAX_FRAME` is 1 MiB, because a queue has to
+hold at least two frames — drop `RUNA_MAX_CONNECTIONS` before dropping
+`RUNA_MAX_QUEUE_KB`, since a queue below one frame cannot accept anything.
 
 The worst case has a closed form, which is the point of the last two:
 

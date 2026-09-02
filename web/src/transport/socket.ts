@@ -44,6 +44,9 @@ export interface SocketEvents {
   onPurge(reason: string): void;
   onTtlExtended(addSecs: number, effectiveSecs: number, addedBy: string): void;
   onError(code: number): void;
+  /// The document has outgrown a single snapshot frame, so its edit history
+  /// can no longer be compacted.
+  onSnapshotTooLarge(bytes: number): void;
   onEpochStale(epoch: number): void;
   onDisconnected(): void;
 }
@@ -60,6 +63,11 @@ export interface SocketOptions {
 }
 
 const textDecoder = new TextDecoder();
+
+/// Must not exceed the server's RUNA_MAX_FRAME. Sending an oversized frame
+/// does not fail gracefully: the server closes the connection with 4004, and
+/// since snapshots are retried on a timer that becomes a disconnect loop.
+const MAX_FRAME_BYTES = 1024 * 1024;
 
 export class RunaSocket {
   private ws: WebSocket | null = null;
@@ -404,7 +412,14 @@ export class RunaSocket {
     const body = new Uint8Array(8 + envelope.length);
     new DataView(body.buffer).setBigUint64(0, covers, false);
     body.set(envelope, 8);
-    this.rawSend(buildFrame(FT.SNAPSHOT, this.opts.roomId, this.epoch, this.cipher.sess, body));
+    const frame = buildFrame(FT.SNAPSHOT, this.opts.roomId, this.epoch, this.cipher.sess, body);
+    if (frame.length > MAX_FRAME_BYTES) {
+      // Skipping leaves the log uncompacted, which is a slow problem.
+      // Sending it closes the connection, which is an immediate one.
+      this.events.onSnapshotTooLarge(frame.length);
+      return;
+    }
+    this.rawSend(frame);
   }
 
   sendSyncRequest(fromIndex: number): void {
