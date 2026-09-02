@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 import { generateIdentity, type Identity } from "../crypto/identity";
 import { rosterHash, type RosterEntry } from "./roster";
-import { ShredMachine, type MachineHooks, type ShredVote } from "./machine";
+import { ShredMachine, supermajorityFor, type MachineHooks, type ShredVote } from "./machine";
 
 function toB64(bytes: Uint8Array): string {
   let s = "";
@@ -191,11 +191,64 @@ describe("shred consensus machine fails closed (spec §5.6)", () => {
     expect(h.hooks.approvals.length).toBe(1);
   });
 
-  it("initiator mode needs no votes", async () => {
+  it("refuses an INITIATOR request from an older or hostile peer", async () => {
+    // The policy is gone from this build, but nothing stops a peer putting it
+    // on the wire. Receiving one must not approve anything.
     const h = await makeHarness(3);
-    await h.machine.createRequest("room", 0, "INITIATOR", null, 60_000);
-    expect(h.machine.state).toBe("APPROVED");
-    expect(h.hooks.approvals.length).toBe(1);
+    const initiator = [...h.identities.keys()][1];
+    const forged = {
+      type: "SHRED_REQUEST",
+      requestId: "forged",
+      roomIdB64: "room",
+      epoch: 0,
+      policy: "INITIATOR",
+      threshold: null,
+      rosterHash: await rosterHash(h.roster),
+      initiatorPeerIdB64: initiator,
+      initiatorPubKeyB64: "",
+      alg: "Ed25519",
+      issuedAt: Date.now(),
+      deadlineMs: 60_000,
+      sig: "",
+    } as unknown as Parameters<typeof h.machine.onRequestIncoming>[0];
+    expect(await h.machine.onRequestIncoming(forged)).toBe(false);
+    expect(h.hooks.approvals.length).toBe(0);
+    expect(h.machine.state).toBe("IDLE");
+  });
+
+  it("refuses a THRESHOLD request whose bar is below a supermajority", async () => {
+    // The bar rides inside the signed request, so a hostile initiator could
+    // claim THRESHOLD(1) and shred alone. Each receiver checks the claim
+    // against its own roster instead of trusting the number.
+    const h = await makeHarness(6);
+    const initiator = [...h.identities.keys()][1];
+    const forged = {
+      type: "SHRED_REQUEST",
+      requestId: "low-bar",
+      roomIdB64: "room",
+      epoch: 0,
+      policy: "THRESHOLD",
+      threshold: 1,
+      rosterHash: await rosterHash(h.roster),
+      initiatorPeerIdB64: initiator,
+      initiatorPubKeyB64: "",
+      alg: "Ed25519",
+      issuedAt: Date.now(),
+      deadlineMs: 60_000,
+      sig: "",
+    } as unknown as Parameters<typeof h.machine.onRequestIncoming>[0];
+    expect(await h.machine.onRequestIncoming(forged)).toBe(false);
+    expect(h.hooks.approvals.length).toBe(0);
+  });
+
+  it("supermajority scales with the room instead of being a fixed 2", () => {
+    // A fixed bar of 2 is minority rule in any room bigger than three, and
+    // one person with two devices is two peers.
+    expect(supermajorityFor(2)).toBe(2);
+    expect(supermajorityFor(3)).toBe(2);
+    expect(supermajorityFor(6)).toBe(4);
+    expect(supermajorityFor(10)).toBe(7);
+    expect(supermajorityFor(30)).toBe(20);
   });
 
   it("model check: no random sequence of valid/forged/duplicate/unreachable events ever destroys without meeting policy", async () => {
@@ -380,13 +433,33 @@ describe("counted policies — arrival order and early exit (review fix 3)", () 
     expect(h.hooks.rejections).toEqual([req.requestId]);
   });
 
-  it("THRESHOLD with the UI's k=2 approves on second vote in a 4-peer room", async () => {
+  it("THRESHOLD needs a supermajority, not the two peers it used to", async () => {
+    // This test previously asserted the opposite: that 2 of 4 was enough.
+    // That is minority rule, and one person with two devices is two peers —
+    // so the fixed bar was a cheaper version of the INITIATOR policy that was
+    // removed for exactly that reason. Four peers now need three.
+    const h = await makeHarness(4);
+    const keys = [...h.identities.keys()];
+    expect(supermajorityFor(4)).toBe(3);
+    const req = await h.machine.createRequest("room", 0, "THRESHOLD", supermajorityFor(4), 60_000);
+
+    // Initiator's implicit APPROVE is 1; a second is still short.
+    await h.machine.onVoteIncoming(await makeVote(h, keys[1], req.requestId, "APPROVE"));
+    expect(h.machine.state).toBe("VOTING");
+
+    // The third reaches the bar.
+    await h.machine.onVoteIncoming(await makeVote(h, keys[2], req.requestId, "APPROVE"));
+    expect(h.machine.state).toBe("APPROVED");
+  });
+
+  it("a stale low bar in the request cannot lower the local one", async () => {
+    // Even if a request carrying THRESHOLD(2) is somehow accepted, evaluate()
+    // takes the stricter of the claimed bar and the local supermajority.
     const h = await makeHarness(4);
     const keys = [...h.identities.keys()];
     const req = await h.machine.createRequest("room", 0, "THRESHOLD", 2, 60_000);
-    // initiator's implicit APPROVE counts as 1; one more vote hits the bar
     await h.machine.onVoteIncoming(await makeVote(h, keys[1], req.requestId, "APPROVE"));
-    expect(h.machine.state).toBe("APPROVED");
+    expect(h.machine.state).toBe("VOTING");
   });
 });
 

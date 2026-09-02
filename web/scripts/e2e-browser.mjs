@@ -133,8 +133,27 @@ async function main() {
     '[role="alertdialog"] #shred-policy option',
     (els) => els.map((e) => e.value),
   );
-  for (const p of ["UNANIMOUS", "MAJORITY", "THRESHOLD", "INITIATOR"]) {
+  for (const p of ["UNANIMOUS", "MAJORITY", "THRESHOLD"]) {
     if (!policyOptions.includes(p)) throw new Error(`policy ${p} not offered`);
+  }
+  // INITIATOR let one participant destroy work everyone else was doing.
+  if (policyOptions.includes("INITIATOR")) {
+    throw new Error("INITIATOR policy is still offered in the UI");
+  }
+
+  // The dropdown must survive the expiry countdown, which re-renders the room
+  // four times a second. It previously did not: the focus trap re-ran on
+  // every render and yanked focus back to Cancel, collapsing the select.
+  await alice.selectOption('[role="alertdialog"] #shred-policy', "MAJORITY");
+  await new Promise((r) => setTimeout(r, 1200));
+  const stillMajority = await alice.$eval(
+    '[role="alertdialog"] #shred-policy',
+    (el) => el.value,
+  );
+  if (stillMajority !== "MAJORITY") {
+    throw new Error(
+      `policy selection did not stick — expected MAJORITY, got ${stillMajority}`,
+    );
   }
 
   await alice.click('[role="alertdialog"] button:has-text("Cancel")');
@@ -158,7 +177,7 @@ async function main() {
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);
-  console.log(`  shred modal showed the limitation copy and all four policies; cancel works`);
+  console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);

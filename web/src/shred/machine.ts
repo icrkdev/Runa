@@ -2,9 +2,20 @@ import * as cbor2 from "cbor2";
 import { signPayload, verifyPayload, type Identity, type SignatureAlg } from "../crypto/identity";
 import { rosterHash, type RosterEntry } from "./roster";
 
-export type Policy = "UNANIMOUS" | "MAJORITY" | "THRESHOLD" | "INITIATOR";
+/// INITIATOR was removed deliberately: it let one participant destroy work
+/// everyone else was still doing. THRESHOLD survives only because it now
+/// scales with the room — as a fixed "any 2 peers" it was the same hazard
+/// wearing the costume of consensus, and cheaper to reach, since one person
+/// with two devices is two peers.
+export type Policy = "UNANIMOUS" | "MAJORITY" | "THRESHOLD";
 
-export const POLICIES: readonly Policy[] = ["UNANIMOUS", "MAJORITY", "THRESHOLD", "INITIATOR"];
+export const POLICIES: readonly Policy[] = ["UNANIMOUS", "MAJORITY", "THRESHOLD"];
+
+/// Two-thirds, never fewer than two. Sits between MAJORITY and UNANIMOUS:
+/// stricter than half, but does not hand a veto to one absent person.
+export function supermajorityFor(peerCount: number): number {
+  return Math.max(2, Math.ceil((peerCount * 2) / 3));
+}
 
 export interface ShredRequest {
   type: "SHRED_REQUEST";
@@ -156,14 +167,10 @@ export class ShredMachine {
     };
     request.sig = await signObject(this.identity, { ...request });
     this.frozen = { ...request, frozenRoster: roster };
-    this.state = policy === "INITIATOR" ? "APPROVED" : "VOTING";
+    this.state = "VOTING";
     this.votes.set(this.myPeerIdB64, "APPROVE");
-    if (policy !== "INITIATOR") {
-      this.armDeadline(deadlineMs);
-      this.evaluate();
-    } else {
-      this.hooks.onApproved(request.requestId);
-    }
+    this.armDeadline(deadlineMs);
+    this.evaluate();
     return request;
   }
 
@@ -218,9 +225,21 @@ export class ShredMachine {
       this.hooks.onVoteRejectedByGuard("malformed-request");
       return false;
     }
-    if (request.policy === "INITIATOR") {
-      this.hooks.onVoteRejectedByGuard("initiator-requests-are-not-voted");
+    // Refuse a policy this build no longer offers. An older or hostile peer
+    // can still put INITIATOR on the wire; nobody has to honour it.
+    if (!POLICIES.includes(request.policy)) {
+      this.hooks.onVoteRejectedByGuard("policy-not-permitted");
       return false;
+    }
+    // The bar travels inside the signed request, so a hostile initiator could
+    // otherwise claim THRESHOLD(1) and shred alone. Each receiver checks the
+    // claim against its own roster rather than trusting the number.
+    if (request.policy === "THRESHOLD") {
+      const required = supermajorityFor(this.rosterProvider().length);
+      if (typeof request.threshold !== "number" || request.threshold < required) {
+        this.hooks.onVoteRejectedByGuard("threshold-below-supermajority");
+        return false;
+      }
     }
     const roster = this.rosterProvider();
     const localHash = await rosterHash(roster);
@@ -369,12 +388,14 @@ export class ShredMachine {
         return;
       }
       case "THRESHOLD": {
-        const bar = req.threshold ?? Number.MAX_SAFE_INTEGER;
+        // Never trust the number in the request over the local roster.
+        const bar = Math.max(
+          req.threshold ?? Number.MAX_SAFE_INTEGER,
+          supermajorityFor(total),
+        );
         this.settleCounted(req, approvals, undecided, bar);
         return;
       }
-      case "INITIATOR":
-        return;
     }
   }
 

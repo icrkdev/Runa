@@ -20,7 +20,8 @@ import { Api } from "../api";
 import { renderMarkdown, isExternalHref } from "../render/pipeline";
 import { type TemperState } from "../ui/temper";
 import { QuorumDial, useAccent } from "../ui/dial";
-import { ShredModal, THRESHOLD_K } from "../ui/ShredModal";
+import { ShredModal } from "../ui/ShredModal";
+import { supermajorityFor } from "../shred/machine";
 import type { Policy } from "../shred/machine";
 import type { ShredRequest } from "../shred/machine";
 import { MissingKey } from "./MissingKey";
@@ -298,7 +299,10 @@ function JoinableRoom(props: RoomProps) {
   const confirmShred = useCallback((policy: Policy) => {
     setShredLabel("VOTING");
     void sessionRef.current
-      ?.requestShred(policy, policy === "THRESHOLD" ? THRESHOLD_K : null)
+      ?.requestShred(
+        policy,
+        policy === "THRESHOLD" ? supermajorityFor(sessionRef.current?.peerCount ?? 0) : null,
+      )
       .catch(() => {});
   }, []);
 
@@ -585,6 +589,7 @@ function JoinableRoom(props: RoomProps) {
       <ShredModal
         open={shredOpen}
         awayCount={awayCount}
+        peerCount={peerCount}
         policy={shredPolicy}
         onPolicyChange={(p) => setShredPolicy(p)}
         peers={
