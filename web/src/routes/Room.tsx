@@ -207,6 +207,23 @@ function JoinableRoom(props: RoomProps) {
     };
   }, []);
 
+  // Named rooms show the passphrase gate immediately and check existence in
+  // parallel, so a live room is never delayed by the round trip while a
+  // shredded one stops asking for a key it has no use for.
+  useEffect(() => {
+    const name = props.name;
+    if (!name) return;
+    let cancelled = false;
+    void (async () => {
+      const resolved = await api.resolveName(name).catch(() => null);
+      if (cancelled || !resolved) return;
+      if (!resolved.found) setPhase((p) => (p.kind === "passphrase" ? { kind: "unavailable" } : p));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.name]);
+
   useEffect(() => {
     if (!markdown) {
       setHtml("");
@@ -263,14 +280,27 @@ function JoinableRoom(props: RoomProps) {
     [],
   );
 
+  /// Opens the dialog. Deliberately does NOT propose anything: this used to
+  /// fire the request immediately, which set the state to VOTING before the
+  /// modal had rendered — leaving the policy selector and the away-peer
+  /// warning, both of which only appear while IDLE, permanently invisible.
+  /// The dialog is a confirmation step, so it has to exist before the thing
+  /// it confirms.
   const startShred = useCallback(() => {
     setAwayCount(sessionRef.current?.awayPeers().length ?? 0);
+    setShredLabel("IDLE");
     setShredOpen(true);
     setTemper("ARMED");
+  }, []);
+
+  /// The actual proposal, once someone has seen who is away and which policy
+  /// applies and pressed Shred anyway.
+  const confirmShred = useCallback((policy: Policy) => {
+    setShredLabel("VOTING");
     void sessionRef.current
-      ?.requestShred(shredPolicy, shredPolicy === "THRESHOLD" ? THRESHOLD_K : null)
+      ?.requestShred(policy, policy === "THRESHOLD" ? THRESHOLD_K : null)
       .catch(() => {});
-  }, [shredPolicy]);
+  }, []);
 
   const cycleMode = useCallback(() => {
     setMode((m) => (m === "split" ? "editor" : m === "editor" ? "preview" : "split"));
@@ -572,9 +602,7 @@ function JoinableRoom(props: RoomProps) {
           sessionRef.current?.cancelShred();
           setTemper("SECURE");
         }}
-        onConfirm={() => {
-          setShredLabel("VOTING");
-        }}
+        onConfirm={confirmShred}
       />
       {shredPrompt && (
         <ShredVotePrompt
