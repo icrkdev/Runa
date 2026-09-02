@@ -3,7 +3,7 @@ import { RunaSocket, fromB64, type JoinAck } from "./transport/socket";
 import { FT } from "./transport/frame";
 import { RunaDoc, wrapWithLengthAndPad } from "./doc/ydoc";
 import { bindMonaco, type Binding } from "./doc/binding";
-import { AwarenessHub } from "./doc/awareness";
+import { AwarenessHub, handleFromPubkey } from "./doc/awareness";
 import { generateIdentity, type Identity } from "./crypto/identity";
 import {
   ShredMachine,
@@ -127,6 +127,13 @@ export class Session {
         onPeerJoin: (entry) => {
           const id = toB64(entry.peerId);
           roster.set(id, entry);
+          // Names come from the key the roster binds to this peer, never from
+          // what the peer says its name is.
+          if (entry.pubkey) {
+            void handleFromPubkey(entry.pubkey).then((h) =>
+              sessionRef?.awareness?.setHandle(id, h),
+            );
+          }
           // They are back; stop showing them as away.
           away.delete(id);
           events.onPeersChanged(roster.size);
@@ -134,19 +141,22 @@ export class Session {
 
         onPeerLeave: (peerId) => {
           const id = toB64(peerId);
+          const entry = roster.get(id);
           if (roster.delete(id)) {
             // Remember them briefly, by name. A locked phone is
             // indistinguishable on the wire from someone closing the tab, and
             // the difference matters when a shred is about to be proposed.
             // The handle comes from their last presence broadcast; if they
             // never sent one, fall back to a short form of their peer id.
-            const seen = sessionRef?.awareness
-              ?.snapshot()
-              .find((e) => e.senderId === id);
-            away.set(id, {
-              handle: seen?.state.handle ?? id.slice(0, 6),
-              leftAt: Date.now(),
-            });
+            // Derive from their roster key, captured before the entry goes.
+            const pubkey = entry?.pubkey;
+            away.set(id, { handle: id.slice(0, 6), leftAt: Date.now() });
+            if (pubkey) {
+              void handleFromPubkey(pubkey).then((h) => {
+                const rec = away.get(id);
+                if (rec) rec.handle = h;
+              });
+            }
           }
           events.onPeersChanged(roster.size);
         },
@@ -469,8 +479,16 @@ export class Session {
     this.ownHash = Array.from(new Uint8Array(digest).slice(0, 8))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    const hashes = this.awareness?.foreignHashes();
-    if (hashes && hashes.size > 0 && !hashes.has(this.ownHash)) {
+    // Warn only when the other peers AGREE on a document that is not ours.
+    // Requiring a majority of reporters means one peer broadcasting a
+    // made-up hash can no longer tell everyone else they have diverged —
+    // which was a cheap way to wear the warning out until people ignored it.
+    const counts = this.awareness?.foreignHashCounts();
+    const reporters = counts ? [...counts.values()].reduce((a, b) => a + b, 0) : 0;
+    const agreed = counts
+      ? [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+      : undefined;
+    if (agreed && agreed[0] !== this.ownHash && agreed[1] * 2 > reporters) {
       this.events.onDivergence();
     }
   }
