@@ -1,14 +1,14 @@
 import { useEffect, useRef } from "react";
 import type { DialPeer } from "./dial";
+import { supermajorityFor, type Policy } from "../shred/machine";
 
-export type Policy = "UNANIMOUS" | "MAJORITY" | "THRESHOLD" | "INITIATOR";
-
-/// The k in THRESHOLD(k). Exported so the option label and the request that
-/// the label describes can never disagree.
-export const THRESHOLD_K = 2;
+export type { Policy };
 
 export interface ShredModalProps {
   open: boolean;
+  /// How many people are in the room, so the dialog can state the actual bar
+  /// rather than a constant that stopped being true as people joined.
+  peerCount: number;
   /// People who were in the room within the last few minutes and are not
   /// connected now — a locked phone looks exactly like a closed tab.
   awayCount?: number;
@@ -29,11 +29,18 @@ export function ShredModal(props: ShredModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
+  // Kept in a ref so the effect below can depend on `open` alone. Depending
+  // on `props` re-ran it on every render — and the expiry countdown ticks
+  // four times a second — so focus was yanked back to Cancel continuously,
+  // which collapses an open dropdown before anyone can pick anything.
+  const onCancelRef = useRef(props.onCancel);
+  onCancelRef.current = props.onCancel;
+
   useEffect(() => {
     if (!open) return;
     cancelRef.current?.focus();
     const trap = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onCancel();
+      if (e.key === "Escape") onCancelRef.current();
       if (e.key === "Tab" && dialogRef.current) {
         const focusables = dialogRef.current.querySelectorAll("button");
         const first = focusables[0];
@@ -49,7 +56,7 @@ export function ShredModal(props: ShredModalProps) {
     };
     document.addEventListener("keydown", trap);
     return () => document.removeEventListener("keydown", trap);
-  }, [open, props]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -76,7 +83,7 @@ export function ShredModal(props: ShredModalProps) {
         )}
         {props.policy === "UNANIMOUS" && (
           <p className="hint">
-            A single peer can block this. That is what unanimous means.
+            Any one person can block this. That is what unanimous means.
             {props.waitingOnHandle ? ` Waiting on ${props.waitingOnHandle}.` : ""}
           </p>
         )}
@@ -98,24 +105,29 @@ export function ShredModal(props: ShredModalProps) {
                 marginTop: 6,
               }}
             >
-              <option value="UNANIMOUS">Unanimous — every peer must agree</option>
-              <option value="MAJORITY">Majority — more than half</option>
-              <option value="THRESHOLD">Threshold — at least {THRESHOLD_K} peers</option>
-              <option value="INITIATOR">Initiator — you alone decide</option>
+              <option value="UNANIMOUS">Everyone here must agree</option>
+              <option value="MAJORITY">More than half must agree</option>
+              <option value="THRESHOLD">
+                Two-thirds must agree ({supermajorityFor(props.peerCount)} of {props.peerCount})
+              </option>
             </select>
             {props.policy === "UNANIMOUS" && (
               <p className="hint">
-                A single peer can block this. That is what unanimous means.
+                Any one person can block this — including someone who is away.
               </p>
             )}
             {props.policy === "MAJORITY" && (
-              <p className="hint">More than half of the connected peers.</p>
+              <p className="hint">
+                {Math.floor(props.peerCount / 2) + 1} of the {props.peerCount} people
+                connected right now.
+              </p>
             )}
             {props.policy === "THRESHOLD" && (
-              <p className="hint">At least {THRESHOLD_K} of the connected peers.</p>
-            )}
-            {props.policy === "INITIATOR" && (
-              <p className="hint">You can destroy the room without asking anyone.</p>
+              <p className="hint">
+                {supermajorityFor(props.peerCount)} of the {props.peerCount} people
+                connected right now — stricter than a majority, but one person
+                cannot block it.
+              </p>
             )}
           </div>
         )}
