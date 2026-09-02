@@ -46,19 +46,29 @@ Pick Docker for operational isolation, systemd for process confinement.
 ## The one command
 
 ```sh
-./scripts/deploy-oracle.sh
+RUNA_HOST=runa.example.com RUNA_BOX_IP=203.0.113.10 ./scripts/deploy-oracle.sh
 ```
 
-Re-run it to ship an update; it is idempotent. Override the defaults with
-environment variables if your host differs:
+`RUNA_HOST` and `RUNA_BOX_IP` are **required** — there is deliberately no
+default, because the obvious default is whatever host you set up first, and
+deploying onto the wrong machine is not an error you want to make quietly.
 
-```sh
-RUNA_HOST=runa.example.com \
-RUNA_BOX_IP=203.0.113.10 \
-RUNA_SSH_USER=ubuntu \
-RUNA_SSH_KEY=~/.ssh/id_ed25519 \
-  ./scripts/deploy-oracle.sh
-```
+Re-run it to ship an update; it is idempotent. Other knobs:
+
+| Variable | Default | |
+|---|---|---|
+| `RUNA_SSH_USER` | `ubuntu` | |
+| `RUNA_SSH_KEY` | `~/.ssh/runa_oracle` | |
+| `RUNA_MEM_MAX` / `RUNA_MEM_HIGH` | `2G` / `1700M` | cgroup caps |
+| `RUNA_LOG_MB` | `700` | retained ciphertext, all rooms |
+| `RUNA_ROOMS` / `RUNA_PEERS` | `512` / `32` | |
+| `RUNA_CONNS` / `RUNA_QUEUE_KB` | `512` / `1024` | |
+| `RUNA_NEIGHBOUR_URL` | *(unset)* | a service to health-check afterwards |
+
+The memory knobs move together: the script writes the `RUNA_MAX_*` values
+into `/etc/runa/runa.env` and patches `MemoryMax`/`MemoryHigh` in the unit
+from the same invocation, so the cgroup cap and the application ceilings
+cannot drift apart.
 
 It refuses to run on a dirty working tree. `git archive` ships the committed
 tree, so uncommitted work would be silently left behind — the script makes

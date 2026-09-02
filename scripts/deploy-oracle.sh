@@ -15,11 +15,29 @@
 
 set -euo pipefail
 
-HOST=${RUNA_HOST:-runa.vardrlabs.com}
-BOX_IP=${RUNA_BOX_IP:-193.122.143.130}
+# ── Target. No defaults for the host: guessing wrong deploys onto the wrong
+# machine, and the obvious guess is whatever box you set up first.
+HOST=${RUNA_HOST:?set RUNA_HOST, e.g. runa.example.com}
+BOX_IP=${RUNA_BOX_IP:?set RUNA_BOX_IP, the instance public IP}
 SSH_USER=${RUNA_SSH_USER:-ubuntu}
-SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/skipti_oracle}
+SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/runa_oracle}
 SKIP_WEB_BUILD=${RUNA_SKIP_WEB_BUILD:-0}
+
+# Sizing. The cgroup cap and the RUNA_* ceilings must move together, or the
+# kernel kills the process and every live document dies with it:
+#   peak ~= 25 MB + 1.4 x LOG_MB + (CONNECTIONS x QUEUE_KB) + ~32 MB
+# Defaults suit a host with ~4 GB to spare. Override for a bigger one.
+MEM_MAX=${RUNA_MEM_MAX:-2G}
+MEM_HIGH=${RUNA_MEM_HIGH:-1700M}
+LOG_MB=${RUNA_LOG_MB:-700}
+MAX_ROOMS=${RUNA_ROOMS:-512}
+MAX_PEERS=${RUNA_PEERS:-32}
+MAX_CONNS=${RUNA_CONNS:-512}
+QUEUE_KB=${RUNA_QUEUE_KB:-1024}
+
+# A neighbouring service to health-check at the end. Empty = skip. Set it
+# when this host runs something else you would hate to have disturbed.
+NEIGHBOUR=${RUNA_NEIGHBOUR_URL:-}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -111,7 +129,9 @@ ok "runa-server built"
 
 # ── 6. Install ───────────────────────────────────────────────────────────
 bold "6/8  Install"
-$SSH "bash -euo pipefail -s" <<'REMOTE'
+$SSH "MEM_MAX=$MEM_MAX MEM_HIGH=$MEM_HIGH LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS \
+      MAX_PEERS=$MAX_PEERS MAX_CONNS=$MAX_CONNS QUEUE_KB=$QUEUE_KB \
+      bash -euo pipefail -s" <<'REMOTE'
   sudo install -m 755 ~/runa/target/release/runa-server /usr/local/bin/runa-server
 
   # Stage the bundle beside the live one and swap, so a half-extracted
@@ -129,11 +149,24 @@ $SSH "bash -euo pipefail -s" <<'REMOTE'
   # Never clobber operator-tuned limits on a redeploy.
   if [ ! -f /etc/runa/runa.env ]; then
     sudo install -m 644 /tmp/runa.env /etc/runa/runa.env
-    echo "installed /etc/runa/runa.env"
+    # Apply the sizing this deploy was invoked with.
+    sudo sed -i \
+      -e "s/^RUNA_MAX_TOTAL_LOG_MB=.*/RUNA_MAX_TOTAL_LOG_MB=$LOG_MB/" \
+      -e "s/^RUNA_MAX_ROOMS=.*/RUNA_MAX_ROOMS=$MAX_ROOMS/" \
+      -e "s/^RUNA_MAX_PEERS=.*/RUNA_MAX_PEERS=$MAX_PEERS/" \
+      -e "s/^RUNA_MAX_CONNECTIONS=.*/RUNA_MAX_CONNECTIONS=$MAX_CONNS/" \
+      -e "s/^RUNA_MAX_QUEUE_KB=.*/RUNA_MAX_QUEUE_KB=$QUEUE_KB/" \
+      /etc/runa/runa.env
+    echo "installed /etc/runa/runa.env (log=${LOG_MB}MB conns=$MAX_CONNS)"
   else
-    echo "kept existing /etc/runa/runa.env"
+    echo "kept existing /etc/runa/runa.env — edit it by hand to resize"
   fi
-  sudo install -m 644 /tmp/runa.service /etc/systemd/system/runa.service
+  # The cgroup caps live in the unit, which is always rewritten, so they
+  # follow the sizing the deploy was invoked with.
+  sed -e "s/^MemoryMax=.*/MemoryMax=$MEM_MAX/" \
+      -e "s/^MemoryHigh=.*/MemoryHigh=$MEM_HIGH/" \
+      /tmp/runa.service | sudo tee /etc/systemd/system/runa.service >/dev/null
+  sudo chmod 644 /etc/systemd/system/runa.service
 
   sudo systemctl daemon-reload
   sudo systemctl enable runa >/dev/null 2>&1 || true
@@ -200,10 +233,12 @@ LEAKED="$($SSH "curl -s -o /dev/null http://127.0.0.1:3000/ ; sudo journalctl -u
   && ok "no client addresses in Caddy's logs" \
   || warn "$LEAKED access-log lines carried remote_ip — check the log directives"
 
-SKIPTI="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://skipti.vardrlabs.com/version || true)"
-[ "$SKIPTI" = "200" ] \
-  && ok "skipti.vardrlabs.com still healthy" \
-  || warn "skipti.vardrlabs.com returned $SKIPTI — check it before walking away"
+if [ -n "$NEIGHBOUR" ]; then
+  N="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$NEIGHBOUR" || true)"
+  [ "$N" = "200" ] \
+    && ok "$NEIGHBOUR still healthy" \
+    || warn "$NEIGHBOUR returned $N — check before walking away"
+fi
 
 echo
 bold "DEPLOYED  https://$HOST/"
