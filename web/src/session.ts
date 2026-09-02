@@ -35,6 +35,7 @@ export interface SessionEvents {
   onCountdown(phase: LadderPhase): void;
   onTtlMismatch(): void;
   onDivergence(): void;
+  onRoomUnavailable(code: number): void;
 }
 
 export interface SessionConfig {
@@ -66,6 +67,7 @@ export class Session {
   private destroyed = false;
   wipeContext: WipeContext = {};
   private snapshotTimer: ReturnType<typeof setInterval> | null = null;
+  private cursorTimerRef: (() => void) | null = null;
   private steadyTimer: ReturnType<typeof setInterval> | null = null;
   private ownHash = "";
 
@@ -118,7 +120,17 @@ export class Session {
         onPurge: (reason) => events.onPurge(reason),
         onTtlExtended: (remaining, effective, addedBy) =>
           sessionRef?.handleTtlExtended(remaining, effective, addedBy),
-        onError: () => events.onTemper("WATCH"),
+        onError: (code) => {
+          // 4001 after a successful join means the room is gone, not that the
+          // key is wrong. Discarding the code left the UI on "connecting"
+          // while the socket retried forever.
+          if (code === 4001 || code === 4010 || code === 4011) {
+            socket.stopReconnecting();
+            events.onRoomUnavailable(code);
+            return;
+          }
+          events.onTemper("WATCH");
+        },
         onEpochStale: () => events.onTemper("WATCH"),
         onDisconnected: () => events.onTemper("COLD"),
       },
@@ -136,7 +148,12 @@ export class Session {
     });
 
     const machine = new ShredMachine(identity, "", () => [...roster.values()], {
-      onApproved: () => void sessionRef?.purgeNow(),
+      // Record only. Wiping here would tear down the socket inside
+      // castMyVote(), before respondToShred() has had a chance to transmit
+      // the very ballot that produced the approval — so the last peer to
+      // approve would destroy its own copy while everyone else sat one vote
+      // short. The session flushes this once the wire is clear.
+      onApproved: (requestId) => sessionRef?.markPurgeApproved(requestId),
       onRejected: () => events.onShredState("REJECTED"),
       onExpired: () => events.onShredState("EXPIRED"),
       onStalled: (_id, waiting) =>
@@ -446,6 +463,7 @@ export class Session {
     }
     if (frameType === FT.SHRED_VOTE) {
       await this.machine.onVoteIncoming(decoded as never);
+      await this.flushPendingPurge();
       return;
     }
     if (frameType === FT.SHRED_CANCEL) {
@@ -486,16 +504,28 @@ export class Session {
         if (seen.has(peerIdB64)) machine.noteHeartbeat(peerIdB64);
         else machine.markUnreachable(peerIdB64);
       }
+      void this.flushPendingPurge();
     }, 10_000);
 
     this.startSnapshotLoop();
+    // Every cursor movement used to mean an AEAD encrypt plus a websocket
+    // frame — and typing moves the cursor on every keystroke, so the editor
+    // was doing crypto per character. Coalesce to at most one frame per
+    // 120 ms; presence does not need to be sharper than that.
+    let cursorTimer: ReturnType<typeof setTimeout> | null = null;
+    let latest: { line: number; column: number } | null = null;
     editor.onDidChangeCursorPosition((e) => {
-      void this.awareness?.broadcastCursor(
-        e.position.lineNumber,
-        e.position.column,
-        this.ownDocumentHash(),
-      );
+      latest = { line: e.position.lineNumber, column: e.position.column };
+      if (cursorTimer) return;
+      cursorTimer = setTimeout(() => {
+        cursorTimer = null;
+        const p = latest;
+        if (p) void this.awareness?.broadcastCursor(p.line, p.column, this.ownDocumentHash());
+      }, 120);
     });
+    this.cursorTimerRef = () => {
+      if (cursorTimer) clearTimeout(cursorTimer);
+    };
   }
 
   setWipeContext(ctx: WipeContext): void {
@@ -521,16 +551,35 @@ export class Session {
     return this.internals.roster.size;
   }
 
+  /// Set when consensus is reached; acted on only once whatever frame
+  /// produced it has actually been sent.
+  private pendingPurge: string | null = null;
+
+  markPurgeApproved(requestId: string): void {
+    this.pendingPurge = requestId;
+  }
+
+  /// Safe to call anywhere; does nothing unless consensus was reached.
+  private async flushPendingPurge(): Promise<void> {
+    if (!this.pendingPurge) return;
+    this.pendingPurge = null;
+    await this.purgeNow();
+  }
+
   async requestShred(policy: Policy, threshold: number | null, deadlineMs = 60_000): Promise<void> {
     const roomB64 = toB64(hexToBytes(this.cfg.roomIdHex));
     const request = await this.machine.createRequest(roomB64, 0, policy, threshold, deadlineMs);
+    // INITIATOR reaches consensus the instant the request is created, so the
+    // send has to happen before the purge or no other peer ever hears of it.
     await this.socket.sendShredFrame(FT.SHRED_REQUEST, cbor2.encode({ ...request }));
+    await this.flushPendingPurge();
   }
 
   async respondToShred(request: ShredRequest, choice: "APPROVE" | "REJECT"): Promise<void> {
     const vote = await this.machine.castMyVote(request.requestId, choice);
     if (!vote) return;
     await this.socket.sendShredFrame(FT.SHRED_VOTE, cbor2.encode({ ...vote }));
+    await this.flushPendingPurge();
   }
 
   cancelShred(): void {
@@ -561,6 +610,7 @@ export class Session {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     if (this.snapshotTimer) clearInterval(this.snapshotTimer);
     if (this.steadyTimer) clearInterval(this.steadyTimer);
+    this.cursorTimerRef?.();
     this.binding?.dispose();
     this.doc.destroy();
     this.socket.close();

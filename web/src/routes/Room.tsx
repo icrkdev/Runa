@@ -43,7 +43,8 @@ type Phase =
   | { kind: "auth-failed" }
   | { kind: "insecure-origin" }
   | { kind: "live"; session: Session; peerCount: number }
-  | { kind: "purged" };
+  | { kind: "purged" }
+  | { kind: "unavailable" };
 
 let extNoticeShown = false;
 let externalConfirmed = false;
@@ -185,6 +186,7 @@ function JoinableRoom(props: RoomProps) {
           onTtlMismatch: () => setTtlMismatch(true),
           onDivergence: () => setDiverged(true),
           onPurge: () => setPhase({ kind: "purged" }),
+          onRoomUnavailable: () => setPhase({ kind: "unavailable" }),
         },
       );
       sessionRef.current = session;
@@ -242,7 +244,17 @@ function JoinableRoom(props: RoomProps) {
         },
       };
       await sessionRef.current.attachEditor(monacoMod, editor);
-      model.onDidChangeContent(() => setMarkdown(model.getValue()));
+      // getValue() copies the whole buffer; doing it per keystroke made
+      // typing cost O(document). One read per idle pause is enough for a
+      // preview that is itself debounced.
+      let readTimer: ReturnType<typeof setTimeout> | null = null;
+      model.onDidChangeContent(() => {
+        if (readTimer) return;
+        readTimer = setTimeout(() => {
+          readTimer = null;
+          setMarkdown(model.getValue());
+        }, 90);
+      });
     },
     [],
   );
@@ -327,6 +339,24 @@ function JoinableRoom(props: RoomProps) {
             Whoever runs this server needs to put HTTPS in front of it — see
             <code className="mono"> Deploying to the internet </code> in the
             README. <code className="mono">localhost</code> is exempt.
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (phase.kind === "unavailable") {
+    return (
+      <main className="landing">
+        <h1 className="mono">RÚNA</h1>
+        <p className="micro-label tag">THIS ROOM IS GONE</p>
+        <div className="panel">
+          <p>
+            It was shredded, it expired, or the server restarted. Rooms live
+            only in memory — there is no copy to recover, which is the point.
+          </p>
+          <p style={{ marginBottom: 0 }}>
+            <a href="/">← New room</a>
           </p>
         </div>
       </main>
@@ -641,6 +671,11 @@ export const MONACO_OPTIONS = {
   insertSpaces: true,
   renderWhitespace: "selection",
   minimap: { enabled: false },
+  // Without this Monaco never observes container resizes, so its cached
+  // dimensions go stale and pointer coordinates map to the wrong glyph —
+  // drag-selection and touch-selection silently stop working while
+  // keyboard selection (ctrl/cmd+A) still behaves.
+  automaticLayout: true,
   contextmenu: true,
   quickSuggestions: false,
   wordBasedSuggestions: "off",

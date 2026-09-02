@@ -226,6 +226,17 @@ pub struct Room {
 /// vector: one peer could mint a new entry per frame, forever.
 struct PurgeAckSet {
     peers: std::collections::HashSet<[u8; 16]>,
+    /// The peers connected when this request's FIRST ack arrived.
+    ///
+    /// Quorum is measured against this, not against whoever happens to be
+    /// connected when the last ack lands. Every peer wipes and disconnects
+    /// immediately after acking, so a live-set comparison shrinks as the acks
+    /// arrive and is satisfied by whoever happens to ack last — which is one
+    /// peer, not consensus. Freezing the cohort also denies the inverse
+    /// attack: a hostile peer cannot shrink the denominator by dropping
+    /// sockets, because the honest peers are already in the cohort and still
+    /// have to ack.
+    cohort: std::collections::HashSet<[u8; 16]>,
     opened: Instant,
 }
 
@@ -465,11 +476,11 @@ impl Room {
         }
         let set = acks.entry(request_id.to_string()).or_insert_with(|| PurgeAckSet {
             peers: std::collections::HashSet::new(),
+            cohort: live.clone(),
             opened: now,
         });
         set.peers.insert(peer_id);
-        let acked_and_live = set.peers.intersection(&live).count();
-        if acked_and_live >= live.len() && !live.is_empty() {
+        if !set.cohort.is_empty() && set.cohort.is_subset(&set.peers) {
             PurgeAckStatus::AllAcked(request_id.to_string())
         } else {
             PurgeAckStatus::Pending

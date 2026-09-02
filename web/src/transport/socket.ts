@@ -129,6 +129,22 @@ export class RunaSocket {
     }, this.backoffMs + jitter);
   }
 
+  /// Stop retrying without tearing down keys — used when the server says the
+  /// room is gone, where reconnecting can only ever fail again.
+  stopReconnecting(): void {
+    this.closedByUs = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    try {
+      this.ws?.close();
+    } catch {
+      /* already closing */
+    }
+    this.ws = null;
+  }
+
   close(): void {
     this.closedByUs = true;
     this.joined = false;

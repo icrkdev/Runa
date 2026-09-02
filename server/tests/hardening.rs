@@ -440,3 +440,62 @@ async fn connections_stop_at_the_process_ceiling() {
     ok.send(join_frame(&k.hex, Some(&k.auth))).await.unwrap();
     let _ = next_ft(&mut ok, 0x02).await;
 }
+
+/// Every peer wipes and disconnects the instant it acks, so by the time the
+/// last ack lands the earlier ackers are gone. Measuring quorum against the
+/// *live* set at that moment is satisfied by whoever acked last — one peer,
+/// not consensus — which in practice shredded one device per round and left
+/// everyone else in the room.
+#[tokio::test]
+async fn acks_still_count_after_the_acking_peer_disconnects() {
+    let s = spawn(cfg()).await;
+    let k = create(&s).await;
+
+    let mut a = join(&s, &k).await;
+    let mut b = join(&s, &k).await;
+    let mut c = join(&s, &k).await;
+
+    // A acks, then leaves — exactly what executeWipe does.
+    a.send(json_frame(&k.hex, 0x14, json!({"request_id": "consensus"}))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // B acks and leaves too.
+    b.send(json_frame(&k.hex, 0x14, json!({"request_id": "consensus"}))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    drop(b);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // C is now the only live peer. Under a live-set comparison its single ack
+    // would satisfy "everyone connected has acked" and purge. It must not:
+    // the cohort was three, and C completing it is real consensus — so the
+    // purge SHOULD fire here, and C should be told.
+    c.send(json_frame(&k.hex, 0x14, json!({"request_id": "consensus"}))).await.unwrap();
+    let purged = tokio::time::timeout(Duration::from_secs(3), next_ft(&mut c, 0x13)).await;
+    assert!(purged.is_ok(), "all three cohort members acked; the room must be purged");
+}
+
+/// The inverse: a lone peer must not reach quorum just because the others
+/// left without ever acking.
+#[tokio::test]
+async fn a_departed_peer_that_never_acked_still_blocks_the_purge() {
+    let s = spawn(cfg()).await;
+    let k = create(&s).await;
+
+    let mut attacker = join(&s, &k).await;
+    let honest = join(&s, &k).await;
+
+    // Attacker acks first, fixing the cohort at both peers.
+    attacker.send(json_frame(&k.hex, 0x14, json!({"request_id": "x"}))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // The honest peer's connection drops without ever approving.
+    drop(honest);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Attacker re-acks, now alone. The cohort still contains the honest peer.
+    attacker.send(json_frame(&k.hex, 0x14, json!({"request_id": "x"}))).await.unwrap();
+    let purged = tokio::time::timeout(Duration::from_secs(2), next_ft(&mut attacker, 0x13)).await;
+    assert!(purged.is_err(), "a peer that never acked must keep blocking the purge");
+}
