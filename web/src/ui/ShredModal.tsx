@@ -9,6 +9,9 @@ export const THRESHOLD_K = 2;
 
 export interface ShredModalProps {
   open: boolean;
+  /// People who were in the room within the last few minutes and are not
+  /// connected now — a locked phone looks exactly like a closed tab.
+  awayCount?: number;
   policy: Policy;
   onPolicyChange(policy: Policy): void;
   peers: DialPeer[];
@@ -62,6 +65,15 @@ export function ShredModal(props: ShredModalProps) {
       >
         <h2 id="shred-title" className="micro-label">SHRED · {props.policy}</h2>
         <p id="shred-desc">{LIMIT_COPY}</p>
+        {props.state === "IDLE" && (props.awayCount ?? 0) > 0 && (
+          <p className="error-text" role="alert">
+            {props.awayCount === 1
+              ? "Someone who was here a moment ago is not connected right now"
+              : `${props.awayCount} people who were here a moment ago are not connected right now`}
+            {" "}— a locked phone looks the same as a closed tab. They cannot
+            vote while away. Shredding now decides without them.
+          </p>
+        )}
         {props.policy === "UNANIMOUS" && (
           <p className="hint">
             A single peer can block this. That is what unanimous means.

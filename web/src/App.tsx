@@ -12,8 +12,15 @@ function parseRoute(): Route {
   const fragment = window.location.hash;
   const unlisted = path.match(/^\/r\/([0-9a-f]{32})\/?$/);
   if (unlisted) return { kind: "unlisted", roomIdHex: unlisted[1], fragment };
-  const named = path.match(/^\/n\/([a-z0-9-]+)\/?$/);
-  if (named) return { kind: "named", name: named[1] };
+  // Old-style links stay valid indefinitely; people have pasted them into
+  // chats and those should not rot.
+  const legacyNamed = path.match(/^\/n\/([a-z0-9-]+)\/?$/);
+  if (legacyNamed) return { kind: "named", name: legacyNamed[1] };
+  // Named rooms now live at the root: /copper-lantern. The server only serves
+  // the shell here for paths that pass name validation, so anything reaching
+  // this point is already name-shaped.
+  const bare = path.match(/^\/([a-z0-9-]+)\/?$/);
+  if (bare) return { kind: "named", name: bare[1] };
   return { kind: "landing" };
 }
 

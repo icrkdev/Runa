@@ -499,3 +499,56 @@ async fn a_departed_peer_that_never_acked_still_blocks_the_purge() {
     let purged = tokio::time::timeout(Duration::from_secs(2), next_ft(&mut attacker, 0x13)).await;
     assert!(purged.is_err(), "a peer that never acked must keep blocking the purge");
 }
+
+/// Named rooms live at the root now. The shell must be served for anything
+/// that could be a room name, and must NOT shadow a real asset or an API
+/// route — the whole risk of moving into the root namespace.
+#[tokio::test]
+async fn bare_room_names_resolve_without_shadowing_real_paths() {
+    let dist = std::env::temp_dir().join(format!("runa-dist-{}", std::process::id()));
+    std::fs::create_dir_all(dist.join("assets")).unwrap();
+    std::fs::write(dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
+    std::fs::write(dist.join("gone.html"), "TOMBSTONE").unwrap();
+    std::fs::write(dist.join("assets/app.js"), "console.log(1)").unwrap();
+
+    let s = spawn(runa_server::config::Config {
+        dist_dir: dist.to_string_lossy().into_owned(),
+        ..cfg()
+    })
+    .await;
+    let get = |path: &str| {
+        let s = s.clone();
+        let path = path.to_string();
+        async move {
+            let r = reqwest::get(format!("{s}{path}")).await.unwrap();
+            (r.status().as_u16(), r.text().await.unwrap_or_default())
+        }
+    };
+
+    // Name-shaped paths get the shell.
+    for name in ["/copper-lantern", "/standup-4f2a", "/room7", "/assets-2024"] {
+        let (code, body) = get(name).await;
+        assert_eq!(code, 200, "{name} should serve the shell");
+        assert!(body.contains("id=\"root\""), "{name} served the wrong body");
+    }
+
+    // Real files still win — this is the collision the root namespace risks.
+    let (code, body) = get("/gone.html").await;
+    assert_eq!((code, body.as_str()), (200, "TOMBSTONE"), "a real file must win");
+    let (code, body) = get("/assets/app.js").await;
+    assert_eq!(code, 200);
+    assert!(body.contains("console.log"), "asset must not be shadowed");
+
+    // API routes are untouched.
+    let (code, _) = get("/version").await;
+    assert_eq!(code, 200, "/version must stay an API route");
+
+    // Reserved and malformed names are not rooms, so they 404 rather than
+    // handing out a shell for an address that can never resolve.
+    for bad in ["/api", "/socket", "/admin", "/version-", "/ab", "/nope.txt"] {
+        let (code, _) = get(bad).await;
+        assert_eq!(code, 404, "{bad} must not serve the shell");
+    }
+
+    std::fs::remove_dir_all(&dist).ok();
+}

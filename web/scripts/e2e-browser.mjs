@@ -106,7 +106,7 @@ async function main() {
     const peers = await page.evaluate(() =>
       [...document.querySelectorAll(".statusbar .micro-label")].map((e) => e.textContent).join("|"),
     );
-    if (!peers.includes("2 PEERS")) throw new Error(`[${label}] expected 2 PEERS in status bar, got: ${peers}`);
+    if (!peers.includes("2 PEOPLE")) throw new Error(`[${label}] expected a 2-person count in status bar, got: ${peers}`);
   }
 
   // Shred modal opens and shows the honest limitation copy
@@ -136,7 +136,7 @@ async function main() {
   console.log("BROWSER E2E OK");
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
-  console.log(`  status bars showed 2 PEERS on both sides`);
+  console.log(`  status bars showed a 2-person count on both sides`);
   console.log(`  shred modal showed the honest-limitation copy; cancel works`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
