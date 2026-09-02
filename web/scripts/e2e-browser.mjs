@@ -116,6 +116,27 @@ async function main() {
   if (!modalText.includes("It cannot reach copies other people already made")) {
     throw new Error("shred modal missing §2.5 limitation copy");
   }
+
+  // The dialog is a confirmation step, not a progress display. Everything
+  // gated on the IDLE state — the consensus policy selector above all — has
+  // to be on screen when it opens. It previously was not: pressing Shred
+  // proposed immediately, so the state was already VOTING by first paint and
+  // the selector never rendered. The policy was silently always UNANIMOUS.
+  const policySelect = await alice.$('[role="alertdialog"] #shred-policy');
+  if (!policySelect) {
+    throw new Error(
+      "shred modal opened without the consensus policy selector — the dialog " +
+        "is proposing before it confirms",
+    );
+  }
+  const policyOptions = await alice.$$eval(
+    '[role="alertdialog"] #shred-policy option',
+    (els) => els.map((e) => e.value),
+  );
+  for (const p of ["UNANIMOUS", "MAJORITY", "THRESHOLD", "INITIATOR"]) {
+    if (!policyOptions.includes(p)) throw new Error(`policy ${p} not offered`);
+  }
+
   await alice.click('[role="alertdialog"] button:has-text("Cancel")');
 
   // Tombstone reachable and header-clean
@@ -137,7 +158,7 @@ async function main() {
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);
-  console.log(`  shred modal showed the honest-limitation copy; cancel works`);
+  console.log(`  shred modal showed the limitation copy and all four policies; cancel works`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);
