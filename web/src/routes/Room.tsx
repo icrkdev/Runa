@@ -85,7 +85,7 @@ function JoinableRoom(props: RoomProps) {
   } | null>(null);
   const previewPaneRef = useRef<HTMLDivElement | null>(null);
   const [steady, setSteady] = useState(false);
-  const [awayCount, setAwayCount] = useState(0);
+  const [awayNames, setAwayNames] = useState<string[]>([]);
 
   useAccent(temper);
 
@@ -164,7 +164,7 @@ function JoinableRoom(props: RoomProps) {
           },
           onPeersChanged: (n) => {
             setPeerCount(n);
-            setAwayCount(sessionRef.current?.awayPeers().length ?? 0);
+            setAwayNames(sessionRef.current?.awayPeers().map((p) => p.handle) ?? []);
           },
           onTemper: (t) => setTemper(t),
           onShredPrompt: (req) => {
@@ -288,7 +288,7 @@ function JoinableRoom(props: RoomProps) {
   /// The dialog is a confirmation step, so it has to exist before the thing
   /// it confirms.
   const startShred = useCallback(() => {
-    setAwayCount(sessionRef.current?.awayPeers().length ?? 0);
+    setAwayNames(sessionRef.current?.awayPeers().map((p) => p.handle) ?? []);
     setShredLabel("IDLE");
     setShredOpen(true);
     setTemper("ARMED");
@@ -484,13 +484,13 @@ function JoinableRoom(props: RoomProps) {
         <span className="micro-label mono">
           {peerCount} {peerCount === 1 ? "PERSON" : "PEOPLE"}
         </span>
-        {awayCount > 0 && (
+        {awayNames.length > 0 && (
           <span
             className="micro-label mono"
             style={{ color: "var(--text-faint)" }}
             title="Recently here, not connected now — a locked phone looks the same as a closed tab"
           >
-            · {awayCount} AWAY
+            · {awayNames.length} AWAY
           </span>
         )}
         <span style={{ flex: 1 }} />
@@ -588,7 +588,7 @@ function JoinableRoom(props: RoomProps) {
 
       <ShredModal
         open={shredOpen}
-        awayCount={awayCount}
+        awayNames={awayNames}
         peerCount={peerCount}
         policy={shredPolicy}
         onPolicyChange={(p) => setShredPolicy(p)}

@@ -54,13 +54,16 @@ const AWAY_GRACE_MS = 10 * 60_000;
 
 export interface AwayPeer {
   peerIdB64: string;
+  /// The two-word handle their presence was broadcasting, so the shred
+  /// dialog can say who is missing rather than "someone".
+  handle: string;
   leftAt: number;
 }
 
 interface SocketInternals {
   ws?: WebSocket;
   roster: Map<string, RosterEntry>;
-  away: Map<string, number>;
+  away: Map<string, { handle: string; leftAt: number }>;
   myPeerId: string;
   myJoinedSeq: number;
   joinPerfMs: number;
@@ -103,7 +106,7 @@ export class Session {
     const identity = await generateIdentity();
     const roomId = hexToBytes(cfg.roomIdHex);
     const roster = new Map<string, RosterEntry>();
-    const away = new Map<string, number>();
+    const away = new Map<string, { handle: string; leftAt: number }>();
     const internals: SocketInternals = { roster, away, myPeerId: "", myJoinedSeq: 0, joinPerfMs: 0 };
     let sessionRef: Session | null = null;
 
@@ -132,10 +135,18 @@ export class Session {
         onPeerLeave: (peerId) => {
           const id = toB64(peerId);
           if (roster.delete(id)) {
-            // Remember them briefly. A locked phone is indistinguishable on
-            // the wire from someone closing the tab, and the difference
-            // matters when a shred is about to be proposed.
-            away.set(id, Date.now());
+            // Remember them briefly, by name. A locked phone is
+            // indistinguishable on the wire from someone closing the tab, and
+            // the difference matters when a shred is about to be proposed.
+            // The handle comes from their last presence broadcast; if they
+            // never sent one, fall back to a short form of their peer id.
+            const seen = sessionRef?.awareness
+              ?.snapshot()
+              .find((e) => e.senderId === id);
+            away.set(id, {
+              handle: seen?.state.handle ?? id.slice(0, 6),
+              leftAt: Date.now(),
+            });
           }
           events.onPeersChanged(roster.size);
         },
@@ -579,9 +590,9 @@ export class Session {
   awayPeers(): AwayPeer[] {
     const cutoff = Date.now() - AWAY_GRACE_MS;
     const out: AwayPeer[] = [];
-    for (const [peerIdB64, leftAt] of this.internals.away) {
-      if (leftAt < cutoff) this.internals.away.delete(peerIdB64);
-      else out.push({ peerIdB64, leftAt });
+    for (const [peerIdB64, rec] of this.internals.away) {
+      if (rec.leftAt < cutoff) this.internals.away.delete(peerIdB64);
+      else out.push({ peerIdB64, handle: rec.handle, leftAt: rec.leftAt });
     }
     return out;
   }

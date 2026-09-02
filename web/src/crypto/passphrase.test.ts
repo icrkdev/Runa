@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { estimatePassphrase } from "./passphrase";
-import { generateDicewarePassphrase } from "./fingerprint";
 import { deriveFromPassphrase } from "./kdf";
 
 describe("passphrase strength floor (spec §3.9.2)", () => {
-  it("accepts a generated four-word diceware phrase (~44 bits)", () => {
-    for (let i = 0; i < 10; i++) {
-      const v = estimatePassphrase(generateDicewarePassphrase(4));
-      expect(v.ok).toBe(true);
-      expect(v.bits).toBeGreaterThanOrEqual(40);
-      expect(v.dicewareWords).toBe(4);
-    }
+  it("rejects four diceware words and accepts five", () => {
+    // Four words is 44 bits. That holds against the join endpoint, which is
+    // rate limited — but not against someone who has taken the server and is
+    // grinding the captured verifier offline, where 44 bits is a few years
+    // and 55 is longer than the room could conceivably matter. The Generate
+    // button produces five words for exactly this reason.
+    expect(estimatePassphrase("copper lantern harbor thistle").ok).toBe(false);
+    expect(estimatePassphrase("copper lantern harbor thistle quartz").ok).toBe(true);
   });
 
   it("refuses common weak passphrases outright", () => {
