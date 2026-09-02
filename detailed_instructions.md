@@ -123,7 +123,7 @@ script refuses to run until this is right.
 Skip this whole part if `docker` is already installed.
 
 ```bash
-ssh -i ~/.ssh/skipti_oracle ubuntu@193.122.143.130
+ssh -i ~/.ssh/runa_oracle ubuntu@<NEW_INSTANCE_IP>
 ```
 
 Now on the box:
@@ -144,7 +144,7 @@ The `usermod` only takes effect on a new login, which is why you exit here.
 Log back in and confirm Docker works **without sudo**:
 
 ```bash
-ssh -i ~/.ssh/skipti_oracle ubuntu@193.122.143.130 'docker run --rm hello-world | head -3'
+ssh -i ~/.ssh/runa_oracle ubuntu@<NEW_INSTANCE_IP> 'docker run --rm hello-world | head -3'
 ```
 
 You should see `Hello from Docker!`. If you get a permission error, the group
@@ -167,7 +167,10 @@ box, starts the container, wires the Caddy vhost, and verifies the result
 from outside.
 
 ```bash
-cd /Users/prithvi/Downloads/Runa && ./scripts/deploy-docker.sh
+cd /Users/prithvi/Downloads/Runa && cd /Users/prithvi/Downloads/Runa && \
+  RUNA_HOST=runa.vardrlabs.com RUNA_BOX_IP=<NEW_INSTANCE_IP> \
+  RUNA_SSH_KEY=~/.ssh/runa_oracle \
+  ./scripts/deploy-docker.sh
 ```
 
 It prints six labelled phases. **The image build takes 10–15 minutes the
@@ -231,19 +234,22 @@ curl -s -o /dev/null -w '%{http_code}\n' https://skipti.vardrlabs.com/version
 **Ship an update** — 🖥️ MAC, after committing and pushing:
 
 ```bash
-cd /Users/prithvi/Downloads/Runa && git pull && ./scripts/deploy-docker.sh
+cd /Users/prithvi/Downloads/Runa && git pull && cd /Users/prithvi/Downloads/Runa && \
+  RUNA_HOST=runa.vardrlabs.com RUNA_BOX_IP=<NEW_INSTANCE_IP> \
+  RUNA_SSH_KEY=~/.ssh/runa_oracle \
+  ./scripts/deploy-docker.sh
 ```
 
 **Watch the logs** — 🖥️ MAC:
 
 ```bash
-ssh -i ~/.ssh/skipti_oracle ubuntu@193.122.143.130 'docker logs -f runa'
+ssh -i ~/.ssh/runa_oracle ubuntu@<NEW_INSTANCE_IP> 'docker logs -f runa'
 ```
 
 **Check whether a limit is binding** — 🖥️ MAC:
 
 ```bash
-ssh -i ~/.ssh/skipti_oracle ubuntu@193.122.143.130 "docker logs runa 2>&1 | grep -E 'room budget exhausted|connection ceiling'"
+ssh -i ~/.ssh/runa_oracle ubuntu@<NEW_INSTANCE_IP> "docker logs runa 2>&1 | grep -E 'room budget exhausted|connection ceiling'"
 ```
 
 Either message means you should raise the limits **and** the container memory
@@ -252,7 +258,10 @@ together. See "Resizing" below.
 **Remove it entirely** — 🖥️ MAC:
 
 ```bash
-cd /Users/prithvi/Downloads/Runa && ./scripts/rollback-docker.sh --full
+cd /Users/prithvi/Downloads/Runa && \
+  RUNA_HOST=runa.vardrlabs.com RUNA_BOX_IP=<NEW_INSTANCE_IP> \
+  RUNA_SSH_KEY=~/.ssh/runa_oracle \
+  ./scripts/rollback-docker.sh --full
 ```
 
 Stops the container, removes the images, removes the Caddy vhost. SKIPTI is
@@ -279,7 +288,10 @@ to about **1549 MB**, which is why the container gets `--memory=2g`. That is
 To change it, pass environment variables to the deploy script:
 
 ```bash
-RUNA_MEM=4g RUNA_LOG_MB=1600 RUNA_CONNS=1024 ./scripts/deploy-docker.sh
+RUNA_MEM=4g RUNA_LOG_MB=1600 RUNA_CONNS=1024 cd /Users/prithvi/Downloads/Runa && \
+  RUNA_HOST=runa.vardrlabs.com RUNA_BOX_IP=<NEW_INSTANCE_IP> \
+  RUNA_SSH_KEY=~/.ssh/runa_oracle \
+  ./scripts/deploy-docker.sh
 ```
 
 **Keep `RUNA_MEM` and the limits in step.** If the limits exceed the container

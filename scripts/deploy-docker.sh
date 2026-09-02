@@ -13,10 +13,12 @@
 
 set -euo pipefail
 
-HOST=${RUNA_HOST:-runa.vardrlabs.com}
-BOX_IP=${RUNA_BOX_IP:-193.122.143.130}
+# ── Target. No defaults for the host: guessing wrong deploys onto the wrong
+# machine, and the obvious guess is whatever box you set up first.
+HOST=${RUNA_HOST:?set RUNA_HOST, e.g. runa.example.com}
+BOX_IP=${RUNA_BOX_IP:?set RUNA_BOX_IP, the instance public IP}
 SSH_USER=${RUNA_SSH_USER:-ubuntu}
-SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/skipti_oracle}
+SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/runa_oracle}
 
 # Sizing. Container memory and the RUNA_* ceilings must move together:
 #   peak ~= 25 MB + 1.4 x LOG_MB + (CONNECTIONS x QUEUE_KB) + ~32 MB
@@ -170,10 +172,12 @@ curl -s --max-time 5 "https://$HOST/version" | grep -q "$COMMIT" \
   && ok "/version reports the deployed commit" \
   || warn "/version does not report $COMMIT"
 
-SKIPTI="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://skipti.vardrlabs.com/version || true)"
-[ "$SKIPTI" = "200" ] \
-  && ok "skipti.vardrlabs.com still healthy" \
-  || warn "skipti.vardrlabs.com returned $SKIPTI — check before walking away"
+if [ -n "${RUNA_NEIGHBOUR_URL:-}" ]; then
+  N="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$RUNA_NEIGHBOUR_URL" || true)"
+  [ "$N" = "200" ] \
+    && ok "$RUNA_NEIGHBOUR_URL still healthy" \
+    || warn "$RUNA_NEIGHBOUR_URL returned $N — check before walking away"
+fi
 
 bold "DEPLOYED  https://$HOST/"
 echo "  Logs:    ssh … 'docker logs -f runa'"

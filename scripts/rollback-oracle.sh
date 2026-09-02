@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 #
-# Back out RÚNA from the Oracle box. SKIPTI is untouched throughout: this
-# stops one service, removes one unit, and deletes one vhost block.
+# Back out RÚNA. Stops one service, removes one unit, deletes one vhost
+# block. Nothing else on the host is touched.
 #
 #   ./scripts/rollback-oracle.sh            # stop RUNA, leave Caddy alone
 #   ./scripts/rollback-oracle.sh --full     # also remove the Caddy vhost
 #
 set -euo pipefail
 
-HOST=${RUNA_HOST:-runa.vardrlabs.com}
-BOX_IP=${RUNA_BOX_IP:-193.122.143.130}
+# ── Target. No defaults for the host: guessing wrong deploys onto the wrong
+# machine, and the obvious guess is whatever box you set up first.
+HOST=${RUNA_HOST:?set RUNA_HOST, e.g. runa.example.com}
+BOX_IP=${RUNA_BOX_IP:?set RUNA_BOX_IP, the instance public IP}
 SSH_USER=${RUNA_SSH_USER:-ubuntu}
-SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/skipti_oracle}
+SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/runa_oracle}
 FULL=0
 [ "${1:-}" = "--full" ] && FULL=1
 
@@ -46,9 +48,11 @@ if [ "$FULL" = "1" ]; then
 REMOTE
 fi
 
-echo "Confirming SKIPTI is unaffected…"
-CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://skipti.vardrlabs.com/version || true)"
-echo "  skipti.vardrlabs.com -> $CODE"
+echo "Neighbour check…"
+if [ -n "${RUNA_NEIGHBOUR_URL:-}" ]; then
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$RUNA_NEIGHBOUR_URL" || true)"
+  echo "  $RUNA_NEIGHBOUR_URL -> $CODE"
+fi
 echo
 echo "Done. Assets remain at /opt/runa and the binary at /usr/local/bin/runa-server;"
 echo "remove them by hand if you want the box clean. DNS record is untouched."

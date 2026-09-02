@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Remove RÚNA from the box. SKIPTI is untouched.
+# Remove RÚNA from the box. Nothing else on the host is touched.
 #   ./scripts/rollback-docker.sh          # stop and remove the container
 #   ./scripts/rollback-docker.sh --full   # also remove the Caddy vhost + images
 set -euo pipefail
-HOST=${RUNA_HOST:-runa.vardrlabs.com}
-BOX_IP=${RUNA_BOX_IP:-193.122.143.130}
+# ── Target. No defaults for the host: guessing wrong deploys onto the wrong
+# machine, and the obvious guess is whatever box you set up first.
+HOST=${RUNA_HOST:?set RUNA_HOST, e.g. runa.example.com}
+BOX_IP=${RUNA_BOX_IP:?set RUNA_BOX_IP, the instance public IP}
 SSH_USER=${RUNA_SSH_USER:-ubuntu}
-SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/skipti_oracle}
+SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/runa_oracle}
 FULL=0; [ "${1:-}" = "--full" ] && FULL=1
 SSH="ssh -i $SSH_KEY ${SSH_USER}@${BOX_IP}"
 
@@ -35,5 +37,7 @@ if [ "$FULL" = "1" ]; then
 REMOTE
 fi
 
-CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://skipti.vardrlabs.com/version || true)"
-echo "  skipti.vardrlabs.com -> $CODE"
+if [ -n "${RUNA_NEIGHBOUR_URL:-}" ]; then
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$RUNA_NEIGHBOUR_URL" || true)"
+  echo "  $RUNA_NEIGHBOUR_URL -> $CODE"
+fi
