@@ -277,6 +277,51 @@ async function main() {
     throw new Error(`[sync] reconnect lost an edit instead of merging it: ${JSON.stringify(reA)}`);
   }
 
+  // The status bar counts who is actually here, not who the roster still
+  // lists. A roster is a join-time snapshot patched with the events a client
+  // happened to receive, so a missed PEER_LEAVE over-counts for the rest of
+  // the session — four devices in one room reported 5, 3, 3 and 3 people at
+  // the same moment. Presence expires on its own, so the count has to come
+  // back down by itself with no event to prompt it, and come back up when the
+  // peer returns. Asserted as a round trip because a count that only ever
+  // falls is as broken as one that only ever rises.
+  const shownPeople = (page) =>
+    page.evaluate(() => {
+      const m = document.body.textContent.match(/(\d+)\s+(PERSON|PEOPLE)/);
+      return m ? Number(m[1]) : null;
+    });
+  if ((await shownPeople(alice)) !== 2) {
+    throw new Error(`[presence] expected 2 people before the drop, saw ${await shownPeople(alice)}`);
+  }
+  await bob.context().setOffline(true);
+  let dropped = false;
+  for (let i = 0; i < 50; i++) {
+    await alice.waitForTimeout(1000);
+    if ((await shownPeople(alice)) === 1) {
+      dropped = true;
+      break;
+    }
+  }
+  if (!dropped) {
+    throw new Error(
+      `[presence] a silent peer never expired from the count; still showing ${await shownPeople(alice)}`,
+    );
+  }
+  await bob.context().setOffline(false);
+  let returned = false;
+  for (let i = 0; i < 50; i++) {
+    await alice.waitForTimeout(1000);
+    if ((await shownPeople(alice)) === 2) {
+      returned = true;
+      break;
+    }
+  }
+  if (!returned) {
+    throw new Error(
+      `[presence] the peer came back but the count did not; showing ${await shownPeople(alice)}`,
+    );
+  }
+
   // Maths must render as maths, not as flattened text. $E = mc^2$ came out
   // reading "E=mc2" on a real screen while the unit test asserting /katex/i
   // passed the whole time — the wrapper class survives sanitising whether or
@@ -534,6 +579,7 @@ async function main() {
   console.log(`  status bars showed a 2-person count on both sides`);
   console.log(`  editors converged char-for-char after concurrent typing; no false divergence`);
   console.log(`  offline edits on both sides reconverged on reconnect, nothing lost`);
+  console.log(`  presence count falls when a peer goes quiet and returns when it comes back`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);

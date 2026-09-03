@@ -63,6 +63,9 @@ function JoinableRoom(props: RoomProps) {
   const [markdown, setMarkdown] = useState("");
   const [html, setHtml] = useState("");
   const [peerCount, setPeerCount] = useState(0);
+  // What the status bar shows. Kept separate from peerCount, which is the
+  // roster size and feeds the shred consensus bar.
+  const [livePeerCount, setLivePeerCount] = useState(1);
   const [temper, setTemper] = useState<TemperState>("COLD");
   const [shredOpen, setShredOpen] = useState(false);
   const [shredPrompt, setShredPrompt] = useState<ShredRequest | null>(null);
@@ -100,6 +103,16 @@ function JoinableRoom(props: RoomProps) {
   );
 
   useAccent(temper);
+
+  // Presence expires on a timer rather than on an event, so it has to be
+  // sampled: nobody sends a frame to say they have gone quiet.
+  useEffect(() => {
+    const t = setInterval(() => {
+      setLivePeerCount(sessionRef.current?.livePeerCount ?? 1);
+      setAwayNames(sessionRef.current?.awayPeers().map((p) => p.handle) ?? []);
+    }, 2_000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
@@ -204,6 +217,7 @@ function JoinableRoom(props: RoomProps) {
           },
           onPeersChanged: (n) => {
             setPeerCount(n);
+            setLivePeerCount(sessionRef.current?.livePeerCount ?? 1);
             setAwayNames(sessionRef.current?.awayPeers().map((p) => p.handle) ?? []);
           },
           onTemper: (t) => setTemper(t),
@@ -539,7 +553,7 @@ function JoinableRoom(props: RoomProps) {
         <span className="sep micro-label" aria-hidden="true" />
         <span className="sep micro-label" aria-hidden="true" />
         <span className="micro-label mono">
-          {peerCount} {peerCount === 1 ? "PERSON" : "PEOPLE"}
+          {livePeerCount} {livePeerCount === 1 ? "PERSON" : "PEOPLE"}
         </span>
         {awayNames.length > 0 && (
           <span
