@@ -120,6 +120,26 @@ describe("render pipeline is the security boundary (spec §7.4)", () => {
     expect(html).toMatch(/katex/i);
   });
 
+  // The assertion above passed for the entire time exponents were broken: the
+  // wrapper class survives sanitising whether or not anything inside it
+  // renders. What actually failed was structural, so this asserts structure.
+  it("keeps the exponent as a superscript through sanitising", async () => {
+    const { html } = await renderMarkdown("$E = mc^2$");
+    expect(html).toContain("<math");
+    expect(html).toMatch(/<msup>\s*<mi>c<\/mi>\s*<mn>2<\/mn>\s*<\/msup>/);
+  });
+
+  it("keeps fractions and radicals structural too", async () => {
+    const { html } = await renderMarkdown("$\\frac{a}{b} + \\sqrt{x}$");
+    expect(html).toContain("<mfrac>");
+    expect(html).toContain("<msqrt>");
+  });
+
+  it("marks display math as block so it can be styled and paged", async () => {
+    const { html } = await renderMarkdown("$$\nE = mc^2\n$$\n");
+    expect(html).toMatch(/<math[^>]*display="block"/);
+  });
+
   it("strips language class from oversized code blocks instead of highlighting", async () => {
     const huge = "```python\n" + "x".repeat(100 * 1024 + 10) + "\n```";
     const { html } = await renderMarkdown(huge);
@@ -247,10 +267,17 @@ describe("positive render corpus — safe content must survive", () => {
 });
 
 describe("hardening regressions", () => {
-  it("keeps KaTeX radical and delimiter paths", async () => {
+  // Was: assert <svg> and <path> survive. That guarded a real bug — allowing
+  // <svg> without its children drew every radical as an empty box — but it was
+  // asserting KaTeX's *HTML* output, which drew radicals and stretchy
+  // delimiters as inline SVG. MathML output has no SVG in it at all: a radical
+  // is <msqrt> and the browser draws the rule. The intent is unchanged, so the
+  // assertion follows the structure rather than being deleted.
+  it("keeps radicals and fractions structural, not drawn", async () => {
     const { html } = await renderMarkdown("$$\\sqrt{\\frac{a}{b}}$$");
-    expect(html).toContain("<svg");
-    expect(html).toContain("<path");
+    expect(html).toContain("<msqrt>");
+    expect(html).toContain("<mfrac>");
+    expect(html).not.toContain("<svg");
   });
 
   it("still refuses script-bearing and control-prefixed schemes", async () => {

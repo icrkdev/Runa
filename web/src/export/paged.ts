@@ -13,7 +13,7 @@ const PRINT_CSS = `
 @page :first { @bottom-center { content: none; } }
 pre, code, kbd, samp { tab-size: 2; white-space: pre-wrap; word-break: break-word; }
 pre { break-inside: avoid; }
-table, blockquote, figure, .katex-display { break-inside: avoid; }
+table, blockquote, figure, .katex-display, math[display="block"] { break-inside: avoid; }
 h1, h2, h3, h4 { break-after: avoid; }
 p, li { orphans: 3; widows: 3; }
 a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.8em; }

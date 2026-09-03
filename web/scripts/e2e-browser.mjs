@@ -185,6 +185,39 @@ async function main() {
     if (!peers.includes("2 PEOPLE")) throw new Error(`[${label}] expected a 2-person count in status bar, got: ${peers}`);
   }
 
+  // Maths must render as maths, not as flattened text. $E = mc^2$ came out
+  // reading "E=mc2" on a real screen while the unit test asserting /katex/i
+  // passed the whole time — the wrapper class survives sanitising whether or
+  // not anything inside it renders. Structure alone is still not proof, so
+  // this measures the rendered geometry: an exponent has to sit higher than
+  // its base and be drawn smaller. That is the property that was broken, and
+  // it is only observable in a browser.
+  await alice.keyboard.type("\n\n$$\nE = mc^2\n$$\n");
+  let mathBox = null;
+  for (let i = 0; i < 40 && !mathBox; i++) {
+    mathBox = await alice.evaluate(() => {
+      const base = document.querySelector(".preview-body math mi");
+      const exp = document.querySelector(".preview-body math msup mn");
+      if (!base || !exp) return null;
+      const b = base.getBoundingClientRect();
+      const e = exp.getBoundingClientRect();
+      if (b.height === 0 || e.height === 0) return null;
+      return { baseTop: b.top, baseH: b.height, expTop: e.top, expH: e.height };
+    });
+    if (!mathBox) await alice.waitForTimeout(150);
+  }
+  if (!mathBox) throw new Error("[alice] display math never produced MathML in the preview");
+  if (!(mathBox.expTop < mathBox.baseTop)) {
+    throw new Error(
+      `[alice] exponent is not raised above its base (exp top ${Math.round(mathBox.expTop)} vs base ${Math.round(mathBox.baseTop)}) — math is rendering flat`,
+    );
+  }
+  if (!(mathBox.expH < mathBox.baseH)) {
+    throw new Error(
+      `[alice] exponent is not drawn smaller than its base (${Math.round(mathBox.expH)}px vs ${Math.round(mathBox.baseH)}px)`,
+    );
+  }
+
   // Shred modal opens and shows the honest limitation copy
   await alice.click('button:has-text("Shred")');
   await alice.waitForSelector('[role="alertdialog"]', { timeout: 5000 });
@@ -367,6 +400,7 @@ async function main() {
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
+  console.log(`  display math renders with the exponent raised and smaller`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);

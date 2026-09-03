@@ -18,7 +18,20 @@ const katexOptions = {
   maxSize: 25,
   maxExpand: 1000,
   throwOnError: false,
-  output: "html",
+  // MathML, not KaTeX's HTML. The HTML output positions superscripts,
+  // fractions and radicals with inline `style="height:…"` on strut and vlist
+  // spans, and rehype-sanitize strips `style` — correctly, since arbitrary
+  // inline CSS on relayed content is a real injection surface. The class names
+  // survive sanitising, so the markup looked right and `toMatch(/katex/i)`
+  // passed, while every exponent collapsed onto the baseline: $E = mc^2$
+  // rendered as "E=mc2". Importing katex.min.css would not have fixed it,
+  // because the inline styles it works with are already gone.
+  //
+  // MathML carries the structure in the markup itself — <msup> is a
+  // superscript, not a box that CSS has to place — so it survives sanitising
+  // intact, needs no stylesheet, and ships none of KaTeX's font files. The
+  // sanitize schema already allows the MathML elements.
+  output: "mathml",
 } as const;
 
 const HIGHLIGHT_MAX_BYTES = 100 * 1024;
