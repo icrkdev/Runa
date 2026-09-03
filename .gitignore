@@ -18,5 +18,10 @@ docs/UPSTREAM_MAP.md
 docs/adr/
 web/*.tsbuildinfo
 
+# Generated at release time by the SBOM step; also produced by running that
+# step by hand. Large, and never committed.
+/runa-*-sbom.json
+server/*.cdx.json
+
 # Root-level node_modules (vitest cache lives here)
 node_modules/

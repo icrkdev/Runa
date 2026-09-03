@@ -161,12 +161,31 @@ jobs:
               "$f"
           done
 
+      # This step had never once run to completion: fail-fast cancelled the
+      # job earlier every previous time, so its first real execution was on
+      # v0.2.0-rc.2, where `-p` failed it — cargo-cyclonedx has no such flag,
+      # and the workspace has a single member, so nothing needed selecting.
+      # Both generators are pinned. release.yml fires only on a tag, so CI
+      # cannot rehearse it; an unpinned tool that changes its CLI or its
+      # output filename breaks the release at the moment a fix costs most.
       - name: SBOMs
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo install --locked cargo-cyclonedx
-          cargo cyclonedx -p runa-server --format json
-          cd web && npx @cyclonedx/cyclonedx-npm --output-file ../runa-web-sbom.json && cd ..
+          cargo install --locked cargo-cyclonedx@0.5.9
+          # --target so the SBOM describes the dependency graph compiled into
+          # the musl binary we ship, not the runner's host gnu graph — the two
+          # differ wherever a dependency is cfg-gated.
+          cargo cyclonedx --manifest-path server/Cargo.toml --format json \
+            --target ${{ matrix.target }}
+          # cargo-cyclonedx writes <crate>.cdx.json beside the manifest. The
+          # upload glob is `runa-*-sbom.json` at the workspace root, which that
+          # name matches in neither place nor form, so without this rename the
+          # Rust SBOM is dropped and the job still goes green. Renaming here
+          # (rather than widening the glob) keeps every release artifact flat
+          # and consistently named, which is what `publish` globs in turn.
+          mv server/runa-server.cdx.json runa-server-sbom.json
+          cd web && npx --yes @cyclonedx/cyclonedx-npm@6.0.1 \
+            --output-file ../runa-web-sbom.json
 
       - uses: actions/upload-artifact@v4
         with:
