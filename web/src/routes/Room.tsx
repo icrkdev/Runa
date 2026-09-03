@@ -87,8 +87,29 @@ function JoinableRoom(props: RoomProps) {
   const previewPaneRef = useRef<HTMLDivElement | null>(null);
   const [steady, setSteady] = useState(false);
   const [awayNames, setAwayNames] = useState<string[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useAccent(temper);
+
+  // An overflow menu that cannot be dismissed without choosing something is a
+  // trap on a phone, where there is no Escape key in reach and the panel
+  // covers the editor.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -501,30 +522,69 @@ function JoinableRoom(props: RoomProps) {
             · {awayNames.length} AWAY
           </span>
         )}
-        <span style={{ flex: 1 }} />
+        <span className="statusbar-spacer" style={{ flex: 1 }} />
         {ladder.kind !== "normal" && ladder.kind !== "none" && (
           <span className="micro-label mono" style={{ color: "var(--accent)" }}>
             {formatCountdown(ladder.remainingMs)}
           </span>
         )}
+        {/* Wrapped so the actions can be given a row of their own on a phone.
+            Left to plain flex-wrap they break at whatever point the room name
+            happens to fill, which put Shred alone on a fourth row. */}
+        <div className="statusbar-actions">
         <QuorumDial peers={[]} />
         <button onClick={copyLink}>Copy link</button>
-        <button onClick={cycleMode} title="Ctrl+\">Layout</button>
-        <button
-          aria-pressed={steady}
-          title="Constant-rate transmission: closes the typing-cadence channel at a bandwidth cost"
-          onClick={() => {
-            const next = !steady;
-            setSteady(next);
-            sessionRef.current?.setSteadyTraffic(next);
-          }}
-        >
-          Steady{steady ? " ·" : ""}
-        </button>
-        <button onClick={() => void exportPdf()}>Export</button>
+        {/* Layout, Steady and Export fold behind ⋯ on a narrow screen. Copy
+            link and Shred stay out because they are the two anyone reaches for
+            under pressure, and burying Shred behind a menu would be the wrong
+            thing to make slower. On a wide screen `display: contents` drops
+            the wrapper entirely, so these lay out inline exactly as before and
+            there is only ever one set of buttons to keep in sync. */}
+        <div className={`tool-menu${menuOpen ? " is-open" : ""}`} ref={menuRef}>
+          <button
+            className="tool-menu-toggle"
+            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            aria-label="More actions"
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            ⋯
+          </button>
+          <div className="tool-menu-items">
+            <button
+              onClick={() => {
+                setMenuOpen(false);
+                cycleMode();
+              }}
+              title="Ctrl+\"
+            >
+              Layout
+            </button>
+            <button
+              aria-pressed={steady}
+              title="Constant-rate transmission: closes the typing-cadence channel at a bandwidth cost"
+              onClick={() => {
+                const next = !steady;
+                setSteady(next);
+                sessionRef.current?.setSteadyTraffic(next);
+              }}
+            >
+              Steady{steady ? " ·" : ""}
+            </button>
+            <button
+              onClick={() => {
+                setMenuOpen(false);
+                void exportPdf();
+              }}
+            >
+              Export
+            </button>
+          </div>
+        </div>
         <button className="danger" onClick={startShred}>
           Shred
         </button>
+        </div>
       </div>
 
       {showExtNotice && (

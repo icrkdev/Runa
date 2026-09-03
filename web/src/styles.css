@@ -340,6 +340,14 @@ select option { background: var(--surface-raised); color: var(--text); }
   flex-wrap: wrap;
 }
 .statusbar .sep::before { content: "·"; color: var(--text-faint); }
+/* On a wide screen the wrapper vanishes and its buttons sit inline in the
+   statusbar exactly as they always did. Below the panes breakpoint it becomes
+   a real dropdown. One set of buttons, two layouts, no duplicated state. */
+.statusbar-actions { display: contents; }
+.tool-menu { display: contents; }
+.tool-menu-items { display: contents; }
+.tool-menu-toggle { display: none; }
+
 .accent-dot {
   width: 9px; height: 9px; border-radius: 50%;
   background: var(--accent);
@@ -511,10 +519,18 @@ p, li { orphans: 3; widows: 3; }
 /* ── Small screens ────────────────────────────────────────────────────────
    There were no breakpoints at all: the room forced a two-column grid into
    whatever width existed, and the landing page kept desktop padding, so a
-   phone got two ~180px columns and horizontal overflow. Below 820px the
+   phone got two ~180px columns and horizontal overflow. Below 1000px the
    panes stack; below 560px the chrome shrinks to fit. */
 
-@media (max-width: 820px) {
+/* 1000px, not 820px. 820 left a band that every phone falls into sooner or
+   later: any handset turned sideways (the widest is 932px), a small tablet in
+   portrait (iPad Pro 11 is 834px), and — the one that was actually reported —
+   Android's "Desktop site" toggle, which forces a 980px layout viewport. All
+   of those got two ~420px columns on a screen physically 400px wide. A room
+   opened that way shows two empty pane backgrounds with the text off in the
+   top-left corner, which reads as a blank page. 1000px clears all three and
+   still leaves an iPad in landscape (1024px) genuinely side by side. */
+@media (max-width: 1000px) {
   /* Side-by-side is unreadable at this width. One pane at a time — the
      Layout button (and ctrl+\) already cycles between them. */
   .panes { grid-template-columns: 1fr; grid-template-rows: 1fr; }
@@ -522,6 +538,56 @@ p, li { orphans: 3; widows: 3; }
   .pane-editor { border-right: none; }
   .pane-preview { padding: 16px 18px; }
 
+  /* Measured on an S24 FE with the keyboard up: the statusbar wrapped its six
+     buttons onto four rows and took 137px of a 380px viewport, and the notice
+     took another 106px. 72% of the screen was chrome and the editor had one
+     visible line. */
+  .tool-menu { display: inline-block; position: relative; }
+  .tool-menu-toggle { display: inline-flex; align-items: center; }
+  .tool-menu-items {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    /* Above Monaco, which sets z-indexes of its own inside .panes. */
+    z-index: 60;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px;
+    min-width: 168px;
+    background: var(--surface-raised);
+    border: 1px solid var(--hairline);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+  .tool-menu.is-open .tool-menu-items { display: flex; }
+
+  /* The notice stays — an extension really can read this page, and a security
+     warning that is dismissed once and never returns is worse than a small
+     one. It is made compact rather than persistent-dismissed, which would also
+     have been the project's first piece of stored client state. */
+  /* This spacer right-aligns the actions on a desktop. In a *wrapping* flex
+     container it also eats every remaining pixel of its line, which forced
+     Shred onto a row by itself and made the statusbar taller after the menu
+     was added, not shorter. Nothing needs right-aligning at this width. */
+  .statusbar-spacer { display: none; }
+
+  /* Give the actions a row of their own instead of letting them break wherever
+     the room name happens to end. width:100% forces the line break in a
+     wrapping flex container, so the buttons stay together and stay full size —
+     they are already near the 44px touch floor and must not be shrunk. */
+  .statusbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .banner { padding: 6px 12px; gap: 8px; font-size: 12px; line-height: 1.35; }
+  .banner button { padding: 2px 8px; font-size: 12px; }
+}
+
+@media (max-width: 820px) {
   .statusbar {
     flex-wrap: wrap;
     row-gap: 6px;

@@ -264,6 +264,46 @@ async function main() {
       }
     }
   }
+  // Side-by-side panes on a screen too narrow for them is how a shared room
+  // link arrives looking like a blank page: two empty pane backgrounds with
+  // the text off in the top-left. Reported from a Realme handset, where the
+  // cause was Android's "Desktop site" toggle forcing a 980px layout viewport
+  // — a width no phone reports natively, so no phone-width check could see
+  // it. The same band catches any handset turned sideways (932px at the
+  // widest) and a small tablet in portrait (834px).
+  for (const [width, wantSplit] of [[834, false], [932, false], [980, false], [1024, true]]) {
+    await alice.setViewportSize({ width, height: 800 });
+    await alice.waitForTimeout(150);
+    const split = await alice.evaluate(() => {
+      const pv = document.querySelector(".pane-preview");
+      return !!(pv && getComputedStyle(pv).display !== "none");
+    });
+    if (split !== wantSplit) {
+      throw new Error(
+        `[alice] at ${width}px the room shows ${split ? "two panes" : "one pane"}, expected ${wantSplit ? "two" : "one"}`,
+      );
+    }
+  }
+
+  // Copy link and Shred stay on the bar at phone width; everything else folds
+  // into the overflow menu. Shred behind a menu would be the wrong thing to
+  // make slower, and a menu that will not close is a trap on a touch screen.
+  await alice.setViewportSize({ width: 384, height: 780 });
+  await alice.waitForTimeout(150);
+  const bar = await alice.evaluate(() => {
+    const vis = (el) => !!el && getComputedStyle(el).display !== "none";
+    const items = document.querySelector(".tool-menu-items");
+    return {
+      copy: [...document.querySelectorAll(".statusbar-actions button")].some((b) => /Copy link/.test(b.textContent)),
+      shred: [...document.querySelectorAll(".statusbar-actions button")].some((b) => /Shred/.test(b.textContent)),
+      toggle: vis(document.querySelector(".tool-menu-toggle")),
+      menuClosed: !!items && getComputedStyle(items).display === "none",
+    };
+  });
+  if (!bar.copy || !bar.shred) throw new Error("[alice] Copy link and Shred must stay visible at 384px");
+  if (!bar.toggle) throw new Error("[alice] overflow menu toggle missing at 384px");
+  if (!bar.menuClosed) throw new Error("[alice] overflow menu is open before it is asked for");
+
   await alice.setViewportSize({ width: 1280, height: 900 });
 
   await alice.click('[role="alertdialog"] button:has-text("Cancel")');
@@ -290,6 +330,7 @@ async function main() {
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
+  console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);
