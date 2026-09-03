@@ -41,6 +41,21 @@ jobs:
           cd dist && echo "sha256=$(find . -type f -print0 | sort -z \
             | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
+      # A tag containing a hyphen is a pre-release by semver (v0.2.0-rc.1),
+      # and `latest` must not follow one — anybody running
+      # `docker run ghcr.io/.../runa` would silently get a release candidate.
+      - name: Decide image tags
+        id: tags
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TAGS="ghcr.io/$OWNER/runa:${{ github.ref_name }}"
+          case "${{ github.ref_name }}" in
+            *-*) echo "pre-release: not moving :latest" ;;
+            *)   TAGS="$TAGS,ghcr.io/$OWNER/runa:latest" ;;
+          esac
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: push
         uses: docker/build-push-action@v6
@@ -48,9 +63,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/runa:latest
-            ghcr.io/${{ github.repository_owner }}/runa:${{ github.ref_name }}
+          tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             RUNA_COMMIT=${{ github.sha }}
             RUNA_BUNDLE_SHA256=${{ steps.bundle.outputs.sha256 }}
@@ -66,11 +79,14 @@ jobs:
           curl -sSfL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
             -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
           cosign sign --yes \
-            "ghcr.io/${{ github.repository_owner }}/runa@${DIGEST}"
+            "ghcr.io/${{ steps.tags.outputs.owner }}/runa@${DIGEST}"
 
   build-release:
     runs-on: ${{ matrix.os }}
     strategy:
+      # Without this, the first target to fail cancels the rest, so one
+      # problem masks every other one and each fix costs a full round trip.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -82,6 +98,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # The line above installs the target into *stable*. rust-toolchain.toml
+      # pins 1.98.0, and rustup honours that pin for every cargo invocation in
+      # this directory — so the build ran on a toolchain that had no musl std
+      # and failed with "can't find crate for `core`". This adds the target to
+      # the pinned toolchain, which is the one that actually builds.
+      # Same trap the fuzz job hit: the file quietly outranks the workflow.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: musl toolchain
         if: endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
