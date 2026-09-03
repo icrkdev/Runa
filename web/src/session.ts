@@ -13,6 +13,10 @@ import {
 import type { RosterEntry } from "./shred/roster";
 import { executeWipe } from "./shred/wipe";
 
+/// A divergence warning is only meaningful once the document has stopped
+/// moving. Two peers mid-keystroke legitimately hold different states.
+const DIVERGENCE_QUIET_MS = 5_000;
+
 export type LadderPhase =
   | { kind: "none" }
   | { kind: "normal"; remainingMs: number }
@@ -36,7 +40,11 @@ export interface SessionEvents {
   onTtlMismatch(): void;
   /// Edits are no longer reaching other people, or soon will not be.
   onHistoryPressure(message: string): void;
-  onDivergence(): void;
+  /// Raised with true when this copy is genuinely behind or ahead of an
+  /// agreed-upon document, and with false when that resolves. It must be able
+  /// to clear: a warning that latches on the first transient mismatch is
+  /// indistinguishable from one that is always on.
+  onDivergence(diverged: boolean): void;
   onRoomUnavailable(code: number): void;
 }
 
@@ -474,6 +482,8 @@ export class Session {
   }
 
   private hashPending = false;
+  private lastDocChangeAt = Date.now();
+  private divergenceReported = false;
 
   private async refreshOwnHash(): Promise<void> {
     // Digesting the whole document on every remote update is O(doc) per
@@ -496,18 +506,32 @@ export class Session {
     this.ownHash = Array.from(new Uint8Array(digest).slice(0, 8))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    // Warn only when the other peers AGREE on a document that is not ours.
-    // Requiring a majority of reporters means one peer broadcasting a
-    // made-up hash can no longer tell everyone else they have diverged —
-    // which was a cheap way to wear the warning out until people ignored it.
+  }
+
+  /// Compared on the heartbeat rather than on every update, and only once the
+  /// document has been still for a while.
+  ///
+  /// The previous version compared the local hash *at this instant* against
+  /// hashes peers had broadcast up to a heartbeat earlier, on every single
+  /// remote update. Two people typing are never at the same state at the same
+  /// moment, so that fires constantly during ordinary editing — and because
+  /// the banner latched and never cleared, one transient mismatch left it up
+  /// for the rest of the session. Measured: two clients whose documents were
+  /// byte-identical both showed the warning.
+  ///
+  /// Requiring agreement among a majority of reporters is kept: one peer
+  /// broadcasting a made-up hash must not be able to tell everyone else they
+  /// have diverged.
+  private evaluateDivergence(): void {
+    if (Date.now() - this.lastDocChangeAt < DIVERGENCE_QUIET_MS) return;
     const counts = this.awareness?.foreignHashCounts();
     const reporters = counts ? [...counts.values()].reduce((a, b) => a + b, 0) : 0;
-    const agreed = counts
-      ? [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
-      : undefined;
-    if (agreed && agreed[0] !== this.ownHash && agreed[1] * 2 > reporters) {
-      this.events.onDivergence();
-    }
+    if (!counts || reporters === 0) return;
+    const agreed = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    const diverged = !!agreed && agreed[0] !== this.ownHash && agreed[1] * 2 > reporters;
+    if (diverged === this.divergenceReported) return;
+    this.divergenceReported = diverged;
+    this.events.onDivergence(diverged);
   }
 
   ownDocumentHash(): string {
@@ -552,6 +576,14 @@ export class Session {
       model.setValue(seeded);
     }
     this.binding = bindMonaco(monaco, model, this.doc.ydoc, this.doc.text);
+    // refreshOwnHash used to run only for remote updates, so after typing the
+    // local hash described a document that no longer existed and compared
+    // unequal against everyone else by construction. This covers both
+    // directions, and gives the quiet window something to measure.
+    this.doc.ydoc.on("update", () => {
+      this.lastDocChangeAt = Date.now();
+      void this.refreshOwnHash();
+    });
     this.awareness = await AwarenessHub.create(
       (pt) => this.socket.sendAwareness(pt),
       this.identity.publicKeyRaw,
@@ -573,6 +605,7 @@ export class Session {
         else machine.markUnreachable(peerIdB64);
       }
       void this.flushPendingPurge();
+      this.evaluateDivergence();
     }, 10_000);
 
     this.startSnapshotLoop();

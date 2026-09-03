@@ -230,7 +230,7 @@ function JoinableRoom(props: RoomProps) {
           },
           onTtlMismatch: () => setTtlMismatch(true),
           onHistoryPressure: (m) => setHistoryPressure(m),
-          onDivergence: () => setDiverged(true),
+          onDivergence: (d) => setDiverged(d),
           onPurge: () => setPhase({ kind: "purged" }),
           onRoomUnavailable: () => setPhase({ kind: "unavailable" }),
         },
