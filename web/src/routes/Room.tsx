@@ -782,7 +782,37 @@ function ToastRegion() {
   );
 }
 
+// iOS Safari zooms the page whenever focus lands on a control whose computed
+// font-size is under 16px, and it does not undo that on blur — the shred
+// dialog already moves focus to its Cancel button and the page stays zoomed
+// regardless. A zoomed page then crops the dialog, which is position:fixed and
+// so lays out against the layout viewport while the reader is looking at a
+// smaller visual one. That was the reported symptom.
+//
+// The trigger is Monaco's hidden input, which computed to 12px. It cannot be
+// reached from the stylesheet: Monaco writes the editor's font settings to
+// that element as an inline style, which beats any rule short of !important,
+// and fighting it there would leave Monaco's own measurements disagreeing with
+// what is rendered. Setting the option instead keeps them in step.
+//
+// Keyed on pointer rather than width, because this is a property of touch
+// input and not of how wide the window happens to be — a phone in landscape is
+// past every width breakpoint here and still zooms. 16px is also simply easier
+// to read on a phone than 12px.
+//
+// There is no supported way to reset page zoom once it has happened. The usual
+// trick — swapping in a maximum-scale viewport — would take pinch-zoom away
+// from everyone permanently to paper over one dialog, so removing the trigger
+// is the whole fix.
+const COARSE_POINTER =
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia("(pointer: coarse)").matches;
+
+export const TOUCH_FONT_SIZE = 16;
+
 export const MONACO_OPTIONS = {
+  ...(COARSE_POINTER ? { fontSize: TOUCH_FONT_SIZE } : {}),
   language: "markdown",
   wordWrap: "on",
   tabSize: 2,
