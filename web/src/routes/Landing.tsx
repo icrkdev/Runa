@@ -15,6 +15,7 @@ import {
   randomHexSuffix,
 } from "../crypto/fingerprint";
 import { estimatePassphrase } from "../crypto/passphrase";
+import { Field } from "../ui/Field";
 import { nameProblem } from "./name-rules";
 
 type Class = "unlisted" | "named";
@@ -30,36 +31,76 @@ export function Landing() {
   const [cls, setCls] = useState<Class>("unlisted");
   return (
     <main className="landing">
-      <h1 className="mono">RÚNA</h1>
-      <p className="micro-label tag">ENCRYPTED IN YOUR BROWSER · THE SERVER STORES CIPHERTEXT</p>
+      <Field />
+      <div className="masthead">
+        <p className="micro-label eyebrow">Vardr Labs · ephemeral collaboration</p>
+        <h1>RÚNA</h1>
+        <p className="tagline">Shared, encrypted, and gone when you say so.</p>
+      </div>
 
-      <div className="panel" role="radiogroup" aria-label="Room class">
-        <label className="row" style={{ justifyContent: "space-between" }}>
-          <span>
-            <strong>Private link</strong>
-            <div className="hint">
-              Nobody can find this room by guessing. The link is the key — send
-              the whole thing to the people you want in it.
-            </div>
-          </span>
-          <input type="radio" name="cls" checked={cls === "unlisted"} onChange={() => setCls("unlisted")} />
+      {/* Two cards rather than a stacked list: the choice is binary, and side
+          by side it costs one row instead of two. Only the selected card
+          carries its explanation — the unselected one does not need to argue
+          its case, and the height it saves is what keeps this on one screen. */}
+      <div className="classes" role="radiogroup" aria-label="Room type">
+        <label className={`class-card${cls === "unlisted" ? " is-on" : ""}`}>
+          <input
+            type="radio"
+            name="cls"
+            checked={cls === "unlisted"}
+            onChange={() => setCls("unlisted")}
+          />
+          <span className="class-name">Private link</span>
+          <span className="class-note">The link is the key</span>
         </label>
-        <hr style={{ border: "none", borderTop: "1px solid var(--hairline)", margin: "12px 0" }} />
-        <label className="row" style={{ justifyContent: "space-between" }}>
-          <span>
-            <strong>Shared name</strong>
-            <div className="hint">
-              Gets a memorable address you can say out loud, like
-              <span className="mono"> runa.vardrlabs.com/copper-lantern</span>.
-              Anyone can reach that address, so a passphrase is required — it
-              is the only thing keeping the room private.
-            </div>
-          </span>
-          <input type="radio" name="cls" checked={cls === "named"} onChange={() => setCls("named")} />
+        <label className={`class-card${cls === "named" ? " is-on" : ""}`}>
+          <input
+            type="radio"
+            name="cls"
+            checked={cls === "named"}
+            onChange={() => setCls("named")}
+          />
+          <span className="class-name">Shared name</span>
+          <span className="class-note">A memorable address</span>
         </label>
       </div>
 
+      <p className="class-detail">
+        {cls === "unlisted" ? (
+          <>Nobody can find it by guessing. Send the whole link — everything
+          after the <span className="mono">#</span> is the key.</>
+        ) : (
+          <>Reachable at <span className="mono">{window.location.host}/copper-lantern</span>,
+          so a passphrase is required. It is the only thing keeping the room
+          private.</>
+        )}
+      </p>
+
       {cls === "unlisted" ? <UnlistedForm /> : <NamedForm />}
+
+      <footer className="landing-foot">
+        <span className="micro-label">Apache-2.0 · no analytics · no cookies</span>
+        <a
+          className="source-link"
+          href="https://github.com/icrkdev/Runa"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {/* Inline rather than an <img>: the CSP is img-src 'self' data:,
+              and an icon worth one request is not worth a network round trip
+              on a page whose whole claim is that it fetches nothing. */}
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
+              0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01
+              1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95
+              0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27
+              2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82
+              1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01
+              2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+          </svg>
+          <span>Source on GitHub</span>
+        </a>
+      </footer>
     </main>
   );
 }
@@ -115,13 +156,10 @@ function UnlistedForm() {
   return (
     <div className="panel">
       <ExpiryPicker onChange={setTtl} />
-      <button onClick={create} disabled={busy}>{busy ? "Creating…" : "Create unlisted room"}</button>
+      <button className="primary" onClick={create} disabled={busy}>
+        {busy ? "Creating…" : "Create private room"}
+      </button>
       {error && <p className="error-text mono">{error}</p>}
-      <p className="hint" style={{ marginTop: 14 }}>
-        Everything after the <span className="mono">#</span> in the link is the
-        key. If it gets stripped — some chat apps do that — the room cannot be
-        opened. Send the whole thing.
-      </p>
     </div>
   );
 }
@@ -203,7 +241,7 @@ function NamedForm() {
           <p className="error-text">{nameIssue}</p>
         ) : (
           <p className="hint">
-            This becomes the address: <span className="mono">runa.vardrlabs.com/{suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")}</span>
+            This becomes the address: <span className="mono">{window.location.host}/{suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")}</span>
           </p>
         )}
       </div>
@@ -257,7 +295,9 @@ function NamedForm() {
         </div>
       )}
       <ExpiryPicker onChange={setTtl} />
-      <button onClick={create} disabled={busy}>{busy ? "Creating…" : "Create named room"}</button>
+      <button className="primary" onClick={create} disabled={busy}>
+        {busy ? "Creating…" : "Create shared room"}
+      </button>
       {refusal && <p className="error-text mono" role="alert">{refusal}</p>}
       {error && <p className="error-text mono">{error}</p>}
     </div>

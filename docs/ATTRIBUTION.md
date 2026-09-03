@@ -3,7 +3,13 @@
 ## Upstream project
 
 RÚNA is a derivative of [Rustpad](https://github.com/ekzhang/rustpad) by
-Eric Zhang (ekzhang), licensed under the MIT Licence (see `LICENSE`).
+Eric Zhang (ekzhang), which is licensed under the MIT Licence.
+
+RÚNA itself is licensed under Apache-2.0 (see `LICENSE`). MIT-licensed work
+may be distributed as part of an Apache-2.0 work provided the original notice
+is retained, and it is — reproduced in full in `NOTICE`, which also records
+what the relicence does and does not change. Upstream Rustpad remains
+available under its own MIT licence, unaffected by anything here.
 
 - Derived from commit `54e4a9383c84d7317af42a7ddb177ce8bcba058d` (2025-02-02).
 - What was taken: the single-binary Rust service skeleton, room registry /

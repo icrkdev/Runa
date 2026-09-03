@@ -1,12 +1,24 @@
-:root {
-  --bg: #0a0b0c;
-  --surface: #121417;
-  --surface-raised: #1a1d21;
-  --hairline: #22262b;
-  --text: #e6e8ea;
-  --text-dim: #8a939b;
-  --text-faint: #5a6169;
+/* Faces are bundled, not fetched. The CSP is font-src 'self' and
+   check-origins.mjs refuses third-party origins in shipped HTML, so a webfont
+   host would be blocked at runtime and caught at build. */
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
 
+:root {
+  /* Ground is a cool near-black rather than a neutral one: at this weight a
+     pure grey reads as unset, and the blue bias ties it to the accent. */
+  --bg: #0b0f13;
+  --surface: #11161b;
+  --surface-raised: #171d24;
+  --hairline: #212932;
+  --text: #e9eef3;
+  --text-dim: #97a3ae;
+  --text-faint: #626d78;
+
+  /* The temper ladder. Functional, not decorative — these are the states the
+     editor puts in front of people, so they are the one place colour is
+     allowed to carry meaning. */
   --temper-cold: #8a939b;
   --temper-secure: #7fa8c9;
   --temper-watch: #e8c170;
@@ -14,8 +26,18 @@
   --temper-burn: #ff6b1a;
 
   --accent: var(--temper-secure);
-  --mono: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
-  --body-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --body-font: "Space Grotesk Variable", "Space Grotesk", "Helvetica Neue",
+               Arial, sans-serif;
+
+  /* One scale, used everywhere. Display sizes carry negative tracking; the
+     grotesque is drawn tight and looks slack without it. */
+  --step--1: 0.82rem;
+  --step-0: 1rem;
+  --step-1: 1.25rem;
+  --step-2: 1.6rem;
+  --step-3: clamp(2.2rem, 8vw, 3.4rem);
+  --display: clamp(3.2rem, 17vw, 7rem);
 }
 
 * { box-sizing: border-box; }
@@ -26,6 +48,9 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--body-font);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 #root { height: 100%; display: flex; flex-direction: column; }
@@ -34,7 +59,8 @@ html, body {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
-  letter-spacing: 0.14em;
+  font-weight: 400;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--text-dim);
 }
@@ -68,11 +94,138 @@ input[type="text"], input[type="password"] {
 }
 a { color: var(--temper-secure); }
 
+/* One screen, centred. The page is a single decision — pick a room type,
+   pick an expiry, go — so making anyone scroll to reach the button, or to
+   find the source link, was the layout failing at its only job.
+   min-height uses dvh so a phone's collapsing URL bar does not push the
+   footer out of view. */
 .landing {
+  position: relative;
   width: 100%;
-  max-width: 560px;
-  margin: 8vh auto 0;
-  padding: 0 24px 48px;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 24px;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
+}
+
+/* Named `ambient-field`, not `field`: `.field` is the form-field group and
+   was already taken. Colliding on it put position:fixed and
+   pointer-events:none on every input group on the page. */
+.ambient-field {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+.landing > *:not(.ambient-field) { position: relative; z-index: 1; }
+
+/* Stacked and centred, licence first: the standing fact about the project
+   outranks the link, and a centred column matches the masthead rather than
+   fighting it. */
+.landing-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--hairline);
+  text-align: center;
+}
+.source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: var(--step--1);
+}
+.source-link:hover { color: var(--text); }
+.source-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+.masthead { text-align: center; margin: 0; }
+
+/* The wordmark has a 0.92 line-height, which pulls its cap-height up toward
+   whatever sits above. At 10px the eyebrow was colliding with it optically
+   even though the boxes did not touch — kerning between two elements, not
+   inside one. */
+.eyebrow { display: block; margin: 0 0 26px; color: var(--text-faint); }
+
+.tagline {
+  margin: 14px 0 0;
+  font-size: var(--step-0);
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.landing h1 {
+  font-size: var(--display);
+  font-weight: 500;
+  /* The grotesque is drawn tight; without negative tracking at this size the
+     word falls apart. Leading below 1 lets the caps sit as one mass. */
+  letter-spacing: -0.045em;
+  line-height: 0.92;
+  margin: 0;
+}
+
+/* Two cards, one row. Binary choice, so a list wastes a row and reads as if
+   there might be a third option below. */
+.classes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.class-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 13px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.class-card:hover { border-color: var(--text-faint); }
+.class-card.is-on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+/* The native radio is redundant once the card itself shows selection, but it
+   has to stay for keyboard and screen-reader users — so it is hidden from
+   sight, not from the accessibility tree. */
+.class-card input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+}
+.class-card:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.class-name { font-weight: 500; font-size: var(--step-0); }
+.class-note { font-size: var(--step--1); color: var(--text-dim); }
+
+.class-detail {
+  margin: -6px 0 0;
+  font-size: var(--step--1);
+  line-height: 1.5;
+  color: var(--text-dim);
+  min-height: 2.9em; /* reserve the taller of the two, so switching does not jump */
+}
+
+/* Panels stop being boxes-on-a-page and become divisions of one column. */
+.panel {
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  padding: 16px;
+  margin: 0;
+  backdrop-filter: blur(6px);
 }
 
 /* A max-width cannot save a container whose child is intrinsically wider than
@@ -85,7 +238,61 @@ a { color: var(--temper-secure); }
 input, select, textarea, button {
   max-width: 100%;
   box-sizing: border-box;
+  font-family: inherit;
 }
+
+/* The platform control is white-on-white here, which reads as a foreign
+   object dropped into the page. appearance:none surrenders the chevron, so
+   it is drawn as a background gradient pair instead of shipping an asset. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  padding: 10px 34px 10px 12px;
+  font-size: var(--step--1);
+  line-height: 1.3;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: right 15px center, right 10px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select:hover { border-color: var(--text-faint); }
+
+/* The page's one action, so it takes the full width of the column like the
+   control above it. A short button under a full-width select leaves a ragged
+   right edge, which is what makes that corner of the panel look unresolved.
+   Right-alignment would be wrong for a different reason: bottom-right is
+   dialog convention, for a Cancel/Confirm pair, and would fight the
+   left-aligned EXPIRY label.
+   It is weighted rather than accent-coloured on purpose — accent is the
+   temper state in this interface, and spending it on a button would blunt
+   the one place colour carries meaning. */
+button.primary {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 12px 16px;
+  font-size: var(--step-0);
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--text-faint);
+  border-radius: 2px;
+}
+button.primary:hover:not(:disabled) {
+  border-color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 7%, var(--surface-raised));
+}
+button.primary:disabled { opacity: 0.55; cursor: default; }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The dropdown list itself is painted by the OS; this is the one hook. */
+select option { background: var(--surface-raised); color: var(--text); }
 .field select,
 .field input[type="text"],
 .field input[type="password"] { width: 100%; }
@@ -97,18 +304,10 @@ input, select, textarea, button {
 /* Flex and grid children default to min-width:auto, which refuses to shrink
    below their content. Every wrapper here should give way instead. */
 .row > *, .field > *, .panel > * { min-width: 0; }
-.landing h1 {
-  font-size: 42px;
-  letter-spacing: 0.06em;
-  margin-bottom: 4px;
-}
-.landing .tag { margin-bottom: 40px; }
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  padding: 20px;
-  margin-bottom: 16px;
-}
+/* The old .landing h1 and .panel rules lived here and, being later in the
+   file at equal specificity, silently beat the ones above. Removed rather
+   than out-specified — two rules for one element is how the next person
+   loses an hour. */
 .panel h2 { font-size: 13px; margin: 0 0 12px; }
 .field { margin-bottom: 12px; }
 .field label { display: block; margin-bottom: 6px; }
@@ -323,9 +522,12 @@ p, li { orphans: 3; widows: 3; }
 }
 
 @media (max-width: 560px) {
-  .landing { padding: 24px 16px; }
-  .landing h1 { font-size: 2rem; }
-  .landing .tag { margin-bottom: 24px; }
+  .landing { padding: 20px 16px; gap: 14px; }
+  /* Stacked below this width: two cards at 160px each start truncating the
+     names, and a truncated label is worse than an extra row. */
+  .classes { grid-template-columns: 1fr; gap: 8px; }
+  .class-card { flex-direction: row; align-items: baseline; gap: 8px; }
+  .class-detail { min-height: 3.6em; }
 
   /* 16px is the threshold below which iOS Safari zooms on focus, which
      then leaves the page scrolled sideways with no way back. */

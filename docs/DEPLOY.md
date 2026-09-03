@@ -65,7 +65,7 @@ Re-run it to ship an update; it is idempotent. Other knobs:
 | Variable | Default | |
 |---|---|---|
 | `RUNA_SSH_USER` | `ubuntu` | |
-| `RUNA_SSH_KEY` | `~/.ssh/runa_oracle` | |
+| `RUNA_SSH_KEY` | `~/.ssh/id_ed25519` | |
 | `RUNA_MEM_MAX` / `RUNA_MEM_HIGH` | `2G` / `1700M` | cgroup caps |
 | `RUNA_LOG_MB` | `700` | retained ciphertext, all rooms |
 | `RUNA_ROOMS` / `RUNA_PEERS` | `512` / `32` | |

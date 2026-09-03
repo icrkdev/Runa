@@ -1,0 +1,10 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/icrkdev/Runa/security/advisories/new
+    about: >-
+      Please do NOT open a public issue. Private reporting keeps the flaw
+      hidden while it is fixed; a public one exposes every running instance.
+  - name: Ask a question
+    url: https://github.com/icrkdev/Runa/discussions
+    about: For "how do I…" and "is this supposed to…", which are not bugs yet.

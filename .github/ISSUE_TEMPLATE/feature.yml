@@ -1,0 +1,34 @@
+name: Feature or change request
+description: Something RÚNA should do, or should do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you actually hitting?
+      description: >-
+        Describe the situation rather than the feature. "I could not tell
+        whether my edits were reaching anyone" leads somewhere better than
+        "add a sync indicator", because the first admits several solutions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What did you have in mind?
+      description: Optional. A problem well described is a complete request.
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Does this fit the constraints?
+      description: >-
+        These are the product rather than preferences, and a request that
+        needs one relaxed is worth discussing — but it should be discussed
+        openly rather than discovered in review. See CONTRIBUTING.md.
+      options:
+        - label: It does not require the server to read document content.
+        - label: It does not require writing anything to disk.
+        - label: It does not require loading anything from a third-party origin.
+        - label: It does not require unbounded memory growth.
