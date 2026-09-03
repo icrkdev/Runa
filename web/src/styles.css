@@ -109,6 +109,19 @@ a { color: var(--temper-secure); }
   display: flex;
   flex-direction: column;
   justify-content: center;
+  /* Never shrink below the content. #root is `height: 100%`, so .landing is a
+     flex item in a fixed-height column: once the named-room form expands past
+     the viewport, negative free space shrinks it and min-height clamps it at
+     exactly 100dvh. The box then stays viewport-sized while its content is
+     taller, and justify-content:center splits that overflow evenly above and
+     below — the half above sits at a negative offset, which no amount of
+     scrolling can reach because scrollTop cannot go below 0. Measured at
+     375x812 with "Shared name" selected: the masthead sat at -90px and the
+     tagline was sliced through, matching the phone report exactly.
+     flex-shrink:0 rather than `justify-content: safe center` because it is
+     universally supported and states the actual constraint; centring still
+     happens whenever there is genuine free space. */
+  flex-shrink: 0;
   gap: 18px;
 }
 

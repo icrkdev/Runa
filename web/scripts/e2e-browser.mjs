@@ -107,6 +107,46 @@ async function main() {
       );
     }
   }
+  // Vertical companion to the check above, and a different failure entirely:
+  // content stranded ABOVE the scroll origin, which no scrolling can reach
+  // because scrollTop stops at 0. .landing centres itself with
+  // justify-content:center inside #root, which is `height: 100%` — so once
+  // the named-room form expands past the viewport, .landing is a flex item
+  // with negative free space, gets shrunk, and min-height:100dvh clamps it at
+  // exactly one viewport while its content is taller. Centring then splits
+  // that overflow evenly top and bottom. On a phone it reads as "scrolls down
+  // but not up", with the masthead sliced through by the top of the screen.
+  //
+  // Unlike the sideways guard above, this one DOES reproduce in Chromium:
+  // verified by reverting the fix, which puts .masthead at -90px at 375x812.
+  // This check is load-bearing, not decorative — it is checked in the
+  // expanded state on purpose, because the default state never overflows and
+  // measuring only that is what let the bug through.
+  for (const [width, height] of [[320, 568], [375, 667], [375, 812], [414, 896]]) {
+    await landing.setViewportSize({ width, height });
+    await landing.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await landing.waitForSelector(".landing", { timeout: 5000 });
+    await landing.click("text=Shared name");
+    await landing.waitForSelector("text=Create shared room", { timeout: 5000 });
+    const stranded = await landing.evaluate(() => {
+      document.scrollingElement.scrollTop = 0;
+      const above = [];
+      for (const el of document.querySelectorAll(".landing, .landing *")) {
+        const r = el.getBoundingClientRect();
+        const cls = String(el.className || "").split(" ")[0];
+        if (r.height > 0 && cls !== "ambient-field" && r.top < -1) {
+          above.push(`${el.tagName.toLowerCase()}.${cls}@${Math.round(r.top)}px`);
+        }
+      }
+      return above.slice(0, 5);
+    });
+    if (stranded.length > 0) {
+      throw new Error(
+        `[landing] named-room form strands content above the scroll origin at ${width}x${height}: ${stranded.join(", ")}`,
+      );
+    }
+  }
+
   await landing.close();
 
   const alice = await makePage("alice");
@@ -249,6 +289,7 @@ async function main() {
   console.log(`  status bars showed a 2-person count on both sides`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
+  console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);
