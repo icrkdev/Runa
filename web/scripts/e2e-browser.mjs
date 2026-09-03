@@ -217,6 +217,51 @@ async function main() {
       `[alice] exponent is not drawn smaller than its base (${Math.round(mathBox.expH)}px vs ${Math.round(mathBox.baseH)}px)`,
     );
   }
+  // Layout used to be one button cycling split → editor → preview, so closing
+  // the preview and opening it again cost two presses, and nothing said which
+  // mode was current. Each mode is now one press, and the active one is
+  // marked. Asserted as a round trip because that is what was reported.
+  await alice.setViewportSize({ width: 1280, height: 900 });
+  await alice.waitForTimeout(150);
+  const previewVisible = () =>
+    alice.evaluate(() => {
+      const pv = document.querySelector(".pane-preview");
+      return !!(pv && getComputedStyle(pv).display !== "none");
+    });
+  const activeTab = () =>
+    alice.evaluate(() => {
+      const on = document.querySelector('.mode-tab[aria-pressed="true"]');
+      return on ? on.textContent.trim() : null;
+    });
+  if (!(await previewVisible())) throw new Error("[alice] preview not visible in the default split mode");
+  if ((await activeTab()) !== "Split") throw new Error(`[alice] active tab should be Split, got ${await activeTab()}`);
+
+  await alice.click('.mode-tab:has-text("Editor")');
+  await alice.waitForTimeout(150);
+  if (await previewVisible()) throw new Error("[alice] one press on Editor did not close the preview");
+  if ((await activeTab()) !== "Editor") throw new Error("[alice] Editor tab is not marked active after pressing it");
+
+  await alice.click('.mode-tab:has-text("Split")');
+  await alice.waitForTimeout(150);
+  if (!(await previewVisible())) throw new Error("[alice] one press on Split did not bring the preview back");
+
+  // Split is not offered where it renders identically to editor-only.
+  await alice.setViewportSize({ width: 384, height: 780 });
+  await alice.waitForTimeout(200);
+  await alice.click(".tool-menu-toggle");
+  await alice.waitForTimeout(200);
+  const narrowTabs = await alice.evaluate(() =>
+    [...document.querySelectorAll(".mode-tab")].map((b) => b.textContent.trim()),
+  );
+  if (narrowTabs.includes("Split")) {
+    throw new Error(`[alice] Split offered below the panes breakpoint: ${narrowTabs.join(", ")}`);
+  }
+  if (!narrowTabs.includes("Editor") || !narrowTabs.includes("Preview")) {
+    throw new Error(`[alice] narrow layout tabs missing: ${narrowTabs.join(", ")}`);
+  }
+  await alice.keyboard.press("Escape");
+  await alice.setViewportSize({ width: 1280, height: 900 });
+  await alice.waitForTimeout(150);
 
   // Shred modal opens and shows the honest limitation copy
   await alice.click('button:has-text("Shred")');
@@ -401,6 +446,7 @@ async function main() {
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  display math renders with the exponent raised and smaller`);
+  console.log(`  layout tabs: one press per mode, active marked, no Split on a phone`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);

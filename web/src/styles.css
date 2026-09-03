@@ -343,6 +343,37 @@ select option { background: var(--surface-raised); color: var(--text); }
 /* On a wide screen the wrapper vanishes and its buttons sit inline in the
    statusbar exactly as they always did. Below the panes breakpoint it becomes
    a real dropdown. One set of buttons, two layouts, no duplicated state. */
+/* There was no [aria-pressed] styling anywhere in this stylesheet. The
+   attribute was set on exactly one button (Steady) and the only visual cue was
+   a literal middot appended to its label, so a toggle looked identical whether
+   it was on or off. Screen readers were already being told the state; this
+   tells everyone else. */
+button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.toggle-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-left: 8px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent);
+}
+
+/* Segmented control rather than a cycling button: every mode is one press
+   away, and the current one is visible without having to press anything to
+   find out. Adjacent borders collapse so it reads as one control. */
+.mode-tabs { display: inline-flex; }
+.mode-tabs .mode-tab { padding: 8px 12px; border-right-width: 0; }
+.mode-tabs .mode-tab:last-child { border-right-width: 1px; }
+.mode-tabs .mode-tab[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-raised));
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .statusbar-actions { display: contents; }
 .tool-menu { display: contents; }
 .tool-menu-items { display: contents; }
@@ -355,8 +386,17 @@ select option { background: var(--surface-raised); color: var(--text); }
 }
 
 .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
+/* Both panes are always in the DOM, so narrowing the grid to one column is
+   not enough: the other pane simply drops into an implicit second row and
+   lands below the fold. Measured at 1280x900 — editor-only and preview-only
+   produced byte-identical geometry, editor 1280x744 on top and preview
+   1280x48 at y=852, which meant preview-only had never once shown the
+   preview. It also explains why cycling appeared to stall: two consecutive
+   modes rendered the same, so the button looked broken. */
 .panes.editor-only { grid-template-columns: 1fr; }
 .panes.preview-only { grid-template-columns: 1fr; }
+.panes.editor-only .pane-preview { display: none; }
+.panes.preview-only .pane-editor { display: none; }
 .pane-editor { border-right: 1px solid var(--hairline); min-width: 0; min-height: 0; }
 .panes.editor-only .pane-editor { border-right: none; }
 .pane-preview { overflow-y: auto; padding: 24px clamp(20px, 5vw, 64px); min-width: 0; }
@@ -565,6 +605,11 @@ p, li { orphans: 3; widows: 3; }
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   }
   .tool-menu.is-open .tool-menu-items { display: flex; }
+
+  /* In the dropdown the tabs are a full-width row of two — split is not
+     offered at this width because it renders identically to editor-only. */
+  .mode-tabs { width: 100%; }
+  .mode-tabs .mode-tab { flex: 1; text-align: center; }
 
   /* The notice stays — an extension really can read this page, and a security
      warning that is dismissed once and never returns is worse than a small
