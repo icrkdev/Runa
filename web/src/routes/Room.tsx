@@ -89,8 +89,26 @@ function JoinableRoom(props: RoomProps) {
   const [awayNames, setAwayNames] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  // Below the panes breakpoint the split mode renders identically to
+  // editor-only — the stylesheet hides the preview — so offering it there is
+  // offering a control that does nothing observable.
+  const [isNarrow, setIsNarrow] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(NARROW_QUERY).matches,
+  );
 
   useAccent(temper);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(NARROW_QUERY);
+    const sync = () => setIsNarrow(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
 
   // An overflow menu that cannot be dismissed without choosing something is a
   // trap on a phone, where there is no Escape key in reach and the panel
@@ -329,9 +347,15 @@ function JoinableRoom(props: RoomProps) {
       .catch(() => {});
   }, []);
 
+  // Ctrl+\ still cycles, but over the modes that are actually distinguishable
+  // at this width. Including split on a phone spent a press on a change nobody
+  // could see: the first press appeared to do nothing at all.
   const cycleMode = useCallback(() => {
-    setMode((m) => (m === "split" ? "editor" : m === "editor" ? "preview" : "split"));
-  }, []);
+    setMode((m) => {
+      if (isNarrow) return m === "preview" ? "editor" : "preview";
+      return m === "split" ? "editor" : m === "editor" ? "preview" : "split";
+    });
+  }, [isNarrow]);
 
   useLineSync(editorAdapterRef, previewPaneRef);
 
@@ -450,6 +474,10 @@ function JoinableRoom(props: RoomProps) {
   }
 
   const panesClass = mode === "split" ? "panes" : mode === "editor" ? "panes editor-only" : "panes preview-only";
+  // On a narrow screen split *is* editor-only on screen, so that is the tab
+  // that should read as active — otherwise the highlight points at a mode the
+  // reader cannot distinguish from the one they are looking at.
+  const shownMode: ViewMode = isNarrow && mode === "split" ? "editor" : mode;
 
   const showLadderBanner = ladder.kind === "watch" || ladder.kind === "armed" || ladder.kind === "burn";
 
@@ -551,15 +579,26 @@ function JoinableRoom(props: RoomProps) {
             ⋯
           </button>
           <div className="tool-menu-items">
-            <button
-              onClick={() => {
-                setMenuOpen(false);
-                cycleMode();
-              }}
-              title="Ctrl+\"
-            >
-              Layout
-            </button>
+            {/* Was a single button cycling split → editor → preview. Closing
+                the preview and reopening it therefore cost two presses, and
+                the control never said which mode was current. Every mode is
+                now one press away and the active one is visible. */}
+            <div className="mode-tabs" role="group" aria-label="Layout">
+              {MODE_TABS.filter((t) => !(isNarrow && t.value === "split")).map((t) => (
+                <button
+                  key={t.value}
+                  className="mode-tab"
+                  aria-pressed={shownMode === t.value}
+                  title={t.title}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setMode(t.value);
+                  }}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
             <button
               aria-pressed={steady}
               title="Constant-rate transmission: closes the typing-cadence channel at a bandwidth cost"
@@ -569,7 +608,8 @@ function JoinableRoom(props: RoomProps) {
                 sessionRef.current?.setSteadyTraffic(next);
               }}
             >
-              Steady{steady ? " ·" : ""}
+              Steady
+              {steady && <span className="toggle-dot" aria-hidden="true" />}
             </button>
             <button
               onClick={() => {
@@ -810,6 +850,16 @@ const COARSE_POINTER =
   window.matchMedia("(pointer: coarse)").matches;
 
 export const TOUCH_FONT_SIZE = 16;
+
+type ViewMode = "split" | "editor" | "preview";
+
+const NARROW_QUERY = "(max-width: 1000px)";
+
+const MODE_TABS: ReadonlyArray<{ value: ViewMode; label: string; title: string }> = [
+  { value: "split", label: "Split", title: "Editor and preview side by side (Ctrl+\\)" },
+  { value: "editor", label: "Editor", title: "Editor only (Ctrl+\\)" },
+  { value: "preview", label: "Preview", title: "Preview only (Ctrl+\\)" },
+];
 
 export const MONACO_OPTIONS = {
   ...(COARSE_POINTER ? { fontSize: TOUCH_FONT_SIZE } : {}),
