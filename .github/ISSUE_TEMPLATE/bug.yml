@@ -1,0 +1,79 @@
+name: Bug report
+description: Something behaves differently from how it is documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rooms live only in RAM and are destroyed on restart, so a bug is often
+        unreproducible an hour later. The more of the state below you can
+        capture *now*, the better.
+
+        **Found a security flaw?** Close this and use
+        [private reporting](https://github.com/icrkdev/Runa/security/advisories/new)
+        instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: What does /version report?
+      description: >-
+        Visit `https://<your-host>/version` and paste the whole thing. This is
+        the single most useful line in the report — it identifies the exact
+        commit and web bundle you were running, which is otherwise guesswork.
+        If it says "dev", say so; that is itself worth knowing.
+      placeholder: '{"commit":"...","bundle_sha256":"...","server_started":...}'
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Include how many people were in the room and on what devices. Several
+        past bugs only appeared with more than two participants, or only on a
+        phone, and were invisible to every test until somebody said so.
+      placeholder: |
+        1. Created a private-link room on…
+        2. Opened it on a second device (iPhone, Safari)…
+        3. …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did this happen?
+      options:
+        - A server I run myself
+        - The public instance at runa.vardrlabs.com
+        - Locally, from source
+    validations:
+      required: true
+
+  - type: input
+    id: browsers
+    attributes:
+      label: Browsers and devices involved
+      description: >-
+        Engine matters more than brand. A bug in Safari frequently does not
+        reproduce in Chrome — one layout fault in this project's history was
+        provably invisible to every Chromium-based test.
+      placeholder: iOS 18 Safari on iPhone 13; Firefox 130 on Linux
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Anything in the browser console or server log?
+      description: >-
+        Please redact room IDs and any part of a link after the `#` — that
+        fragment is the encryption key.
+      render: shell

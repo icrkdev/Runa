@@ -35,38 +35,45 @@ export function Landing() {
       <div className="masthead">
         <p className="micro-label eyebrow">Vardr Labs · ephemeral collaboration</p>
         <h1>RÚNA</h1>
-        <p className="deck">
-          A shared document that lives only in memory. Encrypted in your
-          browser, relayed by a server that cannot read it, and destroyed when
-          you all agree it is over.
-        </p>
       </div>
 
-      <div className="panel" role="radiogroup" aria-label="Room class">
-        <label className="row" style={{ justifyContent: "space-between" }}>
-          <span>
-            <strong>Private link</strong>
-            <div className="hint">
-              Nobody can find this room by guessing. The link is the key — send
-              the whole thing to the people you want in it.
-            </div>
-          </span>
-          <input type="radio" name="cls" checked={cls === "unlisted"} onChange={() => setCls("unlisted")} />
+      {/* Two cards rather than a stacked list: the choice is binary, and side
+          by side it costs one row instead of two. Only the selected card
+          carries its explanation — the unselected one does not need to argue
+          its case, and the height it saves is what keeps this on one screen. */}
+      <div className="classes" role="radiogroup" aria-label="Room type">
+        <label className={`class-card${cls === "unlisted" ? " is-on" : ""}`}>
+          <input
+            type="radio"
+            name="cls"
+            checked={cls === "unlisted"}
+            onChange={() => setCls("unlisted")}
+          />
+          <span className="class-name">Private link</span>
+          <span className="class-note">The link is the key</span>
         </label>
-        <hr style={{ border: "none", borderTop: "1px solid var(--hairline)", margin: "12px 0" }} />
-        <label className="row" style={{ justifyContent: "space-between" }}>
-          <span>
-            <strong>Shared name</strong>
-            <div className="hint">
-              Gets a memorable address you can say out loud, like
-              <span className="mono"> {window.location.host}/copper-lantern</span>.
-              Anyone can reach that address, so a passphrase is required — it
-              is the only thing keeping the room private.
-            </div>
-          </span>
-          <input type="radio" name="cls" checked={cls === "named"} onChange={() => setCls("named")} />
+        <label className={`class-card${cls === "named" ? " is-on" : ""}`}>
+          <input
+            type="radio"
+            name="cls"
+            checked={cls === "named"}
+            onChange={() => setCls("named")}
+          />
+          <span className="class-name">Shared name</span>
+          <span className="class-note">A memorable address</span>
         </label>
       </div>
+
+      <p className="class-detail">
+        {cls === "unlisted" ? (
+          <>Nobody can find it by guessing. Send the whole link — everything
+          after the <span className="mono">#</span> is the key.</>
+        ) : (
+          <>Reachable at <span className="mono">{window.location.host}/copper-lantern</span>,
+          so a passphrase is required. It is the only thing keeping the room
+          private.</>
+        )}
+      </p>
 
       {cls === "unlisted" ? <UnlistedForm /> : <NamedForm />}
 
@@ -150,11 +157,6 @@ function UnlistedForm() {
       <ExpiryPicker onChange={setTtl} />
       <button onClick={create} disabled={busy}>{busy ? "Creating…" : "Create unlisted room"}</button>
       {error && <p className="error-text mono">{error}</p>}
-      <p className="hint" style={{ marginTop: 14 }}>
-        Everything after the <span className="mono">#</span> in the link is the
-        key. If it gets stripped — some chat apps do that — the room cannot be
-        opened. Send the whole thing.
-      </p>
     </div>
   );
 }

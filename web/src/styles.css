@@ -94,12 +94,22 @@ input[type="text"], input[type="password"] {
 }
 a { color: var(--temper-secure); }
 
+/* One screen, centred. The page is a single decision — pick a room type,
+   pick an expiry, go — so making anyone scroll to reach the button, or to
+   find the source link, was the layout failing at its only job.
+   min-height uses dvh so a phone's collapsing URL bar does not push the
+   footer out of view. */
 .landing {
   position: relative;
   width: 100%;
-  max-width: 560px;
+  max-width: 480px;
   margin: 0 auto;
-  padding: 12vh 24px 64px;
+  padding: 24px;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
 }
 
 /* Named `ambient-field`, not `field`: `.field` is the form-field group and
@@ -119,10 +129,10 @@ a { color: var(--temper-secure); }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
   flex-wrap: wrap;
-  margin-top: 34px;
-  padding-top: 18px;
+  margin: 0;
+  padding-top: 14px;
   border-top: 1px solid var(--hairline);
 }
 .source-link {
@@ -136,8 +146,8 @@ a { color: var(--temper-secure); }
 .source-link:hover { color: var(--text); }
 .source-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 
-.masthead { margin-bottom: 44px; }
-.eyebrow { display: block; margin: 0 0 20px; color: var(--text-faint); }
+.masthead { text-align: center; margin: 0; }
+.eyebrow { display: block; margin: 0 0 10px; color: var(--text-faint); }
 
 .landing h1 {
   font-size: var(--display);
@@ -146,17 +156,51 @@ a { color: var(--temper-secure); }
      word falls apart. Leading below 1 lets the caps sit as one mass. */
   letter-spacing: -0.045em;
   line-height: 0.92;
-  margin: 0 0 22px;
-  text-wrap: balance;
+  margin: 0;
 }
 
-.deck {
-  font-size: var(--step-1);
-  line-height: 1.45;
-  color: var(--text-dim);
+/* Two cards, one row. Binary choice, so a list wastes a row and reads as if
+   there might be a third option below. */
+.classes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.class-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 13px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.class-card:hover { border-color: var(--text-faint); }
+.class-card.is-on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+/* The native radio is redundant once the card itself shows selection, but it
+   has to stay for keyboard and screen-reader users — so it is hidden from
+   sight, not from the accessibility tree. */
+.class-card input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
   margin: 0;
-  max-width: 34ch;
-  text-wrap: pretty;
+}
+.class-card:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.class-name { font-weight: 500; font-size: var(--step-0); }
+.class-note { font-size: var(--step--1); color: var(--text-dim); }
+
+.class-detail {
+  margin: -6px 0 0;
+  font-size: var(--step--1);
+  line-height: 1.5;
+  color: var(--text-dim);
+  min-height: 2.9em; /* reserve the taller of the two, so switching does not jump */
 }
 
 /* Panels stop being boxes-on-a-page and become divisions of one column. */
@@ -164,8 +208,8 @@ a { color: var(--temper-secure); }
   background: color-mix(in srgb, var(--surface) 72%, transparent);
   border: 1px solid var(--hairline);
   border-radius: 2px;
-  padding: 22px;
-  margin-bottom: 14px;
+  padding: 16px;
+  margin: 0;
   backdrop-filter: blur(6px);
 }
 
@@ -436,9 +480,12 @@ p, li { orphans: 3; widows: 3; }
 }
 
 @media (max-width: 560px) {
-  .landing { padding: 7vh 16px 48px; }
-  .deck { font-size: var(--step-0); max-width: none; }
-  .masthead { margin-bottom: 30px; }
+  .landing { padding: 20px 16px; gap: 14px; }
+  /* Stacked below this width: two cards at 160px each start truncating the
+     names, and a truncated label is worse than an extra row. */
+  .classes { grid-template-columns: 1fr; gap: 8px; }
+  .class-card { flex-direction: row; align-items: baseline; gap: 8px; }
+  .class-detail { min-height: 3.6em; }
 
   /* 16px is the threshold below which iOS Safari zooms on focus, which
      then leaves the page scrolled sideways with no way back. */
