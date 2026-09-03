@@ -35,6 +35,7 @@ export function Landing() {
       <div className="masthead">
         <p className="micro-label eyebrow">Vardr Labs · ephemeral collaboration</p>
         <h1>RÚNA</h1>
+        <p className="tagline">Shared, encrypted, and gone when you say so.</p>
       </div>
 
       {/* Two cards rather than a stacked list: the choice is binary, and side
@@ -78,6 +79,7 @@ export function Landing() {
       {cls === "unlisted" ? <UnlistedForm /> : <NamedForm />}
 
       <footer className="landing-foot">
+        <span className="micro-label">Apache-2.0 · no analytics · no cookies</span>
         <a
           className="source-link"
           href="https://github.com/icrkdev/Runa"
@@ -98,7 +100,6 @@ export function Landing() {
           </svg>
           <span>Source on GitHub</span>
         </a>
-        <span className="micro-label">Apache-2.0 · no analytics · no cookies</span>
       </footer>
     </main>
   );

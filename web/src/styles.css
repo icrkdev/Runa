@@ -125,15 +125,18 @@ a { color: var(--temper-secure); }
 }
 .landing > *:not(.ambient-field) { position: relative; z-index: 1; }
 
+/* Stacked and centred, licence first: the standing fact about the project
+   outranks the link, and a centred column matches the masthead rather than
+   fighting it. */
 .landing-foot {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 8px;
   margin: 0;
-  padding-top: 14px;
+  padding-top: 16px;
   border-top: 1px solid var(--hairline);
+  text-align: center;
 }
 .source-link {
   display: inline-flex;
@@ -147,7 +150,19 @@ a { color: var(--temper-secure); }
 .source-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 
 .masthead { text-align: center; margin: 0; }
-.eyebrow { display: block; margin: 0 0 10px; color: var(--text-faint); }
+
+/* The wordmark has a 0.92 line-height, which pulls its cap-height up toward
+   whatever sits above. At 10px the eyebrow was colliding with it optically
+   even though the boxes did not touch — kerning between two elements, not
+   inside one. */
+.eyebrow { display: block; margin: 0 0 26px; color: var(--text-faint); }
+
+.tagline {
+  margin: 14px 0 0;
+  font-size: var(--step-0);
+  line-height: 1.4;
+  color: var(--text-dim);
+}
 
 .landing h1 {
   font-size: var(--display);
