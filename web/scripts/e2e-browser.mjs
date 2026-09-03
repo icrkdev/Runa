@@ -237,6 +237,46 @@ async function main() {
     }
   }
 
+  // Split brain: a peer edits while disconnected, the other edits meanwhile,
+  // and both must reconverge on reconnect. This is the highest-risk path in
+  // the whole design — it exercises the resync request, the server's log
+  // replay and Yjs's merge at once — and it is the shape a real report will
+  // most often have, since a phone that locks or a laptop that sleeps looks
+  // exactly like this.
+  await bob.context().setOffline(true);
+  await bob.click(".monaco-editor .view-lines");
+  await Promise.all([
+    alice.keyboard.type("\nwritten-while-bob-was-away\n", { delay: 8 }),
+    bob.keyboard.type("\nwritten-by-bob-offline\n", { delay: 8 }),
+  ]);
+  await alice.waitForTimeout(2000);
+  const splitA = await editorText(alice);
+  const splitB = await editorText(bob);
+  if (splitA === splitB) {
+    throw new Error("[sync] peers did not actually diverge while one was offline — the test proves nothing");
+  }
+  await bob.context().setOffline(false);
+  let reA = "";
+  let reB = "";
+  let reconverged = false;
+  for (let i = 0; i < 60; i++) {
+    await alice.waitForTimeout(1000);
+    reA = await editorText(alice);
+    reB = await editorText(bob);
+    if (reA === reB) {
+      reconverged = true;
+      break;
+    }
+  }
+  if (!reconverged) {
+    throw new Error(
+      `[sync] peers never reconverged after a disconnect\n  alice: ${JSON.stringify(reA)}\n  bob:   ${JSON.stringify(reB)}`,
+    );
+  }
+  if (!reA.includes("written-while-bob-was-away") || !reA.includes("written-by-bob-offline")) {
+    throw new Error(`[sync] reconnect lost an edit instead of merging it: ${JSON.stringify(reA)}`);
+  }
+
   // Maths must render as maths, not as flattened text. $E = mc^2$ came out
   // reading "E=mc2" on a real screen while the unit test asserting /katex/i
   // passed the whole time — the wrapper class survives sanitising whether or
@@ -493,6 +533,7 @@ async function main() {
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);
   console.log(`  editors converged char-for-char after concurrent typing; no false divergence`);
+  console.log(`  offline edits on both sides reconverged on reconnect, nothing lost`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
