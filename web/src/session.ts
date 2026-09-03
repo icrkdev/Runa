@@ -17,6 +17,10 @@ import { executeWipe } from "./shred/wipe";
 /// moving. Two peers mid-keystroke legitimately hold different states.
 const DIVERGENCE_QUIET_MS = 5_000;
 
+/// How long a roster entry counts as present before it has to prove itself by
+/// broadcasting. Must exceed the ten-second presence heartbeat.
+const ROSTER_JOIN_GRACE_MS = 15_000;
+
 export type LadderPhase =
   | { kind: "none" }
   | { kind: "normal"; remainingMs: number }
@@ -137,6 +141,7 @@ export class Session {
         onPeerJoin: (entry) => {
           const id = toB64(entry.peerId);
           roster.set(id, entry);
+          sessionRef?.noteRosterSeen(id);
           // Names come from the key the roster binds to this peer, never from
           // what the peer says its name is.
           if (entry.pubkey) {
@@ -146,6 +151,12 @@ export class Session {
           }
           // They are back; stop showing them as away.
           away.delete(id);
+          // Say hello immediately. Presence is broadcast on the ten-second
+          // heartbeat and on cursor movement, so without this a newcomer who
+          // joins and sits still is invisible to everyone — and everyone is
+          // invisible to them — for up to ten seconds. Measured at 10-12s
+          // before this line existed.
+          void sessionRef?.announcePresence();
           events.onPeersChanged(roster.size);
         },
 
@@ -243,6 +254,7 @@ export class Session {
     this.internals.joinPerfMs = performance.now();
     this.machine.setMyPeerId(ack.peer_id);
     for (const r of ack.roster) {
+      this.noteRosterSeen(r.peer_id);
       this.internals.roster.set(r.peer_id, {
         peerId: fromB64(r.peer_id),
         pubkey: r.pubkey ? fromB64(r.pubkey) : undefined,
@@ -481,6 +493,13 @@ export class Session {
     }, intervalMs);
   }
 
+  /// When each roster entry was first seen by this client. Presence is
+  /// broadcast on a heartbeat, so a peer who has just arrived and not yet
+  /// spoken is genuinely absent from the awareness map — measured at 10-12
+  /// seconds before a peer became visible by liveness alone. Counting them
+  /// during that window is what stops a correct arrival looking like a
+  /// disconnection.
+  private rosterSeenAt = new Map<string, number>();
   private hashPending = false;
   private lastDocChangeAt = Date.now();
   private divergenceReported = false;
@@ -588,6 +607,8 @@ export class Session {
       (pt) => this.socket.sendAwareness(pt),
       this.identity.publicKeyRaw,
     );
+    // Announce on arrival rather than waiting for the first heartbeat.
+    void this.announcePresence();
     // Heartbeat is an awareness ping (not a sync request): it drives peer
     // liveness detection and divergence comparison without re-requesting
     // the entire log every 10 seconds (review R-3/R-7/R-8).
@@ -648,8 +669,61 @@ export class Session {
     this.awareness = null;
   }
 
+  noteRosterSeen(peerIdB64: string): void {
+    if (!this.rosterSeenAt.has(peerIdB64)) this.rosterSeenAt.set(peerIdB64, Date.now());
+  }
+
+  /// One presence broadcast, used on arrival and whenever somebody else
+  /// arrives. Cheap — it is the same frame the heartbeat sends — and it is
+  /// what makes a liveness-derived count appear in about a second instead of
+  /// on the next ten-second beat.
+  async announcePresence(): Promise<void> {
+    try {
+      await this.awareness?.broadcastCursor(1, 1, this.ownDocumentHash());
+    } catch {
+      return;
+    }
+  }
+
+  /// The roster size. This is the consensus denominator and must stay that
+  /// way: a THRESHOLD request carries its bar inside the signed payload, and
+  /// every receiver re-derives `supermajorityFor(ownRoster.length)` and
+  /// rejects anything lower — so a proposal computed from a smaller number
+  /// would be refused by everyone it was sent to.
   get peerCount(): number {
     return this.internals.roster.size;
+  }
+
+  /// Who is actually here, as opposed to who the roster still lists.
+  ///
+  /// The roster is a snapshot taken when this client joined, patched with the
+  /// PEER_JOIN and PEER_LEAVE events it happened to receive afterwards. Miss
+  /// one — during a disconnect, say — and it over-counts for the rest of the
+  /// session with nothing to correct it. Four devices in one room reported 5,
+  /// 3, 3 and 3 people at the same moment, all from the same server.
+  ///
+  /// Awareness state expires on its own after PRESENCE_TIMEOUT_MS, so counting
+  /// live presence is self-healing and every client converges on the same
+  /// number because they are all watching the same traffic. A device that
+  /// reconnects stops broadcasting under its old identity and drops out
+  /// without anything having to recognise that it is the same device — which
+  /// is how this avoids introducing a linkable cross-session identifier into a
+  /// tool that deliberately stores nothing.
+  ///
+  /// +1 for this client, which never appears in its own awareness map.
+  get livePeerCount(): number {
+    const live = new Set((this.awareness?.snapshot() ?? []).map((p) => p.senderId));
+    const now = Date.now();
+    let others = 0;
+    for (const id of this.internals.roster.keys()) {
+      if (id === this.internals.myPeerId) continue;
+      // In the roster and speaking, or in the roster and new enough that it
+      // has not had to speak yet. The grace must exceed the heartbeat, or a
+      // peer who joins and sits still flickers out and back.
+      const seen = this.rosterSeenAt.get(id) ?? 0;
+      if (live.has(id) || now - seen < ROSTER_JOIN_GRACE_MS) others += 1;
+    }
+    return others + 1;
   }
 
   /// Peers who were here within the grace window and are not now. Shown to
