@@ -394,7 +394,11 @@ select option { background: var(--surface-raised); color: var(--text); }
   border: 1px solid var(--hairline);
   padding: 6px 10px;
 }
-.preview-body .katex-display { overflow-x: auto; }
+/* Display math is a <math display="block"> under MathML output; the
+   .katex-display wrapper only exists in KaTeX's HTML mode. Both are listed so
+   a long equation scrolls inside itself rather than widening the page. */
+.preview-body .katex-display,
+.preview-body math[display="block"] { overflow-x: auto; max-width: 100%; }
 .external-chip {
   display: inline-block;
   border: 1px dashed var(--text-faint);
@@ -493,7 +497,7 @@ body.paged-mode > #root { display: none !important; }
 
 pre, code, kbd, samp { tab-size: 2; white-space: pre-wrap; word-break: break-word; }
 pre { break-inside: avoid; }
-table, blockquote, figure, .katex-display { break-inside: avoid; }
+table, blockquote, figure, .katex-display, math[display="block"] { break-inside: avoid; }
 h1, h2, h3, h4 { break-after: avoid; }
 p, li { orphans: 3; widows: 3; }
 
