@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderMarkdown } from "./pipeline";
+import { RUNA_SCHEMA } from "./schema";
 
 const XSS_CORPUS: { name: string; input: string; mustNotInclude: RegExp }[] = [
   {
@@ -277,6 +278,26 @@ describe("hardening regressions", () => {
     const { html } = await renderMarkdown("$$\\sqrt{\\frac{a}{b}}$$");
     expect(html).toContain("<msqrt>");
     expect(html).toContain("<mfrac>");
+    expect(html).not.toContain("<svg");
+  });
+
+  // Asserted against the schema itself, not through markdown. A markdown
+  // source containing <svg> is stripped whether or not the allowlist mentions
+  // it, because remarkRehype runs with allowDangerousHtml:false — so that test
+  // passes identically with the allowance present and proves nothing. This one
+  // fails the moment the tags come back.
+  it("no longer allows SVG, which only KaTeX's HTML output ever produced", () => {
+    for (const tag of ["svg", "path", "line", "rect", "g", "defs", "use"]) {
+      expect(RUNA_SCHEMA.tagNames).not.toContain(tag);
+    }
+    for (const tag of ["svg", "path", "line", "rect", "g", "use"]) {
+      expect(Object.keys(RUNA_SCHEMA.attributes ?? {})).not.toContain(tag);
+    }
+  });
+
+  it("still renders maths, which no longer needs SVG at all", async () => {
+    const { html } = await renderMarkdown("$$\\sqrt{\\frac{a}{b}}$$");
+    expect(html).toContain("<msqrt>");
     expect(html).not.toContain("<svg");
   });
 

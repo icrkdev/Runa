@@ -13,10 +13,21 @@ export const RUNA_SCHEMA = {
     "dl", "dt", "dd",
     "input",
     "img", "picture", "source",
-    // KaTeX draws radicals, stretchy delimiters and rules as inline SVG.
-    // Allowing <svg> but not its children left every √ and every big brace
-    // rendering as an empty box.
-    "svg", "path", "line", "rect", "g", "defs", "use",
+    // No SVG. These existed for exactly one producer: KaTeX's HTML output,
+    // which drew radicals, stretchy delimiters and rules as inline SVG. The
+    // renderer emits MathML now — a radical is <msqrt> and the browser draws
+    // the rule — so nothing in the pipeline generates SVG at all.
+    //
+    // This is defence in depth rather than closing an open hole: remarkRehype
+    // runs with allowDangerousHtml:false, so a hostile document cannot inject
+    // raw <svg> in the first place, and the allowlist was only ever reachable
+    // by nodes a plugin generated. It is removed because an allowance with no
+    // producer is surface kept alive by habit.
+    //
+    // Mermaid, if it is ever added, renders by generating SVG and will need
+    // some of this back. That should be a deliberate decision scoped to what
+    // Mermaid actually emits, not something inherited from a library that no
+    // longer runs.
     "math", "annotation", "semantics", "mrow", "mi", "mn", "mo", "msup", "msub", "mfrac", "mroot", "msqrt", "mtext", "mspace", "mstyle", "munderover", "munder", "mover", "mmultiscripts", "mprescripts", "mtable", "mtr", "mtd", "mphantom",
     "details", "summary", "time", "var",
   ],
@@ -39,16 +50,6 @@ export const RUNA_SCHEMA = {
     code: ["className"],
     span: ["className", "aria-hidden", "dataAlt"],
     div: ["className", "aria-hidden"],
-    svg: [
-      "viewBox", "preserveAspectRatio", "xmlns", "width", "height", "fill", "stroke",
-      "strokeWidth", "strokeLinecap", "strokeLinejoin", "display", "role",
-      ["aria-hidden"],
-    ],
-    path: ["d", "fill", "stroke", "strokeWidth", "strokeLinecap", "strokeLinejoin"],
-    line: ["x1", "y1", "x2", "y2", "stroke", "strokeWidth", "strokeLinecap"],
-    rect: ["x", "y", "width", "height", "fill"],
-    g: ["fill", "stroke", "transform"],
-    use: ["x", "y", "width", "height", "fill"],
     annotation: [["encoding"]],
     math: [["xmlns", "http://www.w3.org/1998/Math/MathML"], "display"],
     details: ["open"],
