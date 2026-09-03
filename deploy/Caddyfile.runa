@@ -4,7 +4,7 @@
 # The request path carries the room id. The key itself never leaves the
 # browser — it lives in the URL fragment — but the path still reveals which
 # rooms exist and when they are opened, so it is not written to disk.
-runa.vardrlabs.com {
+runa.example.com {
 	log {
 		output discard
 	}

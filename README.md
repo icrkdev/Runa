@@ -6,10 +6,90 @@
   Any participant can burn it to nothing on demand.
 </p>
 
+<p align="center">
+  <a href="https://runa.vardrlabs.com"><strong>Try it →</strong></a> ·
+  <a href="#quick-start">Run your own</a> ·
+  <a href="docs/THREAT_MODEL.md">Threat model</a> ·
+  <a href="docs/SECURITY.md">Report a vulnerability</a>
+</p>
+
+---
+
+> ### How this was built
+>
+> RÚNA was written collaboratively by **Prithvi Saha** (Vardr Labs) with
+> **Claude Code** (Anthropic) and **GLM 5.3 Flash (Ox Alpha)**. Design,
+> architecture, the security model and every decision about what ships were
+> human; a large share of the implementation, the test suites and the audit
+> passes were written with AI assistance, reviewed line by line before merge.
+>
+> This is stated plainly because it should inform how you read the rest.
+> The security claims here do not rest on who typed them — they rest on
+> `docs/THREAT_MODEL.md` saying what is and is not defended, on a test suite
+> you can run yourself, and on `/version` letting you check that the code you
+> audited is the code being served. Verify rather than trust; that advice
+> would be identical if the whole thing had been written by hand.
+
+---
+
+## Try it without installing anything
+
+A public instance runs at **[runa.vardrlabs.com](https://runa.vardrlabs.com)**.
+
+It is offered as a convenience and it is not special: it runs the same code in
+this repository, and you can confirm which commit by visiting
+[`/version`](https://runa.vardrlabs.com/version). Rooms there are subject to
+the same rules as anywhere else — they live in RAM, they die on restart, and
+nobody including us can read them.
+
+If what you are writing genuinely matters, run your own. That is the entire
+point of the project, and the next section takes about five minutes.
+
+---
+
+## Quick start
+
+One command, if you have Docker:
+
+```sh
+docker run -d --name runa -p 127.0.0.1:3000:3000 \
+  --memory=512m --memory-swap=512m --pids-limit=256 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --ulimit memlock=-1:-1 \
+  ghcr.io/icrkdev/runa:latest
+```
+
+Then open <http://127.0.0.1:3000>. That is a complete, working RÚNA — no Rust,
+no Node, no build.
+
+It is bound to `127.0.0.1` on purpose. Browsers refuse `ws://` on anything but
+loopback, so a real deployment needs TLS in front of it; see
+[docs/DEPLOY.md](docs/DEPLOY.md), which does the whole thing including the
+reverse proxy in one script.
+
+**Verify what you just pulled:**
+
+```sh
+curl -s http://127.0.0.1:3000/version
+```
+
+`commit` and `bundle_sha256` should match the release you intended to run. If
+`commit` reads `dev`, the image carries no provenance — do not trust it with
+anything that matters.
+
+Prefer a binary to a container? Signed builds for Linux and macOS are on the
+[releases page](https://github.com/icrkdev/Runa/releases), with cosign
+signatures and verification instructions in
+[docs/SECURITY.md](docs/SECURITY.md#release-integrity).
+
+Prefer to build it yourself? [Building from source](#what-you-need-before-you-start)
+is below and takes about five minutes.
+
 ---
 
 ## Table of contents
 
+- [Quick start](#quick-start)
 - [What is RÚNA?](#what-is-rúna)
 - [How it works (in plain English)](#how-it-works-in-plain-english)
 - [What you need before you start](#what-you-need-before-you-start)

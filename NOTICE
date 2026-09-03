@@ -1,0 +1,91 @@
+RÚNA
+Copyright 2026 Vardr Labs LLC
+
+This product includes software developed at Vardr Labs LLC.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+────────────────────────────────────────────────────────────────────────────
+Upstream
+────────────────────────────────────────────────────────────────────────────
+
+RÚNA is derived from Rustpad (https://github.com/ekzhang/rustpad) by Eric
+Zhang, at commit 54e4a9383c84d7317af42a7ddb177ce8bcba058d, which is licensed
+under the MIT Licence. That licence continues to apply to the portions of this
+work derived from it, and is reproduced in full below. See docs/ATTRIBUTION.md
+for what was taken and what was replaced.
+
+    MIT License
+
+    Copyright (c) 2021 Eric Zhang
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────────
+On the name, and on forks
+────────────────────────────────────────────────────────────────────────────
+
+You may call your fork RÚNA. The name is not reserved and no permission is
+needed to keep it — a fork that renames everything is harder for people to
+relate back to what it came from, which helps nobody.
+
+What section 6 of the licence withholds is the right to use *Vardr Labs LLC*
+to endorse or promote your version. Do not present a modified build as one we
+produced, reviewed, or vouch for.
+
+This matters more here than it would for most software. RÚNA is a security
+tool: its value rests on claims about what the server can and cannot see, and
+those claims were established by reading and testing a specific tree. A build
+with the cryptography altered can be byte-for-byte plausible and completely
+untrue. Section 4(b) of the licence therefore requires that modified files
+carry prominent notices saying they were changed — please treat that as a
+floor rather than a formality.
+
+────────────────────────────────────────────────────────────────────────────
+Verifying a build is the one we published
+────────────────────────────────────────────────────────────────────────────
+
+Licence text cannot stop a dishonest build; evidence can. Every RÚNA server
+answers /version with the git commit it was built from and the SHA-256 of the
+web bundle it is serving:
+
+    curl -s https://<host>/version
+
+Compare both against the corresponding GitHub Release. Release artefacts are
+signed with cosign (keyless, via Sigstore), so their provenance is checkable
+without trusting us to be honest about it. If /version reports "dev", the
+build carries no provenance at all and should not be trusted with anything
+that matters.
+
+────────────────────────────────────────────────────────────────────────────
+Third-party components
+────────────────────────────────────────────────────────────────────────────
+
+This product bundles the following, each under its own licence:
+
+  yjs                    MIT        CRDT document model
+  monaco-editor          MIT        Editor
+  Space Grotesk          OFL-1.1    Display and interface typeface
+  IBM Plex Mono          OFL-1.1    Monospace typeface
+  hash-wasm              MIT        Argon2id
+  unified / remark / rehype
+                         MIT        Markdown pipeline
+  KaTeX                  MIT        Mathematics rendering
+
+Server dependencies are enumerated with their licences in Cargo.lock and
+checked in CI by cargo-deny; see deny.toml for the allow-list.

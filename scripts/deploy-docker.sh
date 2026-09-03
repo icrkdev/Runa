@@ -18,7 +18,7 @@ set -euo pipefail
 HOST=${RUNA_HOST:?set RUNA_HOST, e.g. runa.example.com}
 BOX_IP=${RUNA_BOX_IP:?set RUNA_BOX_IP, the instance public IP}
 SSH_USER=${RUNA_SSH_USER:-ubuntu}
-SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/runa_oracle}
+SSH_KEY=${RUNA_SSH_KEY:-$HOME/.ssh/id_ed25519}
 
 # Sizing. Container memory and the RUNA_* ceilings must move together:
 #   peak ~= 25 MB + 1.4 x LOG_MB + (CONNECTIONS x QUEUE_KB) + ~32 MB

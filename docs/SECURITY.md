@@ -7,7 +7,14 @@ because it stores nothing; pin and review what you deploy.
 
 ## Reporting a vulnerability
 
-Email: **security@vardrlabs.com**
+**Use [GitHub private vulnerability reporting](https://github.com/icrkdev/Runa/security/advisories/new).**
+It opens a private thread visible only to you and the maintainers, so nothing
+is disclosed while it is being fixed, and there is no address for scrapers to
+harvest.
+
+If you would rather not use GitHub, `security@vardrlabs.com` reaches the same
+people. It is a forwarding alias, not a personal inbox. The GitHub route is
+preferred because it keeps the report, the fix and the advisory in one place.
 
 - Please include reproduction steps, affected commit or bundle hash
   (`GET /version` prints both), and your assessment of severity.
