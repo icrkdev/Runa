@@ -263,6 +263,33 @@ select {
   background-repeat: no-repeat;
 }
 select:hover { border-color: var(--text-faint); }
+
+/* The page's one action, so it takes the full width of the column like the
+   control above it. A short button under a full-width select leaves a ragged
+   right edge, which is what makes that corner of the panel look unresolved.
+   Right-alignment would be wrong for a different reason: bottom-right is
+   dialog convention, for a Cancel/Confirm pair, and would fight the
+   left-aligned EXPIRY label.
+   It is weighted rather than accent-coloured on purpose — accent is the
+   temper state in this interface, and spending it on a button would blunt
+   the one place colour carries meaning. */
+button.primary {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 12px 16px;
+  font-size: var(--step-0);
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--text-faint);
+  border-radius: 2px;
+}
+button.primary:hover:not(:disabled) {
+  border-color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 7%, var(--surface-raised));
+}
+button.primary:disabled { opacity: 0.55; cursor: default; }
 select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* The dropdown list itself is painted by the OS; this is the one hook. */
 select option { background: var(--surface-raised); color: var(--text); }

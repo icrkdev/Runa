@@ -156,7 +156,9 @@ function UnlistedForm() {
   return (
     <div className="panel">
       <ExpiryPicker onChange={setTtl} />
-      <button onClick={create} disabled={busy}>{busy ? "Creating…" : "Create unlisted room"}</button>
+      <button className="primary" onClick={create} disabled={busy}>
+        {busy ? "Creating…" : "Create private room"}
+      </button>
       {error && <p className="error-text mono">{error}</p>}
     </div>
   );
@@ -293,7 +295,9 @@ function NamedForm() {
         </div>
       )}
       <ExpiryPicker onChange={setTtl} />
-      <button onClick={create} disabled={busy}>{busy ? "Creating…" : "Create named room"}</button>
+      <button className="primary" onClick={create} disabled={busy}>
+        {busy ? "Creating…" : "Create shared room"}
+      </button>
       {refusal && <p className="error-text mono" role="alert">{refusal}</p>}
       {error && <p className="error-text mono">{error}</p>}
     </div>
