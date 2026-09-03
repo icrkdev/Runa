@@ -73,6 +73,42 @@ async function main() {
     return page;
   }
 
+  // Guards against horizontal scroll on the landing page at phone widths.
+  //
+  // Scope, honestly: this catches fixed widths, wide tables and unbreakable
+  // strings. It does NOT catch the bug that prompted it. On iOS Safari a
+  // <select> grows to fit its longest <option> and drags the page sideways;
+  // Chromium clamps it — headless and under device emulation alike — so the
+  // failure is unreproducible here. Measured: the same page that scrolled
+  // 214px sideways on a real iPhone reports zero overflow in this engine.
+  //
+  // The CSS fix (width:100% on form controls) is correct by construction
+  // rather than by this test. Left in place because the class of bug is
+  // common and the check is nearly free.
+  const landing = await makePage("landing");
+  for (const width of [320, 375, 414]) {
+    await landing.setViewportSize({ width, height: 780 });
+    await landing.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await landing.waitForSelector(".landing", { timeout: 5000 });
+    const m = await landing.evaluate(() => {
+      const vw = document.documentElement.clientWidth;
+      const offenders = [];
+      for (const el of document.querySelectorAll("*")) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.right > vw + 1) {
+          offenders.push(`${el.tagName.toLowerCase()}.${String(el.className || "").split(" ")[0]}=${Math.round(r.right)}px`);
+        }
+      }
+      return { vw, scrollW: document.documentElement.scrollWidth, offenders: offenders.slice(0, 5) };
+    });
+    if (m.scrollW > m.vw + 1) {
+      throw new Error(
+        `[landing] scrolls sideways at ${width}px (content ${m.scrollW}px): ${m.offenders.join(", ")}`,
+      );
+    }
+  }
+  await landing.close();
+
   const alice = await makePage("alice");
   alicePage = alice;
   await alice.goto(roomUrl, { waitUntil: "domcontentloaded" });
@@ -156,6 +192,40 @@ async function main() {
     );
   }
 
+  // The dialog is where a phone hurts most: two right-aligned buttons on one
+  // row ran off the edge of a narrow screen, which is the worst possible
+  // place to lose a button. Check the whole page for horizontal overflow at
+  // phone widths, with the dialog open.
+  for (const width of [320, 375, 414]) {
+    await alice.setViewportSize({ width, height: 780 });
+    await alice.waitForTimeout(120);
+    const bad = await alice.evaluate(() => {
+      const vw = document.documentElement.clientWidth;
+      const offenders = [];
+      for (const el of document.querySelectorAll("*")) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.right > vw + 1) {
+          offenders.push(`${el.tagName.toLowerCase()}.${String(el.className || "").split(" ")[0]} right=${Math.round(r.right)}`);
+        }
+      }
+      return { vw, scrollW: document.documentElement.scrollWidth, offenders: offenders.slice(0, 5) };
+    });
+    if (bad.scrollW > bad.vw + 1) {
+      throw new Error(
+        `[alice] page scrolls sideways at ${width}px (content ${bad.scrollW}px): ${bad.offenders.join(", ")}`,
+      );
+    }
+    // Both dialog actions must actually be reachable.
+    for (const name of ["Cancel", "Shred"]) {
+      const box = await alice.locator(`[role="alertdialog"] button:has-text("${name}")`).first().boundingBox();
+      if (!box) throw new Error(`[alice] "${name}" button missing at ${width}px`);
+      if (box.x < 0 || box.x + box.width > width + 1) {
+        throw new Error(`[alice] "${name}" button off-screen at ${width}px (x=${Math.round(box.x)} w=${Math.round(box.width)})`);
+      }
+    }
+  }
+  await alice.setViewportSize({ width: 1280, height: 900 });
+
   await alice.click('[role="alertdialog"] button:has-text("Cancel")');
 
   // Tombstone reachable and header-clean
@@ -178,6 +248,7 @@ async function main() {
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
+  console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);

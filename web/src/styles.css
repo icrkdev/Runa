@@ -69,10 +69,34 @@ input[type="text"], input[type="password"] {
 a { color: var(--temper-secure); }
 
 .landing {
+  width: 100%;
   max-width: 560px;
   margin: 8vh auto 0;
   padding: 0 24px 48px;
 }
+
+/* A max-width cannot save a container whose child is intrinsically wider than
+   the viewport: the body expands to fit, and `margin: auto` then centres the
+   container at its full max-width inside that expanded box. Two children did
+   exactly that — a <select> sizes itself to its longest <option>, and a URL in
+   a monospace face has no break opportunities at all. Both are constrained at
+   the source rather than papered over with overflow-x: hidden, which would
+   have hidden the symptom and kept the horizontal scroll. */
+input, select, textarea, button {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.field select,
+.field input[type="text"],
+.field input[type="password"] { width: 100%; }
+
+/* Addresses, room names and fingerprints are unbreakable tokens. Let them
+   break anywhere rather than push the page sideways. */
+.hint .mono, .micro-label.mono, .error-text .mono { overflow-wrap: anywhere; }
+
+/* Flex and grid children default to min-width:auto, which refuses to shrink
+   below their content. Every wrapper here should give way instead. */
+.row > *, .field > *, .panel > * { min-width: 0; }
 .landing h1 {
   font-size: 42px;
   letter-spacing: 0.06em;
@@ -310,7 +334,16 @@ p, li { orphans: 3; widows: 3; }
   .panel { padding: 16px; }
   .row { flex-wrap: wrap; }
 
+  /* The landing copy is set in a wide-tracked uppercase mono. At 375px it
+     needs the tracking eased or it cannot fit two words to a line. */
+  .landing .tag { letter-spacing: .06em; word-spacing: -.1em; }
+
   .modal { width: calc(100vw - 24px); max-width: none; padding: 16px; }
+
+  /* Shred and Cancel sat on one right-aligned row and ran off the edge on a
+     narrow screen — which is the worst possible place to lose a button. */
+  .modal .row { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
+  .modal .row button { width: 100%; }
 
   /* Toolbar buttons wrap rather than overflowing the viewport. */
   .pane-editor .row { overflow-x: auto; flex-wrap: nowrap; }
