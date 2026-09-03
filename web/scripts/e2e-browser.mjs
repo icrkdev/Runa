@@ -319,6 +319,41 @@ async function main() {
     throw new Error(`${cspViolations.length} CSP/Trusted-Types violations`);
   }
 
+  // iOS Safari zooms the page when focus lands on a control computing under
+  // 16px, and never undoes it — so tapping a line to type left the reader
+  // zoomed in, and the shred dialog (position:fixed, laid out against the
+  // layout viewport) then rendered cropped at both edges. Monaco's hidden
+  // input was 12px and is written inline by Monaco, so no stylesheet rule
+  // reached it; the fix is the editor option, keyed on pointer type.
+  //
+  // Checked under real touch emulation, because that is what the fix keys on:
+  // with pointer:fine the desktop sizes are correct and prove nothing.
+  const touchCtx = await browser.newContext({
+    viewport: { width: 393, height: 852 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const touch = await touchCtx.newPage();
+  await touch.goto(roomUrl, { waitUntil: "domcontentloaded" });
+  await touch.waitForSelector(".pane-editor", { timeout: 10000 });
+  await touch.waitForTimeout(1500);
+  const zoomers = await touch.evaluate(() => {
+    const out = [];
+    for (const el of document.querySelectorAll("input, select, textarea")) {
+      const cs = getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") continue;
+      const fs = parseFloat(cs.fontSize);
+      if (fs < 16) out.push(`${el.tagName.toLowerCase()}.${String(el.className || "").split(" ")[0]}=${fs}px`);
+    }
+    return out;
+  });
+  await touchCtx.close();
+  if (zoomers.length > 0) {
+    throw new Error(
+      `[touch] controls under the 16px iOS zoom threshold: ${zoomers.join(", ")}`,
+    );
+  }
+
   await browser.close();
   server.kill();
   await waitForProcessExit(server);
@@ -331,6 +366,7 @@ async function main() {
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
+  console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);
