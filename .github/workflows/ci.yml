@@ -56,9 +56,60 @@ jobs:
       - name: Build
         working-directory: web
         run: npm run build
-      - name: npm audit (high+ fails the build)
+      # `npm audit` exits non-zero for BOTH a real finding and a registry
+      # error, and the previous `--omit=dev ... || npm audit ...` fallback
+      # conflated the two: when the registry returned 503 the fallback ran a
+      # *different* audit with dev dependencies included and failed the build
+      # on the vitest/vite/esbuild chain, while production had zero findings.
+      # A transient outage silently rewrote the policy, at random, on main.
+      #
+      # So: parse the JSON, which distinguishes an outage (an `error` key) from
+      # a result (a `metadata` key), and retry only the outage.
+      #
+      # Production findings fail the build. Dev findings are reported loudly
+      # but do not block: the build tooling does shape the deployed artifact,
+      # so they must be visible before anything reaches the box — but clearing
+      # them currently needs a breaking vitest major, and a gate nobody can
+      # pass is a gate that gets bypassed.
+      - name: npm audit (production high+ fails the build)
         working-directory: web
-        run: npm audit --omit=dev --audit-level=high || npm audit --audit-level=high
+        run: |
+          set -uo pipefail
+          prod=""
+          for attempt in 1 2 3 4 5; do
+            out=$(npm audit --omit=dev --json 2>/dev/null || true)
+            if printf '%s' "$out" | jq -e 'has("metadata")' >/dev/null 2>&1; then
+              prod="$out"
+              break
+            fi
+            echo "attempt $attempt: registry did not return a result, retrying"
+            sleep 15
+          done
+          if [ -z "$prod" ]; then
+            echo "::error::npm registry unreachable after 5 attempts; the audit did not run"
+            exit 1
+          fi
+          high=$(printf '%s' "$prod" | jq -r '.metadata.vulnerabilities.high // 0')
+          crit=$(printf '%s' "$prod" | jq -r '.metadata.vulnerabilities.critical // 0')
+          echo "production dependencies: $crit critical, $high high"
+
+          dev=$(npm audit --json 2>/dev/null || true)
+          if printf '%s' "$dev" | jq -e 'has("metadata")' >/dev/null 2>&1; then
+            printf '%s' "$dev" | jq -r '
+              .metadata.vulnerabilities
+              | "including dev dependencies: \(.critical) critical, \(.high) high, \(.moderate) moderate"'
+            printf '%s' "$dev" | jq -r '
+              .vulnerabilities | to_entries[]
+              | select(.value.severity == "high" or .value.severity == "critical")
+              | "::warning::dev dependency \(.key) is \(.value.severity)"'
+          else
+            echo "::warning::dev-inclusive audit did not return a result; production result above still stands"
+          fi
+
+          if [ "$crit" -gt 0 ] || [ "$high" -gt 0 ]; then
+            echo "::error::production dependencies have $crit critical and $high high advisories"
+            exit 1
+          fi
       - name: Third-party origin check on shipped HTML
         working-directory: web
         run: node scripts/check-origins.mjs
