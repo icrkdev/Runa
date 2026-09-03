@@ -1,6 +1,15 @@
 
 export interface Binding {
   dispose(): void;
+  /// How many times the model had to be rebuilt from the shared document
+  /// because the two had drifted apart. Zero in normal operation.
+  ///
+  /// This is exposed because a silent repair is a bug-hider: with the net in
+  /// place, any test that only asserts "model equals document at the end"
+  /// passes whether the edit paths are correct or merely repaired afterwards.
+  /// Tests assert this counter stays at zero, so the net cannot launder a
+  /// broken path into a green suite.
+  readonly repairs: number;
 }
 
 /// Translates a Yjs delta into Monaco edit operations using absolute
@@ -83,10 +92,12 @@ export function bindMonaco(
   /// The model is a view of the shared document. If they ever disagree the
   /// shared document wins — silent corruption is far worse than a lost undo
   /// stack, and this should never fire now that the EOL is pinned.
+  let repairs = 0;
   const reconcile = (): void => {
     if (applyingRemote) return;
     const truth = text.toString();
     if (model.getValue() === truth) return;
+    repairs += 1;
     applyingRemote = true;
     try {
       model.setValue(truth);
@@ -135,6 +146,9 @@ export function bindMonaco(
   text.observe(observer);
 
   return {
+    get repairs(): number {
+      return repairs;
+    },
     dispose(): void {
       onChange.dispose();
       text.unobserve(observer);
