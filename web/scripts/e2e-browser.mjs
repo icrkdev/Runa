@@ -185,6 +185,98 @@ async function main() {
     if (!peers.includes("2 PEOPLE")) throw new Error(`[${label}] expected a 2-person count in status bar, got: ${peers}`);
   }
 
+  // The convergence check above compares the *rendered preview*, which
+  // normalises whitespace: two sources whose blank lines sit in different
+  // places render to identical text. A real divergence report showed exactly
+  // that shape — the same words, differently placed — so the preview could
+  // never have caught it. Compare the editor's own lines instead.
+  const editorText = (page) =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".view-lines .view-line")]
+        .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent.replace(/\u00a0/g, " ") }))
+        .sort((x, y) => x.t - y.t)
+        .map((l) => l.x)
+        .join("\n"),
+    );
+
+  // Type into both at once, at the same place, which is the case that was
+  // reported as broken.
+  await alice.click(".monaco-editor .view-lines");
+  await bob.click(".monaco-editor .view-lines");
+  await Promise.all([
+    alice.keyboard.type("\nAAAA AAAA AAAA\nAAAA AAAA\n", { delay: 10 }),
+    bob.keyboard.type("\nBBBB BBBB BBBB\nBBBB BBBB\n", { delay: 10 }),
+  ]);
+
+  let srcA = "";
+  let srcB = "";
+  for (let i = 0; i < 60; i++) {
+    await alice.waitForTimeout(500);
+    srcA = await editorText(alice);
+    srcB = await editorText(bob);
+    if (srcA === srcB && srcA.includes("AAAA") && srcA.includes("BBBB")) break;
+  }
+  if (srcA !== srcB) {
+    throw new Error(
+      `[sync] editors did not converge after concurrent typing\n  alice: ${JSON.stringify(srcA)}\n  bob:   ${JSON.stringify(srcB)}`,
+    );
+  }
+
+  // And the divergence warning must not be crying wolf. It compared the local
+  // hash at that instant against hashes peers had broadcast up to a heartbeat
+  // earlier, on every update, and latched forever on the first mismatch — so
+  // two byte-identical documents both showed it. Waited past the quiet window
+  // and a heartbeat so a false positive has every chance to appear.
+  await alice.waitForTimeout(13_000);
+  for (const [label, page] of [["alice", alice], ["bob", bob]]) {
+    const warned = await page.evaluate(() =>
+      document.body.textContent.includes("Your copy differs from other peers"),
+    );
+    if (warned) {
+      throw new Error(`[sync] ${label} reports divergence while both editors hold identical text`);
+    }
+  }
+
+  // Split brain: a peer edits while disconnected, the other edits meanwhile,
+  // and both must reconverge on reconnect. This is the highest-risk path in
+  // the whole design — it exercises the resync request, the server's log
+  // replay and Yjs's merge at once — and it is the shape a real report will
+  // most often have, since a phone that locks or a laptop that sleeps looks
+  // exactly like this.
+  await bob.context().setOffline(true);
+  await bob.click(".monaco-editor .view-lines");
+  await Promise.all([
+    alice.keyboard.type("\nwritten-while-bob-was-away\n", { delay: 8 }),
+    bob.keyboard.type("\nwritten-by-bob-offline\n", { delay: 8 }),
+  ]);
+  await alice.waitForTimeout(2000);
+  const splitA = await editorText(alice);
+  const splitB = await editorText(bob);
+  if (splitA === splitB) {
+    throw new Error("[sync] peers did not actually diverge while one was offline — the test proves nothing");
+  }
+  await bob.context().setOffline(false);
+  let reA = "";
+  let reB = "";
+  let reconverged = false;
+  for (let i = 0; i < 60; i++) {
+    await alice.waitForTimeout(1000);
+    reA = await editorText(alice);
+    reB = await editorText(bob);
+    if (reA === reB) {
+      reconverged = true;
+      break;
+    }
+  }
+  if (!reconverged) {
+    throw new Error(
+      `[sync] peers never reconverged after a disconnect\n  alice: ${JSON.stringify(reA)}\n  bob:   ${JSON.stringify(reB)}`,
+    );
+  }
+  if (!reA.includes("written-while-bob-was-away") || !reA.includes("written-by-bob-offline")) {
+    throw new Error(`[sync] reconnect lost an edit instead of merging it: ${JSON.stringify(reA)}`);
+  }
+
   // Maths must render as maths, not as flattened text. $E = mc^2$ came out
   // reading "E=mc2" on a real screen while the unit test asserting /katex/i
   // passed the whole time — the wrapper class survives sanitising whether or
@@ -440,6 +532,8 @@ async function main() {
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);
+  console.log(`  editors converged char-for-char after concurrent typing; no false divergence`);
+  console.log(`  offline edits on both sides reconverged on reconnect, nothing lost`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
