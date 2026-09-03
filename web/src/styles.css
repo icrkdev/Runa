@@ -1,12 +1,24 @@
-:root {
-  --bg: #0a0b0c;
-  --surface: #121417;
-  --surface-raised: #1a1d21;
-  --hairline: #22262b;
-  --text: #e6e8ea;
-  --text-dim: #8a939b;
-  --text-faint: #5a6169;
+/* Faces are bundled, not fetched. The CSP is font-src 'self' and
+   check-origins.mjs refuses third-party origins in shipped HTML, so a webfont
+   host would be blocked at runtime and caught at build. */
+@import "@fontsource-variable/space-grotesk";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
 
+:root {
+  /* Ground is a cool near-black rather than a neutral one: at this weight a
+     pure grey reads as unset, and the blue bias ties it to the accent. */
+  --bg: #0b0f13;
+  --surface: #11161b;
+  --surface-raised: #171d24;
+  --hairline: #212932;
+  --text: #e9eef3;
+  --text-dim: #97a3ae;
+  --text-faint: #626d78;
+
+  /* The temper ladder. Functional, not decorative — these are the states the
+     editor puts in front of people, so they are the one place colour is
+     allowed to carry meaning. */
   --temper-cold: #8a939b;
   --temper-secure: #7fa8c9;
   --temper-watch: #e8c170;
@@ -14,8 +26,18 @@
   --temper-burn: #ff6b1a;
 
   --accent: var(--temper-secure);
-  --mono: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
-  --body-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --body-font: "Space Grotesk Variable", "Space Grotesk", "Helvetica Neue",
+               Arial, sans-serif;
+
+  /* One scale, used everywhere. Display sizes carry negative tracking; the
+     grotesque is drawn tight and looks slack without it. */
+  --step--1: 0.82rem;
+  --step-0: 1rem;
+  --step-1: 1.25rem;
+  --step-2: 1.6rem;
+  --step-3: clamp(2.2rem, 8vw, 3.4rem);
+  --display: clamp(3.2rem, 17vw, 7rem);
 }
 
 * { box-sizing: border-box; }
@@ -26,6 +48,9 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--body-font);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 #root { height: 100%; display: flex; flex-direction: column; }
@@ -34,7 +59,8 @@ html, body {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
-  letter-spacing: 0.14em;
+  font-weight: 400;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--text-dim);
 }
@@ -69,10 +95,78 @@ input[type="text"], input[type="password"] {
 a { color: var(--temper-secure); }
 
 .landing {
+  position: relative;
   width: 100%;
   max-width: 560px;
-  margin: 8vh auto 0;
-  padding: 0 24px 48px;
+  margin: 0 auto;
+  padding: 12vh 24px 64px;
+}
+
+/* Named `ambient-field`, not `field`: `.field` is the form-field group and
+   was already taken. Colliding on it put position:fixed and
+   pointer-events:none on every input group on the page. */
+.ambient-field {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+.landing > *:not(.ambient-field) { position: relative; z-index: 1; }
+
+.landing-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 34px;
+  padding-top: 18px;
+  border-top: 1px solid var(--hairline);
+}
+.source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: var(--step--1);
+}
+.source-link:hover { color: var(--text); }
+.source-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+.masthead { margin-bottom: 44px; }
+.eyebrow { display: block; margin: 0 0 20px; color: var(--text-faint); }
+
+.landing h1 {
+  font-size: var(--display);
+  font-weight: 500;
+  /* The grotesque is drawn tight; without negative tracking at this size the
+     word falls apart. Leading below 1 lets the caps sit as one mass. */
+  letter-spacing: -0.045em;
+  line-height: 0.92;
+  margin: 0 0 22px;
+  text-wrap: balance;
+}
+
+.deck {
+  font-size: var(--step-1);
+  line-height: 1.45;
+  color: var(--text-dim);
+  margin: 0;
+  max-width: 34ch;
+  text-wrap: pretty;
+}
+
+/* Panels stop being boxes-on-a-page and become divisions of one column. */
+.panel {
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  padding: 22px;
+  margin-bottom: 14px;
+  backdrop-filter: blur(6px);
 }
 
 /* A max-width cannot save a container whose child is intrinsically wider than
@@ -85,7 +179,34 @@ a { color: var(--temper-secure); }
 input, select, textarea, button {
   max-width: 100%;
   box-sizing: border-box;
+  font-family: inherit;
 }
+
+/* The platform control is white-on-white here, which reads as a foreign
+   object dropped into the page. appearance:none surrenders the chevron, so
+   it is drawn as a background gradient pair instead of shipping an asset. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  padding: 10px 34px 10px 12px;
+  font-size: var(--step--1);
+  line-height: 1.3;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+    linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: right 15px center, right 10px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+select:hover { border-color: var(--text-faint); }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The dropdown list itself is painted by the OS; this is the one hook. */
+select option { background: var(--surface-raised); color: var(--text); }
 .field select,
 .field input[type="text"],
 .field input[type="password"] { width: 100%; }
@@ -97,18 +218,10 @@ input, select, textarea, button {
 /* Flex and grid children default to min-width:auto, which refuses to shrink
    below their content. Every wrapper here should give way instead. */
 .row > *, .field > *, .panel > * { min-width: 0; }
-.landing h1 {
-  font-size: 42px;
-  letter-spacing: 0.06em;
-  margin-bottom: 4px;
-}
-.landing .tag { margin-bottom: 40px; }
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  padding: 20px;
-  margin-bottom: 16px;
-}
+/* The old .landing h1 and .panel rules lived here and, being later in the
+   file at equal specificity, silently beat the ones above. Removed rather
+   than out-specified — two rules for one element is how the next person
+   loses an hour. */
 .panel h2 { font-size: 13px; margin: 0 0 12px; }
 .field { margin-bottom: 12px; }
 .field label { display: block; margin-bottom: 6px; }
@@ -323,9 +436,9 @@ p, li { orphans: 3; widows: 3; }
 }
 
 @media (max-width: 560px) {
-  .landing { padding: 24px 16px; }
-  .landing h1 { font-size: 2rem; }
-  .landing .tag { margin-bottom: 24px; }
+  .landing { padding: 7vh 16px 48px; }
+  .deck { font-size: var(--step-0); max-width: none; }
+  .masthead { margin-bottom: 30px; }
 
   /* 16px is the threshold below which iOS Safari zooms on focus, which
      then leaves the page scrolled sideways with no way back. */

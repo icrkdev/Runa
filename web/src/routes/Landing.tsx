@@ -15,6 +15,7 @@ import {
   randomHexSuffix,
 } from "../crypto/fingerprint";
 import { estimatePassphrase } from "../crypto/passphrase";
+import { Field } from "../ui/Field";
 import { nameProblem } from "./name-rules";
 
 type Class = "unlisted" | "named";
@@ -30,8 +31,16 @@ export function Landing() {
   const [cls, setCls] = useState<Class>("unlisted");
   return (
     <main className="landing">
-      <h1 className="mono">RÚNA</h1>
-      <p className="micro-label tag">ENCRYPTED IN YOUR BROWSER · THE SERVER STORES CIPHERTEXT</p>
+      <Field />
+      <div className="masthead">
+        <p className="micro-label eyebrow">Vardr Labs · ephemeral collaboration</p>
+        <h1>RÚNA</h1>
+        <p className="deck">
+          A shared document that lives only in memory. Encrypted in your
+          browser, relayed by a server that cannot read it, and destroyed when
+          you all agree it is over.
+        </p>
+      </div>
 
       <div className="panel" role="radiogroup" aria-label="Room class">
         <label className="row" style={{ justifyContent: "space-between" }}>
@@ -50,7 +59,7 @@ export function Landing() {
             <strong>Shared name</strong>
             <div className="hint">
               Gets a memorable address you can say out loud, like
-              <span className="mono"> runa.vardrlabs.com/copper-lantern</span>.
+              <span className="mono"> {window.location.host}/copper-lantern</span>.
               Anyone can reach that address, so a passphrase is required — it
               is the only thing keeping the room private.
             </div>
@@ -60,6 +69,30 @@ export function Landing() {
       </div>
 
       {cls === "unlisted" ? <UnlistedForm /> : <NamedForm />}
+
+      <footer className="landing-foot">
+        <a
+          className="source-link"
+          href="https://github.com/icrkdev/Runa"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {/* Inline rather than an <img>: the CSP is img-src 'self' data:,
+              and an icon worth one request is not worth a network round trip
+              on a page whose whole claim is that it fetches nothing. */}
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="currentColor">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
+              0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01
+              1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95
+              0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27
+              2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82
+              1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01
+              2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+          </svg>
+          <span>Source on GitHub</span>
+        </a>
+        <span className="micro-label">Apache-2.0 · no analytics · no cookies</span>
+      </footer>
     </main>
   );
 }
@@ -203,7 +236,7 @@ function NamedForm() {
           <p className="error-text">{nameIssue}</p>
         ) : (
           <p className="hint">
-            This becomes the address: <span className="mono">runa.vardrlabs.com/{suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")}</span>
+            This becomes the address: <span className="mono">{window.location.host}/{suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")}</span>
           </p>
         )}
       </div>
