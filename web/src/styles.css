@@ -366,12 +366,22 @@ button[aria-pressed="true"] {
    away, and the current one is visible without having to press anything to
    find out. Adjacent borders collapse so it reads as one control. */
 .mode-tabs { display: inline-flex; }
-.mode-tabs .mode-tab { padding: 8px 12px; border-right-width: 0; }
-.mode-tabs .mode-tab:last-child { border-right-width: 1px; }
+/* Every tab keeps all four borders and overlaps its neighbour by exactly the
+   border width, so adjacent edges still collapse into a single line.
+   Collapsing them by deleting the right border instead — the obvious way, and
+   what this did first — left a pressed tab outlined on three sides with a gap
+   on the fourth. It was invisible on Preview, which is :last-child and kept
+   its own right border, and visible on Split and Editor, which did not. */
+.mode-tabs .mode-tab { padding: 8px 12px; }
+.mode-tabs .mode-tab + .mode-tab { margin-left: -1px; }
 .mode-tabs .mode-tab[aria-pressed="true"] {
   background: color-mix(in srgb, var(--accent) 16%, var(--surface-raised));
   border-color: var(--accent);
   color: var(--accent);
+  /* Draw the accent outline over the neighbour's edge rather than under it,
+     or the overlap hides the side the neighbour is sitting on. */
+  position: relative;
+  z-index: 1;
 }
 
 .statusbar-actions { display: contents; }
