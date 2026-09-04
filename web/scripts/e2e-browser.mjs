@@ -382,6 +382,50 @@ async function main() {
   await alice.waitForTimeout(150);
   if (!(await previewVisible())) throw new Error("[alice] one press on Split did not bring the preview back");
 
+  // The pressed tab must be outlined on all four sides in every position.
+  // Collapsing the shared borders by deleting each tab's right border left
+  // Split and Editor outlined on three sides with a gap on the fourth, while
+  // Preview looked correct because it is :last-child and kept its own right
+  // border — so eyeballing the control in its default state showed nothing
+  // wrong. Measured rather than looked at, in all three positions.
+  for (const mode of ["Split", "Editor", "Preview"]) {
+    await alice.click(`.mode-tab:has-text("${mode}")`);
+    await alice.waitForTimeout(150);
+    const edge = await alice.evaluate(() => {
+      const el = document.querySelector('.mode-tab[aria-pressed="true"]');
+      if (!el) return null;
+      const cs = getComputedStyle(el);
+      const sides = ["Top", "Right", "Bottom", "Left"];
+      return {
+        label: el.textContent.trim(),
+        widths: sides.map((x) => cs[`border${x}Width`]),
+        colors: sides.map((x) => cs[`border${x}Color`]),
+      };
+    });
+    if (!edge) throw new Error(`[tabs] no pressed tab after selecting ${mode}`);
+    if (new Set(edge.widths).size !== 1) {
+      throw new Error(`[tabs] ${edge.label} is outlined unevenly: ${edge.widths.join(", ")}`);
+    }
+    if (new Set(edge.colors).size !== 1) {
+      throw new Error(`[tabs] ${edge.label} has mismatched border colours: ${edge.colors.join(" | ")}`);
+    }
+  }
+  // And the group must not resize as the selection moves, or the whole bar
+  // twitches every time somebody switches pane.
+  const groupWidths = [];
+  for (const mode of ["Split", "Editor", "Preview"]) {
+    await alice.click(`.mode-tab:has-text("${mode}")`);
+    await alice.waitForTimeout(120);
+    groupWidths.push(
+      await alice.evaluate(() => Math.round(document.querySelector(".mode-tabs").getBoundingClientRect().width)),
+    );
+  }
+  if (new Set(groupWidths).size !== 1) {
+    throw new Error(`[tabs] the control resizes with the selection: ${groupWidths.join(", ")}`);
+  }
+  await alice.click('.mode-tab:has-text("Split")');
+  await alice.waitForTimeout(150);
+
   // Split is not offered where it renders identically to editor-only.
   await alice.setViewportSize({ width: 384, height: 780 });
   await alice.waitForTimeout(200);
@@ -587,6 +631,7 @@ async function main() {
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  display math renders with the exponent raised and smaller`);
   console.log(`  layout tabs: one press per mode, active marked, no Split on a phone`);
+  console.log(`  pressed tab outlined evenly on all four sides; control does not resize`);
   console.log(`  gone.html served with Clear-Site-Data`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);
