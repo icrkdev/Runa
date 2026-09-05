@@ -12,10 +12,52 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Everything else waits on this.
+  #
+  # A tag is the one thing in this pipeline that cannot be taken back: by the
+  # time anything is wrong, an image is on GHCR, artifacts are signed by a
+  # certificate bound to that tag, and a release is public. v0.2.1 shipped a
+  # bill of materials naming 0.2.0, because bumping the manifests is a
+  # separate manual step from tagging and was simply forgotten — the same
+  # fault v0.2.0 had, fixed once by hand and immediately repeated.
+  #
+  # So the check runs first and blocks the rest. A release that disagrees with
+  # itself never gets built.
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag, the manifests and the changelog must agree
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          # A pre-release shares its base version's manifests and notes:
+          # 0.3.0-rc.1 is still 0.3.0 as far as the crate is concerned.
+          BASE="${TAG%%-*}"
+          CARGO=$(grep -m1 '^version = ' server/Cargo.toml | cut -d'"' -f2)
+          WEB=$(node -p "require('./web/package.json').version")
+          echo "tag=$TAG base=$BASE cargo=$CARGO web=$WEB"
+
+          fail=0
+          if [ "$CARGO" != "$BASE" ]; then
+            echo "::error::server/Cargo.toml says $CARGO but the tag says $BASE"
+            fail=1
+          fi
+          if [ "$WEB" != "$BASE" ]; then
+            echo "::error::web/package.json says $WEB but the tag says $BASE"
+            fail=1
+          fi
+          if ! grep -q "^## ${BASE}\$" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## ${BASE}' section; a release with no notes is not a release"
+            fail=1
+          fi
+          exit "$fail"
+
   # A multi-arch image is what makes `docker run ghcr.io/...` a real
   # instruction rather than an aspiration. arm64 matters: the cheapest hosts
   # people will actually deploy this on are ARM.
   image:
+    needs: release-gate
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,6 +124,7 @@ jobs:
             "ghcr.io/${{ steps.tags.outputs.owner }}/runa@${DIGEST}"
 
   build-release:
+    needs: release-gate
     runs-on: ${{ matrix.os }}
     strategy:
       # Without this, the first target to fail cancels the rest, so one
@@ -198,9 +241,25 @@ jobs:
             runa-*-sbom.json
 
   publish:
-    needs: build-release
+    needs: [release-gate, build-release]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+      - name: Release notes for this tag
+        run: |
+          set -euo pipefail
+          BASE="${GITHUB_REF_NAME#v}"
+          BASE="${BASE%%-*}"
+          # Everything under this version's heading, up to the next one.
+          awk -v want="## ${BASE}" '
+            $0 == want { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > NOTES.md
+          # release-gate already proved the section exists; this catches a
+          # section that exists and is empty, which reads as an accident.
+          test -s NOTES.md
+          echo "--- notes ---"; cat NOTES.md
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -208,4 +267,5 @@ jobs:
       - name: Attach to tag release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: NOTES.md
           files: dist-files/*
