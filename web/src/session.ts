@@ -17,6 +17,37 @@ import { executeWipe } from "./shred/wipe";
 /// moving. Two peers mid-keystroke legitimately hold different states.
 const DIVERGENCE_QUIET_MS = 5_000;
 
+/// Has the server shortened an absolute TTL behind the encrypted config?
+///
+/// `reported.secs` is the time *remaining*, which for a 24-hour room is
+/// necessarily less than the 86 400 the config blob records — so comparing the
+/// two directly reported every such room as tampered with, seconds after it
+/// was made. A warning that is always on is worse than none: it teaches people
+/// to dismiss the one banner that should stop them.
+///
+/// The total the server is claiming is `remaining + elapsed`, and elapsed
+/// comes from the server rather than the local clock so that a disagreement
+/// between the two cannot look like tampering. A room may legitimately be
+/// *extended* — effective_ttl_secs is the configured value plus any
+/// extensions — so only a claim shorter than the configured duration is a
+/// contradiction.
+///
+/// Without `elapsedSecs` the shortening cannot be checked at all, and this
+/// says so by returning false rather than guessing. A kind mismatch is checked
+/// separately and still catches the cruder substitutions.
+export function absoluteTtlShortened(
+  cfg: { kind: string; secs: number },
+  reported: { kind: string; secs: number },
+  elapsedSecs: number | undefined,
+): boolean {
+  if (cfg.kind !== "absolute" || reported.kind !== "absolute") return false;
+  if (typeof elapsedSecs !== "number" || !Number.isFinite(elapsedSecs) || elapsedSecs < 0) {
+    return false;
+  }
+  const claimedTotal = reported.secs + elapsedSecs;
+  return claimedTotal < cfg.secs - 1;
+}
+
 /// Replace a roster with the server's authoritative one.
 ///
 /// This existed inline as a loop that only ever called `set`, so a JOIN_ACK
@@ -327,10 +358,7 @@ export class Session {
       if (cfgTtl) {
         const kindMismatch =
           cfgTtl.kind === "none" ? ack.ttl.kind !== "none" : cfgTtl.kind !== ack.ttl.kind;
-        const shortenedAbsolute =
-          cfgTtl.kind === "absolute" &&
-          ack.ttl.kind === "absolute" &&
-          ack.ttl.secs < cfgTtl.secs - 1;
+        const shortenedAbsolute = absoluteTtlShortened(cfgTtl, ack.ttl, ack.elapsed_secs);
         if (kindMismatch || shortenedAbsolute) {
           this.events.onTtlMismatch();
           effectiveTtl =

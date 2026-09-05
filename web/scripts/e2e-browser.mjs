@@ -149,6 +149,44 @@ async function main() {
 
   await landing.close();
 
+  // A 24-hour room must not accuse its own server of tampering. For an
+  // absolute TTL the server reports the time *remaining*, which is necessarily
+  // less than the duration the config blob records, and the client compared
+  // the two directly — so every such room raised the mismatch banner within a
+  // minute of being created. A security warning that is always on is worse
+  // than none.
+  //
+  // Created through the landing page rather than by POSTing to the API,
+  // because the comparison only runs when a config blob is present and the API
+  // does not make one. A version of this check that created the room directly
+  // could not fail, and did not: it passed against the unfixed client.
+  {
+    const ttlPage = await makePage("absolute-ttl");
+    await ttlPage.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await ttlPage.waitForSelector("#expiry", { timeout: 10_000 });
+    await ttlPage.selectOption("#expiry", JSON.stringify({ kind: "absolute", secs: 86400 }));
+    await ttlPage.click('button:has-text("Create private room")');
+    await ttlPage.waitForSelector(".statusbar", { timeout: 30_000 });
+
+    // The comparison runs once, on JOIN_ACK. Joining the instant the room is
+    // made leaves elapsed at zero, where even the broken comparison is quiet —
+    // which is why a version of this check that only created and looked passed
+    // against the unfixed client. The fault appears on a *later* join, which
+    // is exactly how it was reported: a long session, a reconnect, then the
+    // banner. Reloading rejoins from the fragment and re-evaluates it.
+    await ttlPage.waitForTimeout(5000);
+    await ttlPage.reload({ waitUntil: "domcontentloaded" });
+    await ttlPage.waitForSelector(".statusbar", { timeout: 30_000 });
+    await ttlPage.waitForTimeout(1500);
+    const accused = await ttlPage.evaluate(() =>
+      document.body.textContent.includes("reports a different expiry"),
+    );
+    if (accused) {
+      throw new Error("[ttl] a 24-hour room reported its own server as contradicting its config");
+    }
+    await ttlPage.close();
+  }
+
   const alice = await makePage("alice");
   alicePage = alice;
   await alice.goto(roomUrl, { waitUntil: "domcontentloaded" });
@@ -692,6 +730,7 @@ async function main() {
   console.log(`  a shred proposed after a reconnect reaches the peer, and counts only who is here`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
+  console.log(`  a 24-hour room does not accuse its server of changing the expiry`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
