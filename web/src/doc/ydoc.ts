@@ -109,6 +109,18 @@ export class RunaDoc {
     this.opts.transport.sendSyncRequest(this.baseIndex);
   }
 
+  /// Ask for everything the room has, not just what this client has not seen.
+  ///
+  /// The ordinary request resumes from `baseIndex`, which is the right thing
+  /// on a reconnect and the wrong thing when the document is already wrong:
+  /// whatever was missed sits *below* that mark, so resuming from it asks for
+  /// precisely the entries this client already has. From zero the server sends
+  /// the snapshot and the whole tail, and Yjs discards what it already knows,
+  /// so the cost of over-asking is bandwidth rather than correctness.
+  resyncFromStart(): void {
+    this.opts.transport.sendSyncRequest(0);
+  }
+
   shouldSnapshot(logLen: bigint): boolean {
     const bytesOk = logLen > BigInt(this.opts.snapshotBytesThreshold ?? 2 * 1024 * 1024);
     const countOk = this.updateCount > (this.opts.snapshotCountThreshold ?? 2000);
