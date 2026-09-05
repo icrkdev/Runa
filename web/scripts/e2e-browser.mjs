@@ -670,6 +670,39 @@ async function main() {
   await alice.click('[role="alertdialog"] button:has-text("Reject")');
   await bob.waitForTimeout(500);
 
+  // Export offered PDF at one fixed size and nothing else: a long document
+  // became sixty-odd pages with no way to change it, and there was no way to
+  // get the source back out at all. The dialog now offers both, and this
+  // checks the markdown path end to end — a download that never arrives is
+  // indistinguishable from a button that does nothing.
+  alice.on("dialog", (d) => void d.accept());
+  await alice.click('button:has-text("Export")');
+  await alice.waitForSelector('[role="dialog"]', { timeout: 5000 });
+  const offered = await alice.evaluate(() =>
+    [...document.querySelectorAll('[role="dialog"] button')].map((b) => b.textContent.trim()),
+  );
+  for (const want of ["Markdown (.md)", "Compact", "Normal", "Large"]) {
+    if (!offered.includes(want)) {
+      throw new Error(`[export] the dialog does not offer "${want}": ${offered.join(", ")}`);
+    }
+  }
+  const download = alice.waitForEvent("download", { timeout: 15_000 });
+  await alice.click('[role="dialog"] button:has-text("Markdown (.md)")');
+  const file = await download;
+  if (!/^runa-\d{8}-\d{4}\.md$/.test(file.suggestedFilename())) {
+    throw new Error(`[export] unexpected filename: ${file.suggestedFilename()}`);
+  }
+  // A file that outlives the room must not carry the room's address into a
+  // downloads folder, a backup, and whatever syncs them.
+  if (file.suggestedFilename().includes(roomIdHex.slice(0, 8))) {
+    throw new Error("[export] the filename leaks the room id");
+  }
+  const saved = await file.path();
+  const contents = saved ? await (await import("node:fs/promises")).readFile(saved, "utf8") : "";
+  if (!contents.includes("Hello from Alice")) {
+    throw new Error(`[export] the markdown does not contain the document: ${JSON.stringify(contents.slice(0, 120))}`);
+  }
+
   // Tombstone reachable and header-clean
   const gone = await fetch(`${BASE}/gone.html`);
   if (!gone.headers.get("clear-site-data")) throw new Error("gone.html missing Clear-Site-Data");
@@ -728,6 +761,7 @@ async function main() {
   console.log(`  offline edits on both sides reconverged on reconnect, nothing lost`);
   console.log(`  presence count falls when a peer goes quiet and returns when it comes back`);
   console.log(`  a shred proposed after a reconnect reaches the peer, and counts only who is here`);
+  console.log(`  export offers markdown and three PDF sizes; the .md lands with the source in it`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  a 24-hour room does not accuse its server of changing the expiry`);

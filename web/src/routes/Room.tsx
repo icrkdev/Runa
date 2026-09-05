@@ -25,7 +25,8 @@ import { supermajorityFor } from "../shred/machine";
 import type { Policy } from "../shred/machine";
 import type { ShredRequest } from "../shred/machine";
 import { MissingKey } from "./MissingKey";
-import { exportPdf } from "../export/paged";
+import { exportPdf, type ExportDensity } from "../export/paged";
+import { exportMarkdown } from "../export/markdown";
 import { TOOLBAR_ACTIONS, applyTool } from "../ui/toolbar";
 import { useLineSync } from "../ui/linesync";
 
@@ -91,6 +92,7 @@ function JoinableRoom(props: RoomProps) {
   const [steady, setSteady] = useState(false);
   const [awayNames, setAwayNames] = useState<string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Below the panes breakpoint the split mode renders identically to
   // editor-only — the stylesheet hides the preview — so offering it there is
@@ -638,7 +640,7 @@ function JoinableRoom(props: RoomProps) {
             <button
               onClick={() => {
                 setMenuOpen(false);
-                void exportPdf();
+                setExportOpen(true);
               }}
             >
               Export
@@ -741,6 +743,21 @@ function JoinableRoom(props: RoomProps) {
         }}
         onConfirm={confirmShred}
       />
+      {exportOpen && (
+        <ExportDialog
+          onClose={() => setExportOpen(false)}
+          onMarkdown={() => {
+            setExportOpen(false);
+            const source = editorRef.current?.getModel()?.getValue() ?? "";
+            if (!exportMarkdown(source)) return;
+            announce("Wrote an unencrypted copy to your downloads.");
+          }}
+          onPdf={(density) => {
+            setExportOpen(false);
+            void exportPdf(density);
+          }}
+        />
+      )}
       {shredPrompt && (
         <ShredVotePrompt
           onDecide={(choice) => {
@@ -769,6 +786,59 @@ function Purged() {
     window.location.replace("/gone.html");
   }, []);
   return null;
+}
+
+/// Export offered PDF at one fixed size and nothing else, so a long document
+/// became sixty-odd pages with no way to change it, and there was no way to
+/// get the source back out at all.
+///
+/// A dialog rather than a nested dropdown: the toolbar's Export already lives
+/// inside the overflow menu on a phone, and a menu inside a menu is miserable
+/// to hit. It also leaves room to say what the sizes are for, which a row of
+/// bare labels does not.
+function ExportDialog({
+  onClose,
+  onMarkdown,
+  onPdf,
+}: {
+  onClose(): void;
+  onMarkdown(): void;
+  onPdf(density: ExportDensity): void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="modal-backdrop" onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="export-title" ref={ref}>
+        <h2 id="export-title" className="micro-label">EXPORT</h2>
+        <p className="hint">
+          Both write an unencrypted file to this computer. RÚNA cannot shred that copy.
+        </p>
+        <div className="export-choice">
+          <button onClick={onMarkdown}>Markdown (.md)</button>
+          <p className="hint">The source as written, so it opens anywhere and comes back unchanged.</p>
+        </div>
+        <div className="export-choice">
+          <span className="micro-label">PDF</span>
+          <div className="row">
+            <button onClick={() => onPdf("compact")}>Compact</button>
+            <button onClick={() => onPdf("normal")}>Normal</button>
+            <button onClick={() => onPdf("roomy")}>Large</button>
+          </div>
+          <p className="hint">Compact fits roughly twice as much on a page as Large.</p>
+        </div>
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+          <button onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ShredVotePrompt({ onDecide }: { onDecide(choice: "APPROVE" | "REJECT"): void }) {
