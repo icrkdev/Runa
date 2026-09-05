@@ -1,0 +1,57 @@
+import { describe, expect, it } from "vitest";
+import { replaceRoster } from "./session";
+import { rosterHash, type RosterEntry } from "./shred/roster";
+
+// Peer ids and public keys are decoded from base64 on the way in, so the
+// fixtures have to be real base64 of the right shape: 16 bytes for a peer id.
+const pid = (name: string) => btoa(name.padEnd(16, "\u0000").slice(0, 16));
+const PUBKEY = btoa("\u0000".repeat(32));
+const ack = (names: string[]) =>
+  names.map((n, i) => ({ peer_id: pid(n), pubkey: PUBKEY, joined_at_seq: i }));
+
+describe("JOIN_ACK replaces the roster instead of merging into it", () => {
+  it("drops peer ids the server no longer lists", () => {
+    const roster = new Map<string, RosterEntry>();
+    replaceRoster(roster, ack(["alice", "bob"]));
+    expect([...roster.keys()]).toEqual([pid("alice"), pid("bob")]);
+
+    // A reconnect: the same two people, but this client's connection has a new
+    // peer id and so does the other side's. Merging kept all four.
+    replaceRoster(roster, ack(["alice2", "bob2"]));
+    expect([...roster.keys()]).toEqual([pid("alice2"), pid("bob2")]);
+    expect(roster.size).toBe(2);
+  });
+
+  it("does not inflate the consensus denominator across repeated reconnects", () => {
+    const roster = new Map<string, RosterEntry>();
+    for (let i = 0; i < 5; i++) {
+      replaceRoster(roster, ack([`alice${i}`, `bob${i}`]));
+    }
+    // Reported as "it wanted 3 of 4 to approve with 2 people in the room".
+    expect(roster.size).toBe(2);
+  });
+
+  it("makes two clients agree on the roster hash, which gates every shred", async () => {
+    // The hash travels inside a signed shred request and each receiver
+    // re-derives it. A client that had reconnected hashed a bigger roster, so
+    // every receiver rejected the request as roster-mismatch and showed no
+    // prompt at all.
+    const reconnected = new Map<string, RosterEntry>();
+    replaceRoster(reconnected, ack(["a1", "b1"]));
+    replaceRoster(reconnected, ack(["a2", "b2"]));
+
+    const fresh = new Map<string, RosterEntry>();
+    replaceRoster(fresh, ack(["a2", "b2"]));
+
+    expect(await rosterHash([...reconnected.values()])).toBe(
+      await rosterHash([...fresh.values()]),
+    );
+  });
+
+  it("is empty when the server says the room is empty", () => {
+    const roster = new Map<string, RosterEntry>();
+    replaceRoster(roster, ack(["ghost"]));
+    replaceRoster(roster, []);
+    expect(roster.size).toBe(0);
+  });
+});
