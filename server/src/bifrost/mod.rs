@@ -72,6 +72,19 @@ struct JoinAck {
     base_index: u64,
     has_snapshot: bool,
     ttl: TtlJson,
+    /// How long this room has been alive.
+    ///
+    /// For an absolute TTL the `ttl.secs` above is the time *remaining*, which
+    /// is necessarily less than the duration the room was created with. The
+    /// client holds that original duration in its AEAD-protected config blob
+    /// and compared the two directly, so every 24-hour room reported the
+    /// server as contradicting its own config within seconds of being made.
+    ///
+    /// With this the client reconstructs the total the server is claiming —
+    /// remaining plus elapsed — and compares like with like. It is sent rather
+    /// than derived from the client's own clock so that a difference between
+    /// the two clocks cannot masquerade as tampering.
+    elapsed_secs: u64,
     ceiling_optout: bool,
     kdf: KdfJson,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -329,6 +342,7 @@ async fn run_connection(
             base_index: room.log.read().unwrap().base_index(),
             has_snapshot: room.log.read().unwrap().has_snapshot(),
             ttl: ttl_json(&room),
+            elapsed_secs: crate::runar::room::unix_now().saturating_sub(room.created_unix),
             ceiling_optout: room.ceiling_optout,
             kdf: KdfJson {
                 alg: "argon2id",

@@ -27,6 +27,10 @@ export interface JoinAck {
   base_index: number;
   has_snapshot: boolean;
   ttl: { kind: string; secs: number };
+  /// How long the room has been alive. For an absolute TTL `ttl.secs` is the
+  /// time remaining, so this is what makes the original duration recoverable.
+  /// Optional because a server that predates it simply will not send one.
+  elapsed_secs?: number;
   ceiling_optout: boolean;
   kdf: { alg: string; m_kib: number; t: number; p: number; salt: string };
   config_blob?: string;
