@@ -469,6 +469,9 @@ button[aria-pressed="true"] {
   flex-wrap: wrap;
 }
 
+.export-choice { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.export-choice .hint { margin: 0; }
+
 .modal-backdrop {
   position: fixed; inset: 0;
   background: rgba(0, 0, 0, 0.7);
