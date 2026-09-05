@@ -567,6 +567,71 @@ async function main() {
 
   await alice.click('[role="alertdialog"] button:has-text("Cancel")');
 
+  // A shred request must survive a reconnect. Reported from two machines: a
+  // laptop that had switched tabs a couple of times proposed a shred, showed
+  // the right occupant count, and the other machine — online the entire time —
+  // never saw the prompt at all. Only a full page reload restored it.
+  //
+  // The cause was that JOIN_ACK's authoritative roster was merged into the
+  // existing map rather than replacing it, so each reconnect left the previous
+  // connection's peer id behind. The roster is the consensus denominator AND
+  // its hash travels inside the request, so an inflated roster asked three of
+  // four to approve and hashed differently from everyone else's, and every
+  // receiver dropped the request as `roster-mismatch`. Silently, because the
+  // guard hook was an empty function.
+  await bob.context().setOffline(true);
+  await bob.waitForTimeout(1500);
+  await bob.context().setOffline(false);
+  let backTogether = false;
+  for (let i = 0; i < 60; i++) {
+    await alice.waitForTimeout(1000);
+    const n = await alice.evaluate(() => {
+      const m = document.body.textContent.match(/(\d+)\s+(PERSON|PEOPLE)/);
+      return m ? Number(m[1]) : null;
+    });
+    if (n === 2) {
+      backTogether = true;
+      break;
+    }
+  }
+  if (!backTogether) throw new Error("[shred] peers never re-established before the shred check");
+
+  // Scope, honestly: this does NOT reproduce the roster merge that caused the
+  // reported failure. Doing so needs a real socket close, and a brief offline
+  // blip does not produce one — checked by reverting the fix and watching this
+  // stay green, twice, first with the wrong peer proposing and then with the
+  // right one. The merge itself is asserted directly in session.roster.test.ts,
+  // where it can be made to fail.
+  //
+  // What this does cover is the path end to end: a shred proposed after a
+  // network interruption still reaches the other side, and the bar it asks for
+  // describes the people actually in the room. Bob proposes because bob is the
+  // one that dropped.
+  await bob.click('button:has-text("Shred")');
+  await bob.waitForSelector('[role="alertdialog"]', { timeout: 5000 });
+
+  // The denominator has to describe the people who are here. A reconnect used
+  // to inflate it, so this asked three of four with two people in the room.
+  await bob.selectOption('[role="alertdialog"] #shred-policy', "THRESHOLD");
+  await bob.waitForTimeout(200);
+  const policyCopy = await bob.textContent('[role="alertdialog"]');
+  const denom = policyCopy.match(/of\s+(?:the\s+)?(\d+)/);
+  if (!denom || Number(denom[1]) !== 2) {
+    throw new Error(`[shred] consensus denominator is ${denom ? denom[1] : "unreadable"} with two people present`);
+  }
+  await bob.selectOption('[role="alertdialog"] #shred-policy', "UNANIMOUS");
+  await bob.waitForTimeout(200);
+  await bob.click('[role="alertdialog"] button:has-text("Shred")');
+
+  // And the other side must actually be asked.
+  try {
+    await alice.waitForSelector('text=SHRED REQUESTED BY A PEER', { timeout: 15000 });
+  } catch {
+    throw new Error("[shred] the peer was never prompted — the request was dropped in silence");
+  }
+  await alice.click('[role="alertdialog"] button:has-text("Reject")');
+  await bob.waitForTimeout(500);
+
   // Tombstone reachable and header-clean
   const gone = await fetch(`${BASE}/gone.html`);
   if (!gone.headers.get("clear-site-data")) throw new Error("gone.html missing Clear-Site-Data");
@@ -624,6 +689,7 @@ async function main() {
   console.log(`  editors converged char-for-char after concurrent typing; no false divergence`);
   console.log(`  offline edits on both sides reconverged on reconnect, nothing lost`);
   console.log(`  presence count falls when a peer goes quiet and returns when it comes back`);
+  console.log(`  a shred proposed after a reconnect reaches the peer, and counts only who is here`);
   console.log(`  shred modal: three safe policies, selection sticks, cancel works`);
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);

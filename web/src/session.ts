@@ -17,6 +17,36 @@ import { executeWipe } from "./shred/wipe";
 /// moving. Two peers mid-keystroke legitimately hold different states.
 const DIVERGENCE_QUIET_MS = 5_000;
 
+/// Replace a roster with the server's authoritative one.
+///
+/// This existed inline as a loop that only ever called `set`, so a JOIN_ACK
+/// was merged into whatever the client already held. A peer id is minted per
+/// connection, so every reconnect left the previous connection's id behind for
+/// good: switching tabs twice left four entries where two people were.
+///
+/// The roster is not decoration. It is the consensus denominator — a shred
+/// then asked three of four to approve with two people present — and its hash
+/// travels inside a shred request, so an inflated roster hashed differently
+/// from everybody else's and every receiver rejected the request as
+/// `roster-mismatch` and never showed the prompt. Reloading the page appeared
+/// to cure it because a reload builds a fresh session around an empty map.
+///
+/// Entries the server no longer lists are gone: they left while this client
+/// was disconnected, so no PEER_LEAVE could be delivered.
+export function replaceRoster(
+  target: Map<string, RosterEntry>,
+  authoritative: { peer_id: string; pubkey?: string; joined_at_seq: number }[],
+): void {
+  target.clear();
+  for (const r of authoritative) {
+    target.set(r.peer_id, {
+      peerId: fromB64(r.peer_id),
+      pubkey: r.pubkey ? fromB64(r.pubkey) : undefined,
+      joinedAtSeq: r.joined_at_seq,
+    });
+  }
+}
+
 /// How long a roster entry counts as present before it has to prove itself by
 /// broadcasting. Must exceed the ten-second presence heartbeat.
 const ROSTER_JOIN_GRACE_MS = 15_000;
@@ -42,6 +72,8 @@ export interface SessionEvents {
   onPurge(reason: string): void;
   onCountdown(phase: LadderPhase): void;
   onTtlMismatch(): void;
+  /// This client declined to take part in a shred vote, and why.
+  onShredRejected(reason: string): void;
   /// Edits are no longer reaching other people, or soon will not be.
   onHistoryPressure(message: string): void;
   /// Raised with true when this copy is genuinely behind or ahead of an
@@ -237,7 +269,15 @@ export class Session {
       onExpired: () => events.onShredState("EXPIRED"),
       onStalled: (_id, waiting) =>
         events.onShredState(waiting.length ? "STALLED" : "VOTING", waiting[0]),
-      onVoteRejectedByGuard: () => {},
+      // Refusing to take part in a shred vote was discarded entirely: an empty
+      // function, no log, no message. When a drifted roster made every peer
+      // reject a request, the initiator sat in VOTING forever and nobody —
+      // initiator or receiver — was told anything at all. A guard that fires
+      // in silence cannot be diagnosed from the outside, which is exactly what
+      // happened.
+      onVoteRejectedByGuard: (reason) => {
+        events.onShredRejected(reason);
+      },
     });
 
     const session = new Session(cfg, identity, doc, socket, machine, internals, events);
@@ -253,14 +293,29 @@ export class Session {
     this.internals.myJoinedSeq = ack.roster.find((r) => r.peer_id === ack.peer_id)?.joined_at_seq ?? 0;
     this.internals.joinPerfMs = performance.now();
     this.machine.setMyPeerId(ack.peer_id);
-    for (const r of ack.roster) {
-      this.noteRosterSeen(r.peer_id);
-      this.internals.roster.set(r.peer_id, {
-        peerId: fromB64(r.peer_id),
-        pubkey: r.pubkey ? fromB64(r.pubkey) : undefined,
-        joinedAtSeq: r.joined_at_seq,
-      });
-    }
+    // JOIN_ACK carries the server's complete current roster, so it replaces
+    // what this client holds rather than being merged into it. Extracted so
+    // the replacement can be asserted directly: reproducing it through the
+    // network needs a real socket close, and a brief offline blip does not
+    // produce one, so an end-to-end test of it passes whether or not the fix
+    // is present.
+    //
+    // Merging is what shipped, and every reconnect therefore left the previous
+    // session's peer ids behind for good — a peer id is minted per connection,
+    // so switching tabs twice left four entries where two people were. That
+    // was not merely a wrong occupant count. The roster is the consensus
+    // denominator, so a shred asked three of four to approve when two people
+    // were present; and the roster hash travels inside a shred request, so an
+    // inflated roster hashed differently from everyone else's and every
+    // receiver rejected the request as `roster-mismatch` and never showed the
+    // prompt. Reloading the page appeared to fix it because a reload builds a
+    // fresh session around an empty map.
+    //
+    // Peers this client held that the server no longer lists are gone: they
+    // left while it was disconnected and no PEER_LEAVE could be delivered.
+    replaceRoster(this.internals.roster, ack.roster);
+    for (const r of ack.roster) this.noteRosterSeen(r.peer_id);
+    this.events.onPeersChanged(this.internals.roster.size);
 
     // The AEAD-protected room config is authoritative over the cleartext
     // TTL the server reports (spec §5.9.3). A server that omits or garbles

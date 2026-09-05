@@ -243,6 +243,16 @@ function JoinableRoom(props: RoomProps) {
             }
           },
           onTtlMismatch: () => setTtlMismatch(true),
+          onShredRejected: (reason) => {
+            // Say it out loud. A shred request that no peer will act on has to
+            // be visible to somebody, or it looks exactly like a request that
+            // was never sent.
+            announce(
+              reason === "roster-mismatch"
+                ? "Ignored a shred request: this room's occupant list disagrees with the sender's."
+                : `Ignored a shred request (${reason}).`,
+            );
+          },
           onHistoryPressure: (m) => setHistoryPressure(m),
           onDivergence: (d) => setDiverged(d),
           onPurge: () => setPhase({ kind: "purged" }),
