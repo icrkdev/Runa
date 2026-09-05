@@ -25,3 +25,6 @@ server/*.cdx.json
 
 # Root-level node_modules (vitest cache lives here)
 node_modules/
+
+# Release notes are extracted from CHANGELOG.md at publish time.
+NOTES.md
