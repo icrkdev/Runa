@@ -531,7 +531,20 @@ function JoinableRoom(props: RoomProps) {
       )}
       {diverged && (
         <div className="banner" role="alert">
-          <span>Your copy differs from other peers.</span>
+          <span>
+            Your copy still differs from other peers after trying to resync.
+          </span>
+          <button
+            onClick={() => {
+              sessionRef.current?.resyncNow();
+              // Says what it did, not what it achieved: the server allows one
+              // replay per connection and drops the rest silently, so a
+              // request made during another replay simply does not happen.
+              announce("Asked the room for a full copy.");
+            }}
+          >
+            Resync
+          </button>
           <button onClick={() => setDiverged(false)}>Dismiss</button>
         </div>
       )}

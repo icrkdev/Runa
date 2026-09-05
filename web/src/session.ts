@@ -17,6 +17,42 @@ import { executeWipe } from "./shred/wipe";
 /// moving. Two peers mid-keystroke legitimately hold different states.
 const DIVERGENCE_QUIET_MS = 5_000;
 
+/// How long a repair is given to work before the disagreement is called real.
+/// Long enough for the server's replay to arrive and apply — the presence
+/// heartbeat that re-evaluates this runs every ten seconds.
+const DIVERGENCE_REPAIR_SETTLE_MS = 15_000;
+
+export type DivergenceAction = "none" | "repair" | "warn" | "clear";
+
+/// What to do about a disagreement, given what has already been tried.
+///
+/// The warning used to be the whole response: it appeared and sat there, and
+/// the only thing that actually fixed a stale copy was reloading the page.
+/// But the relay can already repair this — `tail_from(0)` returns the snapshot
+/// and the entire tail, and applying it twice is harmless because Yjs is
+/// idempotent — so the first response to a disagreement should be to fix it,
+/// and the warning should be what happens when fixing it did not work.
+///
+/// Pulled out of the heartbeat so the policy can be tested without a socket, a
+/// server, or two browsers.
+export function divergenceAction(input: {
+  diverged: boolean;
+  reported: boolean;
+  repairAttemptedAt: number;
+  now: number;
+  settleMs?: number;
+}): DivergenceAction {
+  const settleMs = input.settleMs ?? DIVERGENCE_REPAIR_SETTLE_MS;
+  if (!input.diverged) return input.reported ? "clear" : "none";
+  // Nothing tried yet: repair silently rather than announcing a problem the
+  // client is about to solve on its own.
+  if (input.repairAttemptedAt === 0) return "repair";
+  // A repair is in flight. Saying nothing here is deliberate; a warning that
+  // appears and disappears on its own is worse than one that waits.
+  if (input.now - input.repairAttemptedAt < settleMs) return "none";
+  return input.reported ? "none" : "warn";
+}
+
 /// Has the server shortened an absolute TTL behind the encrypted config?
 ///
 /// `reported.secs` is the time *remaining*, which for a 24-hour room is
@@ -624,6 +660,8 @@ export class Session {
   /// Requiring agreement among a majority of reporters is kept: one peer
   /// broadcasting a made-up hash must not be able to tell everyone else they
   /// have diverged.
+  private repairAttemptedAt = 0;
+
   private evaluateDivergence(): void {
     if (Date.now() - this.lastDocChangeAt < DIVERGENCE_QUIET_MS) return;
     const counts = this.awareness?.foreignHashCounts();
@@ -631,9 +669,44 @@ export class Session {
     if (!counts || reporters === 0) return;
     const agreed = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
     const diverged = !!agreed && agreed[0] !== this.ownHash && agreed[1] * 2 > reporters;
-    if (diverged === this.divergenceReported) return;
-    this.divergenceReported = diverged;
-    this.events.onDivergence(diverged);
+
+    switch (
+      divergenceAction({
+        diverged,
+        reported: this.divergenceReported,
+        repairAttemptedAt: this.repairAttemptedAt,
+        now: Date.now(),
+      })
+    ) {
+      case "repair":
+        this.repairAttemptedAt = Date.now();
+        this.doc.resyncFromStart();
+        break;
+      case "warn":
+        this.divergenceReported = true;
+        this.events.onDivergence(true);
+        break;
+      case "clear":
+        this.divergenceReported = false;
+        this.repairAttemptedAt = 0;
+        this.events.onDivergence(false);
+        break;
+      case "none":
+        break;
+    }
+  }
+
+  /// Ask the relay for everything again, on request.
+  ///
+  /// Returns nothing useful on purpose. The server allows one replay per
+  /// connection at a time and drops the rest without a reply — correct, since
+  /// otherwise a peer could make it clone the whole log at the frame rate —
+  /// so a request that arrives during another replay simply does not happen,
+  /// and there is no way from here to tell which occurred. The caller must say
+  /// it asked, not that it worked.
+  resyncNow(): void {
+    this.repairAttemptedAt = Date.now();
+    this.doc.resyncFromStart();
   }
 
   ownDocumentHash(): string {
