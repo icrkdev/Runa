@@ -561,6 +561,37 @@ async function main() {
       }
     }
   }
+  // The room must fit the window exactly. It did not: the editor pane was a
+  // plain block holding the markdown ribbon and an editor sized at height:100%
+  // of that same block, so the two came to a ribbon's height more than the
+  // window. The document scrolled as a whole — a second scrollbar beside the
+  // editor's own, and the status bar and ribbon sliding off the top, which
+  // looked like rows pinning themselves under the toolbar.
+  //
+  // The guard beside this one checks the *horizontal* axis only, which is why
+  // 30px of vertical overflow sat there unnoticed across three engines.
+  for (const [w, h] of [[1400, 800], [1280, 720], [1024, 900]]) {
+    await alice.setViewportSize({ width: w, height: h });
+    await alice.waitForTimeout(400);
+    const fit = await alice.evaluate(() => {
+      const de = document.documentElement;
+      window.scrollTo(0, 0);
+      return { over: de.scrollHeight - de.clientHeight, root: document.querySelector("#root")?.getBoundingClientRect().height };
+    });
+    if (fit.over > 1) {
+      throw new Error(`[room] the page scrolls at ${w}x${h}: ${fit.over}px past the window (#root ${Math.round(fit.root)})`);
+    }
+    // And nothing may drag the chrome off the top.
+    await alice.evaluate(() => window.scrollTo(0, 500));
+    await alice.waitForTimeout(200);
+    const barTop = await alice.evaluate(() => Math.round(document.querySelector(".statusbar").getBoundingClientRect().top));
+    if (barTop < -1) {
+      throw new Error(`[room] the status bar scrolled off the top at ${w}x${h} (top ${barTop})`);
+    }
+  }
+  await alice.setViewportSize({ width: 1280, height: 900 });
+  await alice.waitForTimeout(300);
+
   // Side-by-side panes on a screen too narrow for them is how a shared room
   // link arrives looking like a blank page: two empty pane backgrounds with
   // the text off in the top-left. Reported from a Realme handset, where the
@@ -706,6 +737,21 @@ async function main() {
   // Tombstone reachable and header-clean
   const gone = await fetch(`${BASE}/gone.html`);
   if (!gone.headers.get("clear-site-data")) throw new Error("gone.html missing Clear-Site-Data");
+  // Comments stripped first: the file explains the old placeholder in a
+  // comment, and a check that trips on its own documentation is a bad check.
+  const goneBody = (await gone.text()).replace(/<!--[\s\S]*?-->/g, "");
+  // It used to read "ROOM —— · SHREDDED —— UTC", with the dashes standing in
+  // for values no script ever supplied — the element was referenced nowhere —
+  // so every reader saw the placeholders themselves.
+  if (/——/.test(goneBody)) {
+    throw new Error("gone.html still shows unfilled placeholders");
+  }
+  // And it must stay anonymous: this page is served with Clear-Site-Data, so
+  // naming the room here would write that address into a history just wiped
+  // for exactly that reason.
+  if (/room[_-]?id|\bUTC\b/i.test(goneBody)) {
+    throw new Error("gone.html leaks room or timing detail");
+  }
 
   const cspViolations = errors.filter((e) => /Content Security Policy|trustedTypes|Refused to/i.test(e));
   if (cspViolations.length > 0) {
@@ -767,11 +813,12 @@ async function main() {
   console.log(`  a 24-hour room does not accuse its server of changing the expiry`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
+  console.log(`  the room fits the window exactly; the chrome cannot scroll away`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  display math renders with the exponent raised and smaller`);
   console.log(`  layout tabs: one press per mode, active marked, no Split on a phone`);
   console.log(`  pressed tab outlined evenly on all four sides; control does not resize`);
-  console.log(`  gone.html served with Clear-Site-Data`);
+  console.log(`  gone.html served with Clear-Site-Data, anonymous, no placeholder text`);
   console.log(`  zero CSP / Trusted-Types violations across both sessions`);
   process.exit(0);
 }

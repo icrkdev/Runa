@@ -699,7 +699,11 @@ function JoinableRoom(props: RoomProps) {
             autoCorrect="off"
             translate="no"
             data-gramm="false"
-            style={{ height: "100%", display: "flex", flexDirection: "column" }}
+            // Takes what is left of the pane rather than all of it. With
+            // height:100% the editor claimed the pane's full height and the
+            // markdown ribbon above it added its own on top, so the room was
+            // taller than the window by exactly one ribbon.
+            style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}
           >
             <Editor
               defaultLanguage="markdown"
