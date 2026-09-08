@@ -407,7 +407,22 @@ button[aria-pressed="true"] {
 .panes.preview-only { grid-template-columns: 1fr; }
 .panes.editor-only .pane-preview { display: none; }
 .panes.preview-only .pane-editor { display: none; }
-.pane-editor { border-right: 1px solid var(--hairline); min-width: 0; min-height: 0; }
+/* A column, so the markdown ribbon and the editor divide the pane between
+   them instead of stacking past its end.
+   The pane was a plain block holding the ribbon and an editor sized at
+   height:100% of the pane, so the two together came to the pane's height plus
+   the ribbon's — about 30px more than the window. The document then scrolled
+   as a whole: a second scrollbar appeared beside the editor's own, and the
+   status bar and ribbon slid off the top, which looked like rows pinning
+   themselves under the toolbar. */
+.pane-editor {
+  border-right: 1px solid var(--hairline);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pane-editor > .row { flex: 0 0 auto; }
 .panes.editor-only .pane-editor { border-right: none; }
 .pane-preview { overflow-y: auto; padding: 24px clamp(20px, 5vw, 64px); min-width: 0; }
 

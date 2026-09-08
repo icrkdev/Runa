@@ -11,8 +11,20 @@
   <body class="void">
     <main class="tombstone">
       <div class="mark" aria-hidden="true">◐</div>
-      <h1>Nothing here anymore.</h1>
-      <p class="meta" id="tombstone-meta">ROOM —— · SHREDDED —— UTC</p>
+      <h1>Gone. Reduced to atoms.</h1>
+      <p class="lede">The room, its keys and every line of its history are destroyed.</p>
+      <hr class="rule" aria-hidden="true" />
+      <!--
+        No room name, no timestamp, nothing identifying. This page is served
+        with Clear-Site-Data and deliberately knows nothing about what used to
+        be here; naming the room on its own tombstone would put that address
+        in a browser history that has just been wiped for exactly that reason.
+
+        It previously read "ROOM —— · SHREDDED —— UTC" with the dashes as
+        placeholders. Nothing ever filled them in — no script referenced the
+        element at all — so it rendered as literal em dashes for every reader.
+      -->
+      <p class="meta">Copies other people already made are not. Nothing here can reach those.</p>
     </main>
   </body>
 </html>

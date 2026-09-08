@@ -20,6 +20,29 @@ body.void {
   text-align: center;
   padding: 24px;
 }
-.tombstone .mark { font-size: 34px; color: var(--text-faint); }
-.tombstone h1 { font-weight: 400; letter-spacing: 0.02em; margin: 0; font-family: var(--text); }
-.tombstone .meta { color: var(--text-dim); font-family: ui-monospace, Menlo, monospace; }
+.tombstone { gap: 0; }
+.tombstone .mark { font-size: 34px; color: var(--text-faint); margin-bottom: 22px; }
+.tombstone h1 {
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  margin: 0;
+  font-size: clamp(28px, 5vw, 44px);
+}
+/* One measure for both lines so the block reads as a column rather than two
+   stray sentences, and the rule between them lands at a predictable width. */
+.tombstone .lede,
+.tombstone .meta { max-width: 30rem; margin: 0; line-height: 1.6; }
+.tombstone .lede { color: var(--text-dim); margin-top: 14px; font-size: 16px; }
+.tombstone .rule {
+  width: 100%;
+  max-width: 30rem;
+  border: 0;
+  border-top: 1px solid var(--text-faint);
+  opacity: 0.35;
+  margin: 22px 0;
+}
+.tombstone .meta {
+  color: var(--text-faint);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 13px;
+}
