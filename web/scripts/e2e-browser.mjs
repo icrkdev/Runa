@@ -636,6 +636,69 @@ async function main() {
 
   await alice.click('[role="alertdialog"] button:has-text("Cancel")');
 
+  // Ctrl/Cmd+B and Ctrl/Cmd+I do nothing in a standalone Monaco — bold and
+  // italic are commands VS Code supplies for markdown — so in a markdown
+  // editor they failed silently, which reads as broken rather than absent.
+  // Checked through the keyboard rather than by asking whether the action is
+  // registered: a registered action with the wrong keybinding would satisfy
+  // the second and still leave the shortcut dead.
+  await alice.click(".monaco-editor .view-lines");
+  await alice.keyboard.press("ControlOrMeta+End");
+  await alice.keyboard.press("Enter");
+  await alice.keyboard.type("emphasise-me");
+  for (let i = 0; i < "emphasise-me".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
+  await alice.keyboard.press("ControlOrMeta+b");
+  await alice.waitForTimeout(400);
+  let line = await alice.evaluate(() => {
+    const rows = [...document.querySelectorAll(".view-lines .view-line")]
+      .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent.replace(/\u00a0/g, " ") }))
+      .sort((a, b) => a.t - b.t);
+    return rows.map((r) => r.x).find((x) => x.includes("emphasise-me")) ?? "";
+  });
+  if (!line.includes("**emphasise-me**")) {
+    throw new Error(`[shortcuts] Ctrl/Cmd+B did not bold the selection: ${JSON.stringify(line)}`);
+  }
+  for (let i = 0; i < "**emphasise-me**".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
+  await alice.keyboard.press("ControlOrMeta+i");
+  await alice.waitForTimeout(400);
+  line = await alice.evaluate(() => {
+    const rows = [...document.querySelectorAll(".view-lines .view-line")]
+      .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent.replace(/\u00a0/g, " ") }))
+      .sort((a, b) => a.t - b.t);
+    return rows.map((r) => r.x).find((x) => x.includes("emphasise-me")) ?? "";
+  });
+  if (!line.includes("***emphasise-me***")) {
+    throw new Error(`[shortcuts] Ctrl/Cmd+I did not italicise the selection: ${JSON.stringify(line)}`);
+  }
+
+  // One context menu, not two. Monaco drew its own and called preventDefault
+  // to suppress the platform's; Gecko and WebKit showed theirs anyway, so a
+  // right-click gave two overlapping menus with two Paste entries.
+  //
+  // Asserted on preventDefault rather than on a menu element. Monaco keeps
+  // context-view containers in the DOM permanently and does not render a menu
+  // under a synthetic right-click headlessly, so counting elements passes
+  // whichever way the option is set — it was written that way first and proved
+  // nothing. Whether the page suppresses the platform menu is the actual
+  // mechanism, and it flips with the setting.
+  await alice.evaluate(() => {
+    window.__ctxPrevented = null;
+    window.addEventListener(
+      "contextmenu",
+      (e) => setTimeout(() => { window.__ctxPrevented = e.defaultPrevented; }, 0),
+      true,
+    );
+  });
+  await alice.click(".monaco-editor .view-lines", { button: "right" });
+  await alice.waitForTimeout(600);
+  const ctx = await alice.evaluate(() => window.__ctxPrevented);
+  if (ctx === null) throw new Error("[contextmenu] no contextmenu event reached the page");
+  if (ctx !== false) {
+    throw new Error("[contextmenu] the page still suppresses the platform menu, so Monaco's doubles it");
+  }
+  await alice.keyboard.press("Escape");
+
+
   // A shred request must survive a reconnect. Reported from two machines: a
   // laptop that had switched tabs a couple of times proposed a shred, showed
   // the right occupant count, and the other machine — online the entire time —
@@ -814,6 +877,7 @@ async function main() {
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  the room fits the window exactly; the chrome cannot scroll away`);
+  console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu only`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  display math renders with the exponent raised and smaller`);
   console.log(`  layout tabs: one press per mode, active marked, no Split on a phone`);

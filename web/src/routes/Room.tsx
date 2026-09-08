@@ -333,6 +333,26 @@ function JoinableRoom(props: RoomProps) {
         },
       };
       await sessionRef.current.attachEditor(monacoMod, editor);
+
+      // Ctrl/Cmd+B and Ctrl/Cmd+I do nothing in Monaco on their own — bold and
+      // italic are editor commands VS Code supplies for markdown, not part of
+      // the standalone editor — so in a markdown editor they simply failed,
+      // which reads as broken rather than absent. Bound to the same actions
+      // the toolbar buttons use, so the two can never disagree about what
+      // bold means.
+      for (const [id, label, key] of [
+        ["runa.bold", "Bold", monacoMod.KeyCode.KeyB],
+        ["runa.italic", "Italic", monacoMod.KeyCode.KeyI],
+      ] as const) {
+        const action = TOOLBAR_ACTIONS.find((a) => a.title === label);
+        if (!action) continue;
+        editor.addAction({
+          id,
+          label,
+          keybindings: [monacoMod.KeyMod.CtrlCmd | key],
+          run: (ed) => applyTool(ed as MonacoEditor.IStandaloneCodeEditor, action),
+        });
+      }
       // getValue() copies the whole buffer; doing it per keystroke made
       // typing cost O(document). One read per idle pause is enough for a
       // preview that is itself debounced.
@@ -985,7 +1005,14 @@ export const MONACO_OPTIONS = {
   // drag-selection and touch-selection silently stop working while
   // keyboard selection (ctrl/cmd+A) still behaves.
   automaticLayout: true,
-  contextmenu: true,
+  // Monaco draws its own context menu; Gecko and WebKit show the platform one
+  // as well, so a right-click produced two overlapping menus with two Paste
+  // entries. Yielding to the browser's leaves exactly one — and leaves the one
+  // that works: a browser will not let a page read the clipboard on its own,
+  // so Monaco's own Paste is frequently inert while the platform's is not.
+  // Change All Occurrences and the Command Palette keep their keybindings
+  // (Ctrl+F2 and F1); nothing else in that menu was reachable only from it.
+  contextmenu: false,
   quickSuggestions: false,
   wordBasedSuggestions: "off",
   "semanticHighlighting.enabled": false,
