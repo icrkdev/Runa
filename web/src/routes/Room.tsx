@@ -334,6 +334,7 @@ function JoinableRoom(props: RoomProps) {
       };
       await sessionRef.current.attachEditor(monacoMod, editor);
 
+
       // Ctrl/Cmd+B and Ctrl/Cmd+I do nothing in Monaco on their own — bold and
       // italic are editor commands VS Code supplies for markdown, not part of
       // the standalone editor — so in a markdown editor they simply failed,
@@ -1005,29 +1006,20 @@ export const MONACO_OPTIONS = {
   // drag-selection and touch-selection silently stop working while
   // keyboard selection (ctrl/cmd+A) still behaves.
   automaticLayout: true,
-  // Monaco draws its own context menu; Gecko and WebKit show the platform one
-  // as well, so a right-click produced two overlapping menus with two Paste
-  // entries. Yielding to the browser's leaves exactly one — and leaves the one
-  // that works: a browser will not let a page read the clipboard on its own,
-  // so Monaco's own Paste is frequently inert while the platform's is not.
-  // Change All Occurrences and the Command Palette keep their keybindings
-  // (Ctrl+F2 and F1); nothing else in that menu was reachable only from it.
-  // Monaco hints the margin and lines layers onto their own compositing layer
-  // with transform: translate3d(0,0,0). In Gecko and WebKit a row that scrolls
-  // out through the top of that layer can stay painted there — the DOM is
-  // correct and the pixels are not — so a line appeared to pin itself under
-  // the toolbar as it crossed the top edge, and cleared again on scrolling
-  // back above it. Reported on two engines, never on Chromium.
+  // Monaco's own menu, kept. Right-click is worth having, and with this off the
+  // platform menu on Monaco's rendered text is a generic page menu — no Cut, no
+  // Copy — because the visible glyphs are divs and the real input is hidden.
+  // Turning it off removed the doubling and removed everything useful with it,
+  // which was the wrong half to keep.
   //
-  // Turning the hint off makes the editor position those layers normally, so
-  // the region is repainted like any other. The cost is that large documents
-  // lose a GPU-composited scroll; the benefit is that what is on screen
-  // matches the document. Unverified against the reported fault — it could not
-  // be reproduced headlessly, since synthetic wheel events do not drive the
-  // compositor the way a trackpad does — so this targets the mechanism the
-  // evidence points at rather than a failure anyone has watched fixed.
-  disableLayerHinting: true,
-  contextmenu: false,
+  // Monaco calls preventDefault on the contextmenu event, and measurement says
+  // it succeeds: defaultPrevented is true in Chromium, Firefox and WebKit
+  // alike. Yet the platform menu still appears alongside this one for the
+  // reporter in Firefox and Safari. Adding a second preventDefault of our own
+  // changes nothing measurable — that was tried, and the guard below passes
+  // with or without it — so it is not here. Whatever produces that second menu
+  // is not the default action of this event, and is not yet understood.
+  contextmenu: true,
   quickSuggestions: false,
   wordBasedSuggestions: "off",
   "semanticHighlighting.enabled": false,
