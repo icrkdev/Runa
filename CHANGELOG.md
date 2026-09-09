@@ -4,6 +4,59 @@ Newest first. The release workflow reads the section matching the tag and
 publishes it as the release notes, and refuses to build a tag that has no
 section — so this file is not documentation of the release, it is part of it.
 
+## 0.4.0
+
+### Added
+
+- **Bold and italic from the keyboard.** Ctrl/Cmd+B and Ctrl/Cmd+I. These were
+  never Monaco keybindings — they are commands VS Code supplies for markdown,
+  not part of the standalone editor — so in a markdown editor the two shortcuts
+  everybody already has in their fingers did nothing at all. They run the same
+  actions as the toolbar buttons, so the two cannot disagree about what bold
+  means.
+
+### Changed
+
+- **Sticky scroll is off.** Monaco enables it by default: it pins the header of
+  the enclosing foldable block to the top of the editor, which is useful in
+  code, where a block is a function. Markdown has no folding rules in the
+  standalone editor, so Monaco folds by indentation instead — and in prose,
+  indentation means a list, a fenced code block, or pasted terminal output,
+  none of which contain what follows them. It pinned rows of dashes and
+  ordinary sentences, and cost up to 90px of editor height. The README explains
+  how to turn it back on, and how to keep it while bounding the cost.
+- **The tombstone says "Gone. Reduced to atoms."** It previously read
+  "ROOM —— · SHREDDED —— UTC", where the dashes stood in for values no script
+  ever supplied — the element was referenced nowhere — so every reader saw the
+  placeholders themselves. They could not be filled either: the page is served
+  with Clear-Site-Data and knows nothing about the room by design, and naming
+  it on its own tombstone would write that address into a history just wiped
+  for exactly that reason. It now says what is true, including the part the
+  shred dialog says before you confirm: copies other people already made are
+  not reachable from here.
+
+### Fixed
+
+- **The room is exactly as tall as the window.** The editor pane was a plain
+  block holding the markdown ribbon and, beneath it, an editor sized at 100% of
+  that same block — so the two came to a ribbon's height more than the window.
+  The whole document scrolled: a second scrollbar beside the editor's own, and
+  the status bar and ribbon sliding off the top as you scrolled. Reported as
+  line numbers pinning themselves under the toolbar.
+- **Right-click has a menu again.** Disabling Monaco's context menu to stop a
+  doubling in Firefox and Safari removed the useful menu with it: on Monaco's
+  rendered text the platform menu is a generic page menu with no Cut and no
+  Copy, because the visible glyphs are divs and the real input is hidden.
+
+### Known
+
+- **A second context menu still appears in Firefox and Safari** alongside
+  Monaco's, giving two Paste entries. Monaco calls preventDefault on the
+  contextmenu event and measurement says it succeeds in all three engines, so
+  whatever draws the second menu is not that event's default action. A second
+  preventDefault of our own was tried and removed again: it changed nothing
+  measurable, and shipping it would have been a placebo.
+
 ## 0.3.0
 
 ### Added

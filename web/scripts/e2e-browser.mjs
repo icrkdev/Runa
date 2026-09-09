@@ -671,6 +671,39 @@ async function main() {
     throw new Error(`[shortcuts] Ctrl/Cmd+I did not italicise the selection: ${JSON.stringify(line)}`);
   }
 
+  // Sticky scroll stays off. Monaco turns it on by default and pins the
+  // enclosing foldable block's header to the top of the editor; with no
+  // folding provider for markdown it folds by indentation, so it pinned rows
+  // of dashes and ordinary sentences that happened to precede indented text,
+  // and cost up to 90px of editor height.
+  //
+  // The content below matters: three earlier attempts to measure this used
+  // flat documents, which produce no folding ranges at all, so the widget was
+  // zero-height whether the feature was on or off and every one of them
+  // reported it inert. Indentation is what makes this able to fail.
+  await alice.click(".monaco-editor .view-lines");
+  await alice.keyboard.press("ControlOrMeta+End");
+  await alice.keyboard.type("\nblock header\n");
+  // Longer than the viewport on purpose: a block that fits on screen keeps its
+  // header visible, so there is nothing to pin and the check passes whatever
+  // the setting is. That was the first version of this.
+  for (let i = 0; i < 45; i++) await alice.keyboard.type(`    indented body ${i}\n`);
+  await alice.waitForTimeout(600);
+  await alice.mouse.move(600, 400);
+  for (let i = 0; i < 6; i++) {
+    await alice.mouse.wheel(0, 200);
+    await alice.waitForTimeout(150);
+  }
+  await alice.waitForTimeout(400);
+  const sticky = await alice.evaluate(() => {
+    const w = document.querySelector(".sticky-widget");
+    const r = w?.getBoundingClientRect();
+    return { h: r ? Math.round(r.height) : -1, text: (w?.textContent ?? "").trim().slice(0, 40) };
+  });
+  if (sticky.h > 0) {
+    throw new Error(`[sticky] the editor is pinning a block header again: ${sticky.h}px "${sticky.text}"`);
+  }
+
   // The editor must have a context menu at all. Turning Monaco's off to stop
   // a doubling left right-click useless — the platform menu on rendered glyphs
   // is a generic page menu with no Cut or Copy — so this guards the regression
@@ -887,6 +920,7 @@ async function main() {
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  the room fits the window exactly; the chrome cannot scroll away`);
   console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu only`);
+  console.log(`  no block header pins itself to the top of an indented document`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  display math renders with the exponent raised and smaller`);
   console.log(`  layout tabs: one press per mode, active marked, no Split on a phone`);

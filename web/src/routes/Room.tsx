@@ -1001,6 +1001,19 @@ export const MONACO_OPTIONS = {
   insertSpaces: true,
   renderWhitespace: "selection",
   minimap: { enabled: false },
+  // Off. Monaco enables this by default and it pins the header of the
+  // enclosing foldable block to the top of the editor.
+  //
+  // Markdown has no folding provider in the standalone editor, so Monaco falls
+  // back to folding by indentation — which in prose means lists, fenced code
+  // and pasted terminal output, none of which are containers for what follows
+  // them. So it pinned arbitrary lines: a row of dashes, a sentence that
+  // happened to precede an indented paragraph. It also costs real height,
+  // measured at 90px in Chromium when blocks nest, out of an editor around
+  // 560px tall.
+  //
+  // Markdown does have real headings. They are not what this uses.
+  stickyScroll: { enabled: false },
   // Without this Monaco never observes container resizes, so its cached
   // dimensions go stale and pointer coordinates map to the wrong glyph —
   // drag-selection and touch-selection silently stop working while
