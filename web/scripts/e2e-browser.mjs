@@ -671,20 +671,29 @@ async function main() {
     throw new Error(`[shortcuts] Ctrl/Cmd+I did not italicise the selection: ${JSON.stringify(line)}`);
   }
 
-  // One context menu, not two. Monaco drew its own and called preventDefault
-  // to suppress the platform's; Gecko and WebKit showed theirs anyway, so a
-  // right-click gave two overlapping menus with two Paste entries.
+  // The editor must have a context menu at all. Turning Monaco's off to stop
+  // a doubling left right-click useless — the platform menu on rendered glyphs
+  // is a generic page menu with no Cut or Copy — so this guards the regression
+  // that caused, not the doubling, which is not understood well enough to
+  // guard. It flips with the option: contextmenu:false gives defaultPrevented
+  // false and fails here. Gecko and WebKit showed the
+  // platform menu alongside it, so a right-click gave two overlapping menus
+  // with two Paste entries. Turning Monaco's off removed the doubling and
+  // removed the useful menu with it — on Monaco's rendered text the platform
+  // menu is a generic page menu, since the glyphs are divs and the real input
+  // is hidden — so the platform one is suppressed explicitly instead.
   //
   // Asserted on preventDefault rather than on a menu element. Monaco keeps
-  // context-view containers in the DOM permanently and does not render a menu
-  // under a synthetic right-click headlessly, so counting elements passes
-  // whichever way the option is set — it was written that way first and proved
-  // nothing. Whether the page suppresses the platform menu is the actual
-  // mechanism, and it flips with the setting.
+  // context-view containers in the DOM permanently and renders no menu under a
+  // synthetic right-click headlessly, so counting elements passes whichever
+  // way the option is set; that version was written first and proved nothing.
   await alice.evaluate(() => {
     window.__ctxPrevented = null;
     window.addEventListener(
       "contextmenu",
+      // Capture, because Monaco calls stopPropagation and the event never
+      // bubbles this far. The read is deferred so defaultPrevented is sampled
+      // after the whole dispatch, including handlers deeper than this one.
       (e) => setTimeout(() => { window.__ctxPrevented = e.defaultPrevented; }, 0),
       true,
     );
@@ -693,8 +702,8 @@ async function main() {
   await alice.waitForTimeout(600);
   const ctx = await alice.evaluate(() => window.__ctxPrevented);
   if (ctx === null) throw new Error("[contextmenu] no contextmenu event reached the page");
-  if (ctx !== false) {
-    throw new Error("[contextmenu] the page still suppresses the platform menu, so Monaco's doubles it");
+  if (ctx !== true) {
+    throw new Error("[contextmenu] the editor has no context menu of its own — right-click falls back to a generic page menu with no Cut or Copy");
   }
   await alice.keyboard.press("Escape");
 
