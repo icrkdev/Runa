@@ -105,6 +105,7 @@ is below and takes about five minutes.
   - [Creating a room](#creating-a-room)
   - [Sharing a room](#sharing-a-room)
   - [Editing together](#editing-together)
+  - [Editor settings you can change](#editor-settings-you-can-change)
   - [Shredding a room](#shredding-a-room)
 - [Running the tests](#running-the-tests)
 - [Deploying to the internet](#deploying-to-the-internet)
@@ -430,6 +431,36 @@ Everyone who opens the same link sees the same document. Changes appear in
 real-time (within about 100 ms on a local network). The status bar at the top
 shows how many people are connected.
 
+### Editor settings you can change
+
+The editor is [Monaco](https://microsoft.github.io/monaco-editor/), the one
+from VS Code, and its options live in one object — `MONACO_OPTIONS` at the
+bottom of `web/src/routes/Room.tsx`. Change a value there, rebuild the web app,
+and it takes effect. Every option Monaco supports is listed in
+[its documentation](https://microsoft.github.io/monaco-editor/typedoc/interfaces/editor.IEditorOptions.html).
+
+Two that are deliberately not at their defaults:
+
+**Sticky scroll** — off. Monaco turns this on by default: it pins the header
+of whatever foldable block you are inside to the top of the editor. That is
+useful in code, where a block is a function. Markdown has no folding rules in
+the standalone editor, so Monaco falls back to folding by indentation — and in
+prose, indentation means a list, a fenced code block, or pasted terminal
+output, none of which are containers for what follows them. The result was
+arbitrary lines pinned to the top, costing up to 90 px of editor height. Turn
+it back on by setting:
+
+```ts
+stickyScroll: { enabled: true },
+```
+
+You can also keep it and bound the cost with `{ enabled: true, maxLineCount: 1 }`,
+which pins one line rather than the whole enclosing chain.
+
+**Layer hinting** — left at Monaco's default. It was briefly disabled to chase
+a rendering fault that turned out to be sticky scroll, and putting it back
+restored GPU-composited scrolling on large documents.
+
 ### Shredding a room
 
 Click the red **Shred** button in the top-right corner. This opens a dialog
@@ -438,7 +469,10 @@ before the shred executes — one person pressing the button alone does nothing
 unless they're the only one there.
 
 When the shred completes, every browser is redirected to a tombstone page that
-says *"Nothing here anymore."* The encryption keys are gone. There is no undo.
+says *"Gone. Reduced to atoms."* The encryption keys are gone. There is no undo.
+The page names neither the room nor the time — it is served with
+`Clear-Site-Data`, and putting the room's address on its own tombstone would
+write it into a history that was just wiped for exactly that reason.
 
 ---
 
