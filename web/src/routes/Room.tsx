@@ -1012,6 +1012,21 @@ export const MONACO_OPTIONS = {
   // so Monaco's own Paste is frequently inert while the platform's is not.
   // Change All Occurrences and the Command Palette keep their keybindings
   // (Ctrl+F2 and F1); nothing else in that menu was reachable only from it.
+  // Monaco hints the margin and lines layers onto their own compositing layer
+  // with transform: translate3d(0,0,0). In Gecko and WebKit a row that scrolls
+  // out through the top of that layer can stay painted there — the DOM is
+  // correct and the pixels are not — so a line appeared to pin itself under
+  // the toolbar as it crossed the top edge, and cleared again on scrolling
+  // back above it. Reported on two engines, never on Chromium.
+  //
+  // Turning the hint off makes the editor position those layers normally, so
+  // the region is repainted like any other. The cost is that large documents
+  // lose a GPU-composited scroll; the benefit is that what is on screen
+  // matches the document. Unverified against the reported fault — it could not
+  // be reproduced headlessly, since synthetic wheel events do not drive the
+  // compositor the way a trackpad does — so this targets the mechanism the
+  // evidence points at rather than a failure anyone has watched fixed.
+  disableLayerHinting: true,
   contextmenu: false,
   quickSuggestions: false,
   wordBasedSuggestions: "off",
