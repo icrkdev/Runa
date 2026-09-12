@@ -15,6 +15,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 runa-server = { path = ".." }
+serde_json = "1"
 
 [[bin]]
 name = "frame_header"
@@ -25,5 +26,17 @@ doc = false
 [[bin]]
 name = "room_name"
 path = "fuzz_targets/room_name.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "log_compaction"
+path = "fuzz_targets/log_compaction.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "create_body"
+path = "fuzz_targets/create_body.rs"
 test = false
 doc = false

@@ -68,4 +68,7 @@ pub fn build_router(state: AppState) -> axum::Router {
 }
 
 pub use sha2;
+/// Re-exported so the fuzz crate can build a LogEntry without taking its own
+/// dependency on a version that might drift from this one.
+pub use bytes;
 
