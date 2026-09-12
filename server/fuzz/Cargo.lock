@@ -662,11 +662,12 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "runa-server",
+ "serde_json",
 ]
 
 [[package]]
 name = "runa-server"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",

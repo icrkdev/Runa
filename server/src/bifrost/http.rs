@@ -200,18 +200,21 @@ pub struct TtlBody {
     pub secs: u64,
 }
 
-struct ValidParams {
-    verifier_key: [u8; 32],
-    ceiling_optout: bool,
-    salt: [u8; 16],
-    m: u32,
-    t: u32,
-    p: u32,
-    ttl: Ttl,
-    config_blob: Option<Vec<u8>>,
+/// Public so it can be fuzzed. The request validation is the interesting part
+/// of the create path — the JSON parse belongs to serde — and a fuzz target
+/// cannot reach it while it is private.
+pub struct ValidParams {
+    pub verifier_key: [u8; 32],
+    pub ceiling_optout: bool,
+    pub salt: [u8; 16],
+    pub m: u32,
+    pub t: u32,
+    pub p: u32,
+    pub ttl: Ttl,
+    pub config_blob: Option<Vec<u8>>,
 }
 
-fn validate_params(
+pub fn validate_params(
     body: &CreateRoomBody,
     cfg: &crate::config::Config,
 ) -> Result<ValidParams, Box<Response>> {
