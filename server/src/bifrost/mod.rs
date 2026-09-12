@@ -285,7 +285,7 @@ async fn run_connection(
     // exist. Returning 4002 here was a clean existence oracle: five bad
     // guesses at a real room id flipped the code to RateLimited, while a
     // missing id answered 4001 forever. Same code, same delay, either way.
-    if !room.auth_allowed() {
+    if !room.auth_allowed(&ip) {
         floor_delay(cfg.auth_floor).await;
         let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::AuthFailed))).await;
         return Err(WireCode::AuthFailed);
@@ -309,7 +309,7 @@ async fn run_connection(
         let _ = sink.send(Message::Binary(error_frame(room_id, WireCode::AuthFailed))).await;
         return Err(WireCode::AuthFailed);
     }
-    room.auth_success();
+    room.auth_success(&ip);
 
     let session_pubkey: Option<Vec<u8>> = join
         .pubkey

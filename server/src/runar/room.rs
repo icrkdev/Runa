@@ -158,41 +158,64 @@ impl QueueMeter {
 /// against an attacker — while handing anyone who knows a room id a way to
 /// lock its actual occupants out for a quarter of an hour by failing auth on
 /// purpose. The window is per room, so that cost lands on the wrong people.
+/// Per-room authentication throttle, keyed by caller.
+///
+/// It used to be one sliding window for the whole room, shared by everyone,
+/// and it consumed a slot on every attempt rather than only on failures. Five
+/// attempts a minute between all comers meant anybody who knew a room's name
+/// could spend them and keep every legitimate join failing — indefinitely, for
+/// as long as they cared to. Named rooms are the exposed case by construction:
+/// the names are readable, shared and often guessable.
+///
+/// That mattered more here than the shape of it suggests. Established sockets
+/// survive such an attack; reconnects do not, and reconnects are constant —
+/// switching tabs, a laptop sleeping, a network blip. The symptom would have
+/// been "I got dropped and cannot get back in", which is also exactly what a
+/// wrong passphrase looks like.
+///
+/// Keyed by caller, one attacker can only exhaust their own budget. The global
+/// per-IP limiter in `AppState` still caps the total across all rooms, and the
+/// table is bounded and evicts by fullness, so a flood of fresh keys cannot
+/// push a throttled one out and hand it a fresh allowance.
+///
+/// This does lower the whole-room brute-force ceiling: an attacker with many
+/// addresses now gets a budget per address. That is an acceptable trade here
+/// and only here, because the verifier is a SHA-256 over a 256-bit
+/// random-equivalent value — online guessing was never the threat the room
+/// window was holding back, and the threat model says so in as many words.
 struct AuthGuard {
-    hits: Mutex<std::collections::VecDeque<Instant>>,
-    max_per_min: u32,
+    per_caller: crate::heimdall::ratelimit::RateLimiter<String>,
 }
+
+/// Enough callers per room that a legitimate crowd never evicts one another,
+/// small enough that a room cannot be used as an allocation primitive.
+const AUTH_CALLERS_TRACKED: usize = 4096;
 
 impl AuthGuard {
     fn new(max_per_min: u32) -> Self {
         AuthGuard {
-            hits: Mutex::new(std::collections::VecDeque::new()),
-            max_per_min,
+            per_caller: crate::heimdall::ratelimit::RateLimiter::new(
+                max_per_min,
+                Duration::from_secs(60),
+                AUTH_CALLERS_TRACKED,
+            ),
         }
     }
 
-    fn allow(&self) -> bool {
-        let mut hits = self.hits.lock().unwrap();
-        let now = Instant::now();
-        while hits.front().is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60)) {
-            hits.pop_front();
-        }
-        if hits.len() >= self.max_per_min as usize {
-            return false;
-        }
-        hits.push_back(now);
-        true
+    fn allow(&self, caller: &str) -> bool {
+        self.per_caller.check(&caller.to_string())
     }
 
-    /// Advisory only — see the note on `AuthGuard`. Reported so operators can
-    /// see pressure on a room in the logs; not used to gate anything.
+    /// Advisory only. Reported so operators can see pressure on a room in the
+    /// logs; it gates nothing. A lockout would hand anyone who knows a room id
+    /// the power to lock out its occupants, which buys little against an
+    /// attacker already paying 64 MiB of Argon2id per guess.
     fn record_failure(&self) -> Duration {
-        let n = self.hits.lock().unwrap().len() as u64;
-        Duration::from_secs(30u64.saturating_mul(n.saturating_sub(1).max(1)).min(15 * 60))
+        Duration::from_secs(30)
     }
 
-    fn reset(&self) {
-        self.hits.lock().unwrap().clear();
+    fn reset(&self, caller: &str) {
+        self.per_caller.reset(&caller.to_string());
     }
 }
 
@@ -332,16 +355,16 @@ impl Room {
         self.verifier.as_ref().map(|s| s.expose_secret())
     }
 
-    pub fn auth_allowed(&self) -> bool {
-        self.auth_guard.allow()
+    pub fn auth_allowed(&self, caller: &str) -> bool {
+        self.auth_guard.allow(caller)
     }
 
     pub fn record_auth_failure(&self) -> Duration {
         self.auth_guard.record_failure()
     }
 
-    pub fn auth_success(&self) {
-        self.auth_guard.reset();
+    pub fn auth_success(&self, caller: &str) {
+        self.auth_guard.reset(caller);
     }
 
     pub fn peer_count(&self) -> usize {
@@ -357,10 +380,10 @@ impl Room {
         if peers.len() >= self.max_peers {
             return Err(JoinError::Full);
         }
-        if !self.auth_allowed() {
-            let backoff = self.record_auth_failure();
-            return Err(JoinError::AuthLockedOut(backoff));
-        }
+        // No authentication check here. The caller has already authenticated
+        // and already spent a slot doing it; checking again spent a second one
+        // for the same join, so a successful connection cost two of the five a
+        // caller gets in a minute.
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let entry = RosterEntry {
             peer_id: generate_peer_id(seq),
@@ -871,6 +894,100 @@ pub fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod auth_throttle_tests {
+    use super::*;
+
+    fn guard() -> AuthGuard {
+        AuthGuard::new(5)
+    }
+
+    #[test]
+    fn one_caller_cannot_spend_another_callers_budget() {
+        // The reported fault: the window was shared by the whole room, so
+        // anyone who knew a room's name could burn it and keep every other
+        // join failing for as long as they liked.
+        let g = guard();
+        for _ in 0..5 {
+            assert!(g.allow("198.51.100.7"), "the attacker's own budget should last five");
+        }
+        assert!(!g.allow("198.51.100.7"), "and then run out");
+        assert!(g.allow("203.0.113.9"), "a different caller must be unaffected");
+    }
+
+    #[test]
+    fn a_flood_of_callers_cannot_restore_an_exhausted_one() {
+        // Eviction by fullness is what makes this hold: evicting the oldest
+        // would let an attacker with addresses to spare reset their own bucket.
+        let g = guard();
+        for _ in 0..5 {
+            assert!(g.allow("198.51.100.7"));
+        }
+        assert!(!g.allow("198.51.100.7"));
+        for n in 0..9000u32 {
+            g.allow(&format!("10.{}.{}.{}", n / 65536, (n / 256) % 256, n % 256));
+        }
+        assert!(!g.allow("198.51.100.7"), "an evicted bucket would come back full");
+    }
+
+    #[test]
+    fn success_clears_only_that_caller() {
+        let g = guard();
+        for _ in 0..5 {
+            g.allow("198.51.100.7");
+        }
+        for _ in 0..5 {
+            g.allow("203.0.113.9");
+        }
+        assert!(!g.allow("198.51.100.7"));
+        assert!(!g.allow("203.0.113.9"));
+        g.reset("198.51.100.7");
+        assert!(g.allow("198.51.100.7"), "proving the key refills this caller");
+        assert!(!g.allow("203.0.113.9"), "and only this caller");
+    }
+
+    #[test]
+    fn joining_no_longer_spends_two_slots() {
+        // add_peer used to run its own auth check after the join path had
+        // already run one, so a single successful connection cost two of the
+        // five a caller gets in a minute.
+        let room = Room::new(
+            [9u8; 16],
+            RoomClass::Unlisted,
+            unix_now(),
+            Ttl { kind: TtlKind::None, secs: 0 },
+            false,
+            Some([1u8; 32]),
+            65536,
+            3,
+            1,
+            [7u8; 16],
+            None,
+            32 * 1024 * 1024,
+            5,
+            32,
+        );
+        let before = {
+            let mut n = 0;
+            while room.auth_allowed("198.51.100.7") {
+                n += 1;
+            }
+            n
+        };
+        room.auth_success("198.51.100.7");
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        room.add_peer(None, PeerTx::new(tx, 1 << 20)).expect("join");
+        let after = {
+            let mut n = 0;
+            while room.auth_allowed("198.51.100.7") {
+                n += 1;
+            }
+            n
+        };
+        assert_eq!(before, after, "adding a peer must not spend authentication budget");
+    }
 }
 
 #[cfg(test)]
