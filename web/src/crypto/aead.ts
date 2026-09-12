@@ -63,6 +63,20 @@ export function nonceFrom(sess: Uint8Array, counter: bigint): Uint8Array {
   return concatBytes(sess, counterToBytes(counter));
 }
 
+/// The room content key is used under two nonce disciplines: frames take
+/// `sess || counter` from `FrameCipher`, and the room config blob takes a
+/// random 12-byte IV. Two regimes under one key is the kind of arrangement
+/// that becomes a real bug when somebody later adds a third, so it is written
+/// down here rather than left to be discovered.
+///
+/// It is not changed, deliberately. One blob is written per room, against a
+/// 2^96 IV space, so a collision with a structured frame nonce is not a risk
+/// worth a protocol change — and separating the key with its own HKDF `info`
+/// would make every config blob in every live room undecryptable across a
+/// deploy, which shows up as the expiry-mismatch banner on rooms that are
+/// doing nothing wrong. The trade is not worth it for a probability this
+/// small; it would be worth it the moment a second thing wanted that key.
+///
 /// AAD binds every authenticated header field plus the relay envelope:
 /// "runa/v1" || header(32B) || sender(16B) || counter(8B) || covers(8B).
 /// The trailing covers word is zero except for SNAPSHOT frames, whose
@@ -214,6 +228,22 @@ async function rawDecrypt(
   }
 }
 
+/// Raw AES-GCM with a caller-supplied nonce, for the known-answer vectors in
+/// `fixtures/gcm_aes256.json` and nothing else.
+///
+/// Nothing in the application calls these, and nothing should: the whole point
+/// of `FrameCipher` is that callers cannot choose a nonce, because every peer
+/// in a room encrypts under the same key and a repeated nonce there is not a
+/// degradation but a collapse — the XOR of the two plaintexts falls out and the
+/// GHASH key leaks. A function that takes an IV as an argument is the shape of
+/// that mistake.
+///
+/// They are kept because they are how the platform's AES-GCM is checked
+/// against published vectors, including the negative cases, and a review that
+/// removed them as "unused" would be removing that assurance. Confirmed absent
+/// from the shipped bundle — they are tree-shaken out, so they cost nothing at
+/// runtime. If you are reading this while tidying: they are test scaffolding
+/// with a reason, not leftovers.
 export async function decryptWithExplicitNonce(
   contentKey: CryptoKey,
   iv: Uint8Array,

@@ -97,6 +97,36 @@ What consensus shred is actually good for:
 The UI says this in plain words at the moment of first use, once — not in a
 terms page nobody reads.
 
+### And consensus is a guarantee against your peers, not against the server
+
+Worth stating outright, because the premises are elsewhere in this document and
+the conclusion was not.
+
+A shred vote is a signed object, and each receiver checks the signature against
+the public key its roster holds for the claimed signer. That roster comes from
+the server — `JOIN_ACK` on joining, `PEER_JOIN` afterwards. A3 already says a
+malicious operator can "forge peers"; this is what that costs. Substitute your
+own key for every peer, sign a request and a vote from each, and you have a
+unanimous decision nobody took, which destroys the shared copy and runs the
+wipe in every connected browser.
+
+It grants a hostile operator no capability they lacked. They hold the log and
+can drop it; they can disconnect everyone; they can refuse to relay. Destroying
+a room is something they could already do more simply. And confidentiality is
+untouched either way — the server never holds a key, so forging a vote reveals
+nothing.
+
+What it means is narrower and worth being precise about. "Everyone must agree"
+is enforced by cryptography against your fellow occupants: a peer in the room
+cannot shred alone, cannot forge your approval, and cannot claim a threshold
+lower than your own roster supports. Against whoever runs the server it is
+enforced by nothing, because they are the one telling you who the peers are.
+
+If that distinction matters for your use, the mitigation is the same as for
+every other A3 risk: run the server yourself. Nothing in the protocol can fix
+it, because a peer's identity has to arrive from somewhere, and on a first
+visit that somewhere is the relay.
+
 ## Metadata the server unavoidably learns
 
 | Leak | Why | Mitigation |
