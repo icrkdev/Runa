@@ -468,6 +468,16 @@ explaining what will happen. In a multi-person room, **everyone must agree**
 before the shred executes — one person pressing the button alone does nothing
 unless they're the only one there.
 
+The agreement is enforced against the other people in the room: a peer cannot
+shred alone, cannot forge your approval, and cannot claim a lower threshold
+than your own view of the room supports. It is **not** enforced against
+whoever runs the server, because the server is what tells your browser who the
+peers are — substitute the keys and a unanimous vote can be manufactured. That
+costs a hostile operator nothing they did not already have, since they hold the
+encrypted log and can simply drop it, and it reveals nothing, since they never
+hold a key. [`THREAT_MODEL.md`](docs/THREAT_MODEL.md) sets out where the line
+falls. If it matters to you, run the server yourself.
+
 When the shred completes, every browser is redirected to a tombstone page that
 says *"Gone. Reduced to atoms."* The encryption keys are gone. There is no undo.
 The page names neither the room nor the time — it is served with
