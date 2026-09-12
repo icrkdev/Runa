@@ -51,6 +51,15 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
         }
     }
 
+    /// Forget a key, so its next call starts from a full bucket.
+    ///
+    /// Only for the case where the caller has proved it is not the abuser the
+    /// limit exists to stop — a successful authentication, say. Anywhere else
+    /// this is a bypass.
+    pub fn reset(&self, key: &K) {
+        self.buckets.lock().unwrap().remove(key);
+    }
+
     /// Projected token count for a bucket at `now`, without mutating it.
     fn projected(&self, b: &Bucket, now: Instant) -> f64 {
         (b.tokens + now.duration_since(b.last).as_secs_f64() * self.refill_per_sec)

@@ -12,6 +12,24 @@ use crate::runar::names;
 use crate::runar::room::{unix_now, CreateError, Ttl, TtlKind};
 use crate::AppState;
 
+/// The only KDF parameters a room may be created with.
+///
+/// They used to be a range — m_kib anywhere in 8192..=262144, t in 1..=10, p
+/// in 1..=4 — while `meta_unlisted` answered for a room that does not exist
+/// with these exact defaults. So a room created with anything else was
+/// distinguishable from a missing one by its own metadata, which is precisely
+/// the question that endpoint goes to some length not to answer: same shape,
+/// same delay on both paths, and a deterministic ghost salt under a boot-time
+/// key so it cannot be computed offline.
+///
+/// The official client has only ever sent these three values, so pinning them
+/// costs nothing today and closes the gap. Widening the range again is a
+/// protocol decision, and it needs the ghost branch to widen with it — the
+/// test below fails if the two ever drift apart.
+pub const KDF_M_KIB: u32 = 65536;
+pub const KDF_T: u32 = 3;
+pub const KDF_P: u32 = 1;
+
 pub fn parse_room_hex(s: &str) -> Option<[u8; 16]> {
     if s.len() != 32 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -98,9 +116,9 @@ pub async fn meta_unlisted(
                 requires_auth: true,
                 kdf: KdfMeta {
                     alg: "argon2id",
-                    m_kib: 65536,
-                    t: 3,
-                    p: 1,
+                    m_kib: KDF_M_KIB,
+                    t: KDF_T,
+                    p: KDF_P,
                     salt: B64.encode(dummy_salt_for(&state.ghost_key, &id)),
                 },
             }
@@ -211,10 +229,8 @@ fn validate_params(
     if ttl.kind != TtlKind::None && (body.ttl.secs == 0 || body.ttl.secs > max_secs) {
         return Err(Box::new(code_response(StatusCode::BAD_REQUEST, "TTL_INVALID")));
     }
-    if !(8192..=262144).contains(&body.kdf.m_kib)
-        || !(1..=10).contains(&body.kdf.t)
-        || !(1..=4).contains(&body.kdf.p)
-    {
+    // Exactly these, not a range. See KDF_M_KIB.
+    if body.kdf.m_kib != KDF_M_KIB || body.kdf.t != KDF_T || body.kdf.p != KDF_P {
         return Err(Box::new(code_response(StatusCode::BAD_REQUEST, "KDF_INVALID")));
     }
     let salt: [u8; 16] = B64

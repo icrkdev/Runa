@@ -610,3 +610,89 @@ mod behind_a_reverse_proxy {
         );
     }
 }
+
+/// A room that exists and a room that does not must be indistinguishable from
+/// their metadata.
+///
+/// What this can and cannot show: with creation pinned to the canonical
+/// parameters, no room can diverge from the ghost branch, so this passes
+/// whether or not the pin is in place. It is the invariant, not the proof —
+/// `creation_refuses_non_canonical_kdf_parameters` is the test that fails when
+/// the pin is removed. Kept because it states what the two branches owe each
+/// other, and because the existing meta test compares the response *shape*,
+/// key names only, which is exactly how a difference in the values went
+/// unnoticed. The endpoint already matches the shape, the delay and the
+/// salt — a deterministic HMAC under a boot-time key, so the ghost salt cannot
+/// be computed offline — but it echoed the room's own KDF parameters while the
+/// ghost branch answered with hardcoded defaults, and creation accepted a
+/// range rather than a constant. Any room not on the stock parameters was then
+/// distinguishable from a missing one by its own metadata.
+#[tokio::test]
+async fn unlisted_meta_cannot_distinguish_a_real_room_from_a_missing_one() {
+    let server = spawn_server().await;
+    let keys = create_room(&server).await;
+    let client = reqwest::Client::new();
+
+    let real: Value = client
+        .get(format!("{server}/api/meta/id/{}", keys.room_id_hex))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ghost: Value = client
+        .get(format!("{server}/api/meta/id/{}", "f".repeat(32)))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(real["exists"], ghost["exists"], "existence flag must match");
+    assert_eq!(real["requires_auth"], ghost["requires_auth"]);
+    for field in ["alg", "m_kib", "t", "p"] {
+        assert_eq!(
+            real["kdf"][field], ghost["kdf"][field],
+            "kdf.{field} differs between a real room and a ghost, which discloses existence",
+        );
+    }
+    // The salts must differ — a shared one would be its own giveaway — but
+    // both must be 16 bytes so length cannot separate them either.
+    assert_ne!(real["kdf"]["salt"], ghost["kdf"]["salt"]);
+    for v in [&real, &ghost] {
+        let salt = B64.decode(v["kdf"]["salt"].as_str().unwrap()).unwrap();
+        assert_eq!(salt.len(), 16);
+    }
+}
+
+/// Creation takes the canonical parameters and nothing else. A room created
+/// with anything different would answer differently from a ghost, which is the
+/// oracle above.
+#[tokio::test]
+async fn creation_refuses_non_canonical_kdf_parameters() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    // Inside the range the server used to accept, and still not allowed.
+    for (m, t, p) in [(131_072u32, 3u32, 1u32), (65_536, 4, 1), (65_536, 3, 2)] {
+        let res = client
+            .post(format!("{server}/api/rooms/unlisted"))
+            .json(&json!({
+                // A real-looking verifier. An all-identical one is refused by
+                // plausible_verifier, which would make this pass on a 400 that
+                // has nothing to do with the KDF parameters under test.
+                "verifier": verifier_for(&rand_bytes_32()),
+                "kdf": { "m_kib": m, "t": t, "p": p, "salt": B64.encode(&rand_bytes_32()[..16]) },
+                "ttl": { "kind": "idle-peers", "secs": 3600 },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            400,
+            "m_kib={m} t={t} p={p} was accepted; it would then be distinguishable from a ghost",
+        );
+    }
+}
