@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { argon2id } from "hash-wasm";
 import argon2Vectors from "./fixtures/argon2id.json";
 import hkdfVectors from "./fixtures/hkdf.json";
-import { deriveFromPassphrase, pbkdf2Fallback } from "./kdf";
+import { deriveFromPassphrase } from "./kdf";
 import { hkdfBits, deriveRoomKeys, INFO_AUTH, INFO_CONTENT } from "./keys";
 
 function hex(bytes: Uint8Array): string {
@@ -53,17 +53,9 @@ describe("Argon2id against reference implementation", () => {
     });
   });
 
-  it("derives production material without degradation when WASM works", async () => {
+  it("derives production material when WASM works", async () => {
     const salt = new Uint8Array(16).fill(7);
     const r = await deriveFromPassphrase("harbor thistle quartz nine", salt, { mKib: 8192 });
-    expect(r.material).toHaveLength(32);
-    expect(r.degraded).toBe(false);
-  });
-
-  it("PBKDF2 fallback flags itself as degraded", async () => {
-    const salt = new Uint8Array(16).fill(3);
-    const r = await pbkdf2Fallback("some passphrase", salt, 1000);
-    expect(r.degraded).toBe(true);
     expect(r.material).toHaveLength(32);
   });
 });

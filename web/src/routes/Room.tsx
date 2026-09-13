@@ -1,3 +1,4 @@
+import { KdfUnavailableError } from "../crypto/kdf";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monacoModule from "monaco-editor";
@@ -43,6 +44,7 @@ type Phase =
   | { kind: "connecting" }
   | { kind: "missing-key" }
   | { kind: "auth-failed" }
+  | { kind: "kdf-unavailable" }
   | { kind: "insecure-origin" }
   | { kind: "live"; session: Session; peerCount: number }
   | { kind: "purged" }
@@ -80,7 +82,6 @@ function JoinableRoom(props: RoomProps) {
   const [tally, setTally] = useState<{ approved: number; total: number; waitingOn?: string } | null>(null);
   const [diverged, setDiverged] = useState(false);
   const [showExtNotice, setShowExtNotice] = useState(() => !extNoticeShown);
-  const [degraded, setDegraded] = useState(false);
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const editorAdapterRef = useRef<{
     scrollTop(line: number): void;
@@ -427,11 +428,6 @@ function JoinableRoom(props: RoomProps) {
   if (phase.kind === "passphrase") {
     return (
       <>
-        {degraded && (
-          <div className="banner" role="alert">
-            <span className="error-text mono">Argon2 unavailable. Using a weaker key derivation.</span>
-          </div>
-        )}
         <PassphraseGate
         name={props.name!}
         onSubmit={async (passphrase) => {
@@ -441,8 +437,16 @@ function JoinableRoom(props: RoomProps) {
             return;
           }
           const roomSalt = b64ToBytes(resolved.kdf.salt);
-          const derived = await passphraseMaterial(passphrase, roomSalt);
-          setDegraded(derived.degraded);
+          let derived: { material: Uint8Array | null };
+          try {
+            derived = await passphraseMaterial(passphrase, roomSalt);
+          } catch (e) {
+            if (e instanceof KdfUnavailableError) {
+              setPhase({ kind: "kdf-unavailable" });
+              return;
+            }
+            throw e;
+          }
           if (!derived.material) return;
           const material = derived.material;
           await startSession({
@@ -491,6 +495,23 @@ function JoinableRoom(props: RoomProps) {
           <p style={{ marginBottom: 0 }}>
             <a href="/">← New room</a>
           </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (phase.kind === "kdf-unavailable") {
+    return (
+      <main className="landing">
+        <h1 className="mono">RÚNA</h1>
+        <div className="panel">
+          <p>
+            This browser could not run Argon2, the key derivation that turns
+            the passphrase into this room's key. Nothing weaker can open the
+            room, so it has not tried.
+          </p>
+          <p>Try an up-to-date browser, or close other tabs to free memory.</p>
+          <a href="/">← Back</a>
         </div>
       </main>
     );
