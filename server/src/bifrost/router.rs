@@ -53,10 +53,17 @@ async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
     // web/scripts/e2e-browser.mjs fails on any Trusted Types violation, so a
     // Monaco upgrade that adds a policy name is caught in CI rather than in
     // production.
+    //
+    // `'wasm-unsafe-eval'` lets the page compile WebAssembly and nothing else:
+    // JavaScript `eval` and `new Function` stay forbidden. Without it every
+    // browser refused to compile the Argon2id module, and the client fell back
+    // to PBKDF2 without anyone noticing — so every passphrase room was guarded
+    // by a far cheaper derivation than the one it claimed. The fallback is gone
+    // now, so this is what lets a passphrase room be created at all.
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types default defaultWorkerFactory diffEditorWidget diffReview domLineBreaksComputer editorGhostText editorViewLayer standaloneColorizer stickyScrollViewLayer tokenizeToString;",
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types default defaultWorkerFactory diffEditorWidget diffReview domLineBreaksComputer editorGhostText editorViewLayer standaloneColorizer stickyScrollViewLayer tokenizeToString;",
         ),
     );
     headers.insert(

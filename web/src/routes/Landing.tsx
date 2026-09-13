@@ -174,7 +174,6 @@ function NamedForm() {
   const [ttl, setTtl] = useState<TtlBody>(TTL_PRESETS[1].value);
 
   const verdict = passphrase ? estimatePassphrase(passphrase) : null;
-  const [degraded, setDegraded] = useState(false);
   const nameIssue = name ? nameProblem(suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")) : null;
 
   const create = async () => {
@@ -199,9 +198,20 @@ function NamedForm() {
     setBusy(true);
     try {
       const finalName = suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "");
+      // Ask first. Creating the room is what finally checks the name, but the
+      // key derivation in front of it is the slowest step on this page —
+      // seconds on a phone — so a taken name used to cost that whole wait and
+      // then an error about the passphrase. The server still decides: this
+      // only saves the wait, and if the lookup itself fails, creation goes
+      // ahead and the server refuses the name there.
+      const existing = await new Api("").resolveName(finalName).catch(() => null);
+      if (existing?.found) {
+        setRefusal(`“${finalName}” is already taken. Pick a different name.`);
+        setBusy(false);
+        return;
+      }
       const salt = randomSalt();
       const kdfResult = await passphraseMaterial(passphrase, salt);
-      setDegraded(kdfResult.degraded);
       const material = kdfResult.material;
       if (!material) throw new Error("no material");
       const { authKey, contentKey } = await deriveRoomKeys(material, null, salt);
@@ -289,11 +299,6 @@ function NamedForm() {
           </p>
         )}
       </div>
-      {degraded && (
-        <div className="banner" role="alert">
-          <span className="error-text mono">Argon2 unavailable. Using a weaker key derivation.</span>
-        </div>
-      )}
       <ExpiryPicker onChange={setTtl} />
       <button className="primary" onClick={create} disabled={busy}>
         {busy ? "Creating…" : "Create shared room"}
@@ -308,8 +313,11 @@ function describeError(e: unknown): string {
   const code = e instanceof Error ? e.message : String(e);
   switch (code) {
     case "NAME_TAKEN":
+      return "That name is already taken. Pick a different name.";
     case "UNAVAILABLE":
-      return "Someone already has that name, and this passphrase does not open their room. Pick another.";
+      return "Could not reserve a room just now. Try again.";
+    case "ARGON2_UNAVAILABLE":
+      return "This browser could not run Argon2, which protects a shared room's passphrase. Try an up-to-date browser, or close other tabs to free memory.";
     case "NAME_INVALID":
       return "The server would not accept that name. Try another.";
     case "RATE_LIMITED":

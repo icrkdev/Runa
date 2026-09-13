@@ -338,6 +338,80 @@ async function main() {
     }
   }
 
+  // A name that is already taken has to say so, and say it before the key
+  // derivation runs. Creation used to check the name only after Argon2 had
+  // spent seconds deriving keys, and then answered with a message about the
+  // passphrase; on a device where Argon2 failed, all anyone saw was a red
+  // banner about a weaker key derivation. Two pages, one name.
+  {
+    const takenName = `e2e-taken-${Math.random().toString(16).slice(2, 8)}`;
+    const createNamed = async (page) => {
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector(".landing", { timeout: 5000 });
+      await page.click("text=Shared name");
+      await page.waitForSelector("text=Create shared room", { timeout: 5000 });
+      const suffix = page.locator(".checkbox-row input[type=checkbox]");
+      if (await suffix.isChecked()) await suffix.uncheck();
+      await page.fill("#room-name", takenName);
+      await page.click('button:has-text("Generate")');
+      const passphrase = await page.inputValue("#passphrase");
+      await page.click('button:has-text("Create shared room")');
+      return passphrase;
+    };
+
+    // The first creation is also the check that Argon2id runs at all under the
+    // policy this server sends. Without 'wasm-unsafe-eval' every engine refused
+    // to compile it, and the client fell back to PBKDF2 without a word.
+    const first = await makePage("named-first");
+    const passphrase = await createNamed(first);
+    try {
+      await first.waitForURL(`${BASE}/${takenName}`, { timeout: 60_000 });
+    } catch {
+      const shown = await first.evaluate(() =>
+        [...document.querySelectorAll(".error-text")].map((e) => e.textContent.trim()).join(" | "),
+      );
+      throw new Error(`[named] creating a named room never left the form; the page shows: ${shown || "nothing"}`);
+    }
+
+    const second = await makePage("named-second");
+    await createNamed(second);
+    let refusal;
+    try {
+      refusal = await second.waitForSelector('[role="alert"]:has-text("already taken")', { timeout: 5000 });
+    } catch {
+      const shown = await second.evaluate(() =>
+        [...document.querySelectorAll(".error-text")].map((e) => e.textContent.trim()).join(" | "),
+      );
+      throw new Error(`[named] a taken name was not refused as taken within 5s; the page shows: ${shown || "nothing"}`);
+    }
+    const said = (await refusal.textContent()) ?? "";
+    if (!said.includes(takenName)) {
+      throw new Error(`[named] the refusal does not say which name is taken: ${said}`);
+    }
+    if (new URL(second.url()).pathname !== "/") {
+      throw new Error(`[named] the second page left the form anyway: ${second.url()}`);
+    }
+    // And the room has to open in another page with the passphrase it was
+    // made with. The fallback's other half was a room created with one
+    // derivation and joined with another, which looked like a wrong
+    // passphrase; this is the check that Argon2id runs on the joining side too.
+    const joiner = await makePage("named-joiner");
+    await joiner.goto(`${BASE}/${takenName}`, { waitUntil: "domcontentloaded" });
+    await joiner.waitForSelector("#pp", { timeout: 15_000 });
+    await joiner.fill("#pp", passphrase);
+    await joiner.click('button:has-text("Enter room")');
+    try {
+      await joiner.waitForSelector(".monaco-editor", { timeout: 60_000 });
+    } catch {
+      const shown = await joiner.evaluate(() => (document.querySelector("main")?.textContent ?? "").trim().slice(0, 200));
+      throw new Error(`[named] the room did not open with its own passphrase; the page shows: ${shown || "nothing"}`);
+    }
+    await joiner.close();
+    await first.close();
+    await second.close();
+  }
+
   await landing.close();
 
   // A 24-hour room must not accuse its own server of tampering. For an
@@ -1208,6 +1282,8 @@ async function main() {
   console.log(`  landing and room hold 320 / 375 / 414 px; dialog buttons reachable`);
   console.log(`  a 24-hour room does not accuse its server of changing the expiry`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
+  console.log(`  a name already in use is refused as taken, before any key derivation`);
+  console.log(`  a named room opens in another page with the passphrase it was made with`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  the room fits the window exactly; the chrome cannot scroll away`);
   console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu only`);
