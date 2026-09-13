@@ -21,6 +21,7 @@ if (!ENGINE) {
 const BASE = "http://127.0.0.1:3001";
 const errors = [];
 let alicePage = null;
+let bobPage = null;
 let serverLogRef = null;
 const enc = new TextEncoder();
 const INFO_AUTH = enc.encode("runa/v1/auth");
@@ -392,6 +393,7 @@ async function main() {
   await alice.keyboard.type("Hello from Alice. ");
 
   const bob = await makePage("bob");
+  bobPage = bob;
   await gotoRoom(bob, "bob", roomUrl);
   await bob.waitForSelector(".monaco-editor", { timeout: 30_000 });
   await bob.click(".monaco-editor .view-lines");
@@ -919,27 +921,37 @@ async function main() {
   await alice.keyboard.press(docEnd);
   await alice.keyboard.press("Enter");
   await alice.keyboard.type("emphasise-me");
-  for (let i = 0; i < "emphasise-me".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
-  await alice.keyboard.press(`${mod}+b`);
-  await alice.waitForTimeout(400);
-  let line = await alice.evaluate(() => {
+  // Wait for the rendered line rather than pausing a fixed time. By here the
+  // document has grown past the fold, so the typed line is only drawn once the
+  // editor has scrolled to it, and on a slow runner that takes longer than any
+  // pause worth hard-coding. Checked before the shortcut too, so a failure says
+  // whether the typing or the shortcut is what went missing.
+  const lineWith = async (want) => {
+    let seen = "";
+    for (let i = 0; i < 50; i++) {
+      seen = await alice.evaluate(() => {
     const rows = [...document.querySelectorAll(".view-lines .view-line")]
       .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent.replace(/\u00a0/g, " ") }))
       .sort((a, b) => a.t - b.t);
     return rows.map((r) => r.x).find((x) => x.includes("emphasise-me")) ?? "";
   });
+      if (seen.includes(want)) return seen;
+      await alice.waitForTimeout(100);
+    }
+    return seen;
+  };
+  if (!(await lineWith("emphasise-me"))) {
+    throw new Error("[shortcuts] the typed text never appeared in the editor, so the shortcut was never tried");
+  }
+  for (let i = 0; i < "emphasise-me".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
+  await alice.keyboard.press(`${mod}+b`);
+  let line = await lineWith("**emphasise-me**");
   if (!line.includes("**emphasise-me**")) {
     throw new Error(`[shortcuts] Ctrl/Cmd+B did not bold the selection: ${JSON.stringify(line)}`);
   }
   for (let i = 0; i < "**emphasise-me**".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
   await alice.keyboard.press(`${mod}+i`);
-  await alice.waitForTimeout(400);
-  line = await alice.evaluate(() => {
-    const rows = [...document.querySelectorAll(".view-lines .view-line")]
-      .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent.replace(/\u00a0/g, " ") }))
-      .sort((a, b) => a.t - b.t);
-    return rows.map((r) => r.x).find((x) => x.includes("emphasise-me")) ?? "";
-  });
+  line = await lineWith("***emphasise-me***");
   if (!line.includes("***emphasise-me***")) {
     throw new Error(`[shortcuts] Ctrl/Cmd+I did not italicise the selection: ${JSON.stringify(line)}`);
   }
@@ -1220,7 +1232,50 @@ main().catch(async (e) => {
       console.error("ALICE URL:", alicePage.url());
     } catch {}
   }
-  for (const err of errors.slice(0, 8)) console.error(" captured:", err);
+  // What each peer's page looked like at the moment of failure. A CI-only
+  // failure cannot be reproduced locally, and "the text is not there" says
+  // nothing about whether it was never typed, typed somewhere else, or is
+  // hidden behind something.
+  for (const [label, page] of [["alice", alicePage], ["bob", bobPage]]) {
+    if (!page || page.isClosed()) continue;
+    try {
+      const state = await Promise.race([
+        page.evaluate(() => {
+          const name = (el) =>
+            el ? `${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""}.${String(el.className || "").split(" ")[0]}` : "none";
+          const lines = [...document.querySelectorAll(".view-lines .view-line")]
+            .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent }))
+            .sort((p, q) => p.t - q.t);
+          return {
+            focus: name(document.activeElement),
+            dialogs: [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].map((d) =>
+              d.textContent.trim().slice(0, 80),
+            ),
+            alerts: [...document.querySelectorAll('[role="alert"], .banner, .toast')]
+              .map((d) => d.textContent.trim().slice(0, 80))
+              .filter(Boolean),
+            renderedLines: lines.length,
+            lastLines: lines.slice(-4).map((l) => l.x),
+          };
+        }),
+        new Promise((r) => setTimeout(() => r("page did not answer within 3s"), 3000)),
+      ]);
+      console.error(`${label.toUpperCase()} STATE:`, JSON.stringify(state));
+    } catch {}
+  }
+  // Grouped by page. One peer's expected noise — a severed socket logs a
+  // connection error on every retry — used to fill the whole allowance and
+  // hide the one error from the other page that explained the failure.
+  const byPage = new Map();
+  for (const err of errors) {
+    const label = /^\[([^\]]+)\]/.exec(err)?.[1] ?? "?";
+    if (!byPage.has(label)) byPage.set(label, []);
+    byPage.get(label).push(err);
+  }
+  for (const [label, list] of byPage) {
+    console.error(` captured from ${label}: ${list.length}, last ${Math.min(list.length, 5)}:`);
+    for (const err of list.slice(-5)) console.error("   ", err.slice(0, 300));
+  }
   if (serverLogRef?.length) {
     const lines = serverLogRef.join("").replace(/\x1b\[[0-9;]*m/g, "").split("\n").filter(Boolean);
     console.error(`SERVER LOG (last ${Math.min(lines.length, 40)} of ${lines.length} lines):`);
