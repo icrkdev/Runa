@@ -37,45 +37,85 @@ function waitForProcessExit(proc) {
   return new Promise((resolve) => proc.once("exit", resolve));
 }
 
-/// Requests each page has started and not yet seen finish or fail, printed
-/// when a room navigation times out.
+/// Open a room, recovering from a Playwright bug that strands Firefox
+/// navigations.
 ///
-/// Added to explain a Firefox hang on the Linux runner, and it did, by
-/// showing what was *not* wrong: see gotoRoom. Kept, because the next stalled
-/// navigation deserves the same answer in one run rather than three.
-const openRequests = new Map();
+/// On the Linux runner Firefox timed out opening a room page on four runs, at
+/// three different pages, and waiting only for commit instead of
+/// DOMContentLoaded changed nothing. When the stalled page could be asked, it
+/// had loaded perfectly — the room rendered, nothing in flight — while
+/// Playwright still reported about:blank.
+///
+/// That is microsoft/playwright#42183. In Firefox a small share of navigations
+/// in a fresh context never settle although the page is complete, and every
+/// locator after one hangs as well, so carrying on is not an option. It is
+/// closed upstream without a fix, and nothing in 1.63 addresses it. Its
+/// reporter, and a second project that shipped the same workaround, found that
+/// a superseding navigation releases it.
+///
+/// Recovery arms only on that exact signature, and only in Firefox: five
+/// seconds in, the page still answers, is at precisely the requested URL and
+/// reports a complete document. Anything else keeps the original navigation
+/// and its verdict. Every recovery is written to the log, and the room still
+/// has to come up — each caller waits for the editor next.
+///
+/// Request listeners were taken off these pages once the diagnosis was done:
+/// listeners attached before navigating are one of the conditions the upstream
+/// issue needs in order to reproduce.
+async function gotoRoom(page, label, url) {
+  const nav = page.goto(url, { waitUntil: "commit" });
+  nav.catch(() => {});
+  const early = await Promise.race([
+    nav.then(
+      () => "ok",
+      (e) => e,
+    ),
+    new Promise((r) => setTimeout(() => r("slow"), 5000)),
+  ]);
+  if (early === "ok") return;
+  if (early !== "slow") throw new Error(`[${label}] ${String(early.message).split("\n")[0]}`);
 
-function trackRequests(page) {
-  const open = new Map();
-  openRequests.set(page, open);
-  page.on("request", (r) => open.set(r, `${r.method()} ${r.url()}`));
-  page.on("requestfinished", (r) => open.delete(r));
-  page.on("requestfailed", (r) => open.delete(r));
+  const probe = ENGINE_NAME === "firefox" ? await probeDocument(page) : null;
+  if (!probe || probe.href !== url || probe.ready !== "complete") {
+    try {
+      await nav;
+      return;
+    } catch (e) {
+      throw new Error(`[${label}] ${String(e.message).split("\n")[0]}; page reported ${JSON.stringify(probe)}`);
+    }
+  }
+  await releaseStuckNavigation(page, label, url);
 }
 
-/// Open a room and return once the navigation has committed.
+async function probeDocument(page) {
+  return Promise.race([
+    page
+      .evaluate(() => ({ href: location.href, ready: document.readyState }))
+      .catch((err) => ({ error: String(err.message).split("\n")[0] })),
+    new Promise((r) => setTimeout(() => r({ error: "no answer within 3s" }), 3000)),
+  ]);
+}
+
+/// Supersede a stranded navigation with a full round trip: leave the page, then
+/// load the room again.
 ///
-/// Not "domcontentloaded". On the Linux runner Firefox timed out waiting for
-/// it on three runs, at three different room pages. The third run had the
-/// diagnostics: the page had rendered the room, not one request was still
-/// open, and Playwright still reported the page as about:blank. The load had
-/// finished; Playwright had lost track of the navigation. Every room URL
-/// carries its keys in the fragment, and none of the landing-page loads, which
-/// do not, ever did this. The app does not change the URL while a room loads:
-/// it only does so when a room is shredded or purged, or when the landing page
-/// creates one, and none of that had happened with the room on screen. So the
-/// cause is on the automation side, and it is not understood beyond that.
-///
-/// Waiting for commit and then for the editor, which every caller does next,
-/// checks what the tests need: that the room actually came up.
-async function gotoRoom(page, label, url) {
+/// Both upstream reports released it with a second navigation to the same URL,
+/// but their URLs had no fragment. Ours do, and navigating to the URL a document
+/// already has is only a jump within it. Forcing this recovery on healthy room
+/// pages showed exactly that: the same-URL attempt settled in under 15ms and
+/// never created a new document. Nothing says a jump releases a stranded
+/// navigation, and if it did not, goto would return and the next locator would
+/// hang instead. Going through about:blank makes both navigations real loads,
+/// which is the case the reports actually cover.
+async function releaseStuckNavigation(page, label, url) {
+  console.log(
+    `  note: [${label}] Firefox navigation stranded with the page complete; superseding it with a reload (microsoft/playwright#42183)`,
+  );
   try {
-    await page.goto(url, { waitUntil: "commit" });
+    await page.goto("about:blank", { timeout: 10_000 });
+    await page.goto(url, { waitUntil: "commit", timeout: 10_000 });
   } catch (e) {
-    const open = [...(openRequests.get(page)?.values() ?? [])];
-    throw new Error(
-      `[${label}] ${String(e.message).split("\n")[0]}\n  requests still open: ${open.length ? "\n    " + open.join("\n    ") : "none"}`,
-    );
+    throw new Error(`[${label}] a stranded navigation could not be released: ${String(e.message).split("\n")[0]}`);
   }
 }
 
@@ -149,7 +189,6 @@ async function main() {
       if (t === "error") errors.push(`[${label}] console.error: ${msg.text()}`);
     });
     page.on("pageerror", (err) => errors.push(`[${label}] pageerror: ${err.message}`));
-    trackRequests(page);
     return page;
   }
 
@@ -1021,7 +1060,6 @@ async function main() {
     isMobile: true,
   });
   const touch = await touchCtx.newPage();
-  trackRequests(touch);
   await gotoRoom(touch, "touch", roomUrl);
   // Counted from commit now, not DOMContentLoaded, so it covers the scripts
   // loading as well as the room coming up.
