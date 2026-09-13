@@ -66,13 +66,15 @@ export function fragmentWithKey(linkSecret: Uint8Array, roomSalt: Uint8Array): s
   return `#k=${b64url(linkSecret)}&s=${b64url(roomSalt)}`;
 }
 
+/// Throws KdfUnavailableError when this browser cannot run Argon2id. There is
+/// deliberately no weaker fallback; that error says why.
 export async function passphraseMaterial(
   passphrase: string,
   salt: Uint8Array,
-): Promise<{ material: Uint8Array | null; degraded: boolean }> {
-  if (!passphrase) return { material: null, degraded: false };
+): Promise<{ material: Uint8Array | null }> {
+  if (!passphrase) return { material: null };
   const result = await deriveFromPassphrase(passphrase, salt);
-  return { material: result.material, degraded: result.degraded };
+  return { material: result.material };
 }
 
 function mergeMaterials(pass: Uint8Array | null, link: Uint8Array | null): Uint8Array {

@@ -599,3 +599,30 @@ async fn an_oversized_frame_still_closes_the_connection() {
     .await;
     assert!(closed.unwrap_or(false), "an oversized frame must close the socket");
 }
+
+/// The policy forbade compiling WebAssembly, so Argon2id never ran in any
+/// browser and every passphrase room was quietly derived with PBKDF2 instead.
+/// Pinned in both directions: WebAssembly must be allowed to compile, and
+/// nothing that lets script text run as code may come in with it.
+#[tokio::test]
+async fn csp_lets_webassembly_compile_and_still_forbids_eval() {
+    let s = spawn(cfg()).await;
+    let r = reqwest::get(format!("{s}/version")).await.unwrap();
+    let csp = r
+        .headers()
+        .get("content-security-policy")
+        .expect("every response carries the CSP")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let script_src = csp
+        .split(';')
+        .map(str::trim)
+        .find(|d| d.starts_with("script-src "))
+        .expect("a script-src directive");
+    let sources: Vec<&str> = script_src.split_whitespace().skip(1).collect();
+    assert!(sources.contains(&"'wasm-unsafe-eval'"), "Argon2id cannot compile under: {script_src}");
+    assert!(!sources.contains(&"'unsafe-eval'"), "eval must stay forbidden: {script_src}");
+    assert!(!sources.contains(&"'unsafe-inline'"), "inline script must stay forbidden: {script_src}");
+    assert_eq!(sources.first(), Some(&"'self'"), "scripts only from this origin: {script_src}");
+}
