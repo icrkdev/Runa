@@ -48,7 +48,9 @@ protocol design inside that bundle helps.
 What can be done, and what RÚNA does:
 
 - Zero third-party script origins. No CDN, no analytics, no hosted fonts.
-- Strict CSP with `script-src 'self'` and Subresource Integrity on every asset.
+- Strict CSP with `script-src 'self' 'wasm-unsafe-eval'` — scripts only from
+  this origin, WebAssembly allowed to compile because Argon2id needs it, `eval`
+  still forbidden — and Subresource Integrity on every asset.
 - Trusted Types enforced, with the policy allow-list naming only `default` and
   the nine policies monaco-editor creates. **Honest limit:** the `default`
   policy's `createHTML` is a pass-through compatibility shim for Monaco's own
