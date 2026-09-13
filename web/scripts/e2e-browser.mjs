@@ -1,11 +1,28 @@
 import { spawn } from "node:child_process";
 import { webcrypto as crypto } from "node:crypto";
 import { createHash } from "node:crypto";
-import { chromium } from "playwright";
+import { chromium, firefox, webkit } from "playwright";
+
+/// Which engine this run drives. Chromium by default so a bare `npm run smoke`
+/// behaves as it always did; CI runs all three.
+///
+/// Two of the faults that reached real users could not have been caught here
+/// on one engine. The line-ending corruption needed a client whose Monaco
+/// model used CRLF, which no headless Chromium on macOS produces, so peers
+/// agreed in CI and diverged in the field. The <select> overflow in #13 is
+/// documented as unreproducible in Chromium at all, headless or emulated.
+const ENGINES = { chromium, firefox, webkit };
+const ENGINE_NAME = process.env.RUNA_E2E_BROWSER ?? "chromium";
+const ENGINE = ENGINES[ENGINE_NAME];
+if (!ENGINE) {
+  throw new Error(`unknown RUNA_E2E_BROWSER "${ENGINE_NAME}"; expected one of ${Object.keys(ENGINES).join(", ")}`);
+}
 
 const BASE = "http://127.0.0.1:3001";
 const errors = [];
 let alicePage = null;
+let bobPage = null;
+let serverLogRef = null;
 const enc = new TextEncoder();
 const INFO_AUTH = enc.encode("runa/v1/auth");
 const INFO_CONTENT = enc.encode("runa/v1/content");
@@ -21,6 +38,88 @@ function waitForProcessExit(proc) {
   return new Promise((resolve) => proc.once("exit", resolve));
 }
 
+/// Open a room, recovering from a Playwright bug that strands Firefox
+/// navigations.
+///
+/// On the Linux runner Firefox timed out opening a room page on four runs, at
+/// three different pages, and waiting only for commit instead of
+/// DOMContentLoaded changed nothing. When the stalled page could be asked, it
+/// had loaded perfectly — the room rendered, nothing in flight — while
+/// Playwright still reported about:blank.
+///
+/// That is microsoft/playwright#42183. In Firefox a small share of navigations
+/// in a fresh context never settle although the page is complete, and every
+/// locator after one hangs as well, so carrying on is not an option. It is
+/// closed upstream without a fix, and nothing in 1.63 addresses it. Its
+/// reporter, and a second project that shipped the same workaround, found that
+/// a superseding navigation releases it.
+///
+/// Recovery arms only on that exact signature, and only in Firefox: five
+/// seconds in, the page still answers, is at precisely the requested URL and
+/// reports a complete document. Anything else keeps the original navigation
+/// and its verdict. Every recovery is written to the log, and the room still
+/// has to come up — each caller waits for the editor next.
+///
+/// Request listeners were taken off these pages once the diagnosis was done:
+/// listeners attached before navigating are one of the conditions the upstream
+/// issue needs in order to reproduce.
+async function gotoRoom(page, label, url) {
+  const nav = page.goto(url, { waitUntil: "commit" });
+  nav.catch(() => {});
+  const early = await Promise.race([
+    nav.then(
+      () => "ok",
+      (e) => e,
+    ),
+    new Promise((r) => setTimeout(() => r("slow"), 5000)),
+  ]);
+  if (early === "ok") return;
+  if (early !== "slow") throw new Error(`[${label}] ${String(early.message).split("\n")[0]}`);
+
+  const probe = ENGINE_NAME === "firefox" ? await probeDocument(page) : null;
+  if (!probe || probe.href !== url || probe.ready !== "complete") {
+    try {
+      await nav;
+      return;
+    } catch (e) {
+      throw new Error(`[${label}] ${String(e.message).split("\n")[0]}; page reported ${JSON.stringify(probe)}`);
+    }
+  }
+  await releaseStuckNavigation(page, label, url);
+}
+
+async function probeDocument(page) {
+  return Promise.race([
+    page
+      .evaluate(() => ({ href: location.href, ready: document.readyState }))
+      .catch((err) => ({ error: String(err.message).split("\n")[0] })),
+    new Promise((r) => setTimeout(() => r({ error: "no answer within 3s" }), 3000)),
+  ]);
+}
+
+/// Supersede a stranded navigation with a full round trip: leave the page, then
+/// load the room again.
+///
+/// Both upstream reports released it with a second navigation to the same URL,
+/// but their URLs had no fragment. Ours do, and navigating to the URL a document
+/// already has is only a jump within it. Forcing this recovery on healthy room
+/// pages showed exactly that: the same-URL attempt settled in under 15ms and
+/// never created a new document. Nothing says a jump releases a stranded
+/// navigation, and if it did not, goto would return and the next locator would
+/// hang instead. Going through about:blank makes both navigations real loads,
+/// which is the case the reports actually cover.
+async function releaseStuckNavigation(page, label, url) {
+  console.log(
+    `  note: [${label}] Firefox navigation stranded with the page complete; superseding it with a reload (microsoft/playwright#42183)`,
+  );
+  try {
+    await page.goto("about:blank", { timeout: 10_000 });
+    await page.goto(url, { waitUntil: "commit", timeout: 10_000 });
+  } catch (e) {
+    throw new Error(`[${label}] a stranded navigation could not be released: ${String(e.message).split("\n")[0]}`);
+  }
+}
+
 async function main() {
   const server = spawn(`${process.cwd()}/../target/release/runa-server`, [], {
     env: { ...process.env, RUNA_DIST: "dist", RUNA_BIND: "127.0.0.1:3001" },
@@ -29,6 +128,7 @@ async function main() {
   const serverLog = [];
   server.stdout.on("data", (d) => serverLog.push(d.toString()));
   server.stderr.on("data", (d) => serverLog.push(d.toString()));
+  serverLogRef = serverLog;
   const killServer = () => { try { server.kill(); } catch {} };
   process.on("exit", killServer);
   process.on("uncaughtException", (e) => { console.error("UNCAUGHT:", e); killServer(); process.exit(1); });
@@ -61,16 +161,107 @@ async function main() {
   const b64url = (b) => Buffer.from(b).toString("base64url");
   const roomUrl = `${BASE}/r/${roomIdHex}#k=${b64url(linkSecret)}&s=${b64url(salt)}`;
 
-  const browser = await chromium.launch();
+  const browser = await ENGINE.launch();
 
   async function makePage(label) {
     const page = await browser.newPage();
+    // Keep a handle on every WebSocket the page opens, so a test can sever one.
+    // See severNetwork() for why the tests do not use setOffline for this.
+    await page.addInitScript(() => {
+      const Original = WebSocket;
+      const opened = [];
+      window.__runaSockets = opened;
+      const Patched = function (...args) {
+        const ws = new Original(...args);
+        opened.push(ws);
+        // Severed: refuse the connection. Closing while still CONNECTING means
+        // onopen can never fire, so nothing reaches the server, and the client
+        // gets the close event after it has attached its handlers — the same
+        // thing it sees when the network is really gone.
+        // Two more ways a network fails, for the tests that need them. A
+        // connection that has died without the browser noticing stays OPEN:
+        // what it sends vanishes and nothing arrives. And a slow round trip
+        // delivers JOIN_ACK late, leaving the socket open before the join is
+        // confirmed. Each socket takes its delay from when it was made, and a
+        // test can lift it afterwards.
+        const realSend = ws.send.bind(ws);
+        ws.send = (data) => {
+          if (!ws.__runaDead) realSend(data);
+        };
+        ws.__runaDelayMs = window.__runaDelayInboundMs || 0;
+        let handler = null;
+        Object.defineProperty(ws, "onmessage", {
+          configurable: true,
+          get: () => handler,
+          set: (h) => {
+            handler = h;
+          },
+        });
+        ws.addEventListener("message", (ev) => {
+          if (ws.__runaDead) return;
+          const run = () => {
+            if (ws.__runaFirstDeliveredAt === undefined) ws.__runaFirstDeliveredAt = Date.now();
+            handler?.call(ws, ev);
+          };
+          if (ws.__runaDelayMs > 0) setTimeout(run, ws.__runaDelayMs);
+          else run();
+        });
+        if (window.__runaSevered) ws.close();
+        return ws;
+      };
+      Patched.prototype = Original.prototype;
+      Object.assign(Patched, Original);
+      window.WebSocket = Patched;
+    });
     page.on("console", (msg) => {
       const t = msg.type();
       if (t === "error") errors.push(`[${label}] console.error: ${msg.text()}`);
     });
     page.on("pageerror", (err) => errors.push(`[${label}] pageerror: ${err.message}`));
     return page;
+  }
+
+  /// Take one page's network away, the same way on every engine.
+  ///
+  /// `context.setOffline` is not that. Running the suite on three engines was
+  /// what showed how far apart they are: all three refuse new *HTTP* requests
+  /// while offline, but only Chromium tears down an established WebSocket —
+  /// Gecko leaves it up, and WebKit will happily open a brand new one while
+  /// `navigator.onLine` is false. The offline peer there reconnected inside
+  /// the same tick, stayed in sync, and the split-brain test then failed its
+  /// own precondition rather than passing on a setup that never happened.
+  ///
+  /// So do neither engine's version of offline. From inside the page, close
+  /// the socket that is up and refuse every new one until restored — the
+  /// patched constructor in makePage does the refusing. The client sees a
+  /// close it did not ask for and retries on its backoff, which is what a lost
+  /// network actually looks like.
+  ///
+  /// Not `page.routeWebSocket`, which was the first version of this. It relays
+  /// every frame of every routed socket through the Playwright driver, so the
+  /// sync tests were measuring traffic that took a detour through the test
+  /// harness rather than the connection they claim to test — and on the Linux
+  /// runner Firefox then hung loading the second peer while the first one's
+  /// frames were being relayed. Cause not proven; the detour is wrong anyway.
+  async function severNetwork(page) {
+    await page.evaluate(() => {
+      window.__runaSevered = true;
+      for (const ws of window.__runaSockets ?? []) {
+        try {
+          ws.close();
+        } catch {
+          /* already closed */
+        }
+      }
+    });
+    await page.waitForTimeout(300);
+  }
+
+  /// Give it back. The next backoff attempt connects for real.
+  async function restoreNetwork(page) {
+    await page.evaluate(() => {
+      window.__runaSevered = false;
+    });
   }
 
   // Guards against horizontal scroll on the landing page at phone widths.
@@ -189,16 +380,21 @@ async function main() {
 
   const alice = await makePage("alice");
   alicePage = alice;
-  await alice.goto(roomUrl, { waitUntil: "domcontentloaded" });
+  await gotoRoom(alice, "alice", roomUrl);
 
   // Wait for editor to mount (proves CSP + Trusted Types + WASM all survived)
   await alice.waitForSelector(".monaco-editor", { timeout: 60_000 });
-  await alice.waitForSelector("textarea.inputarea", { timeout: 15_000 });
+  // Attached, not visible. Monaco's input is a deliberately hidden textarea
+  // that follows the cursor, and whether an engine calls it visible is not
+  // something the editor promises: macOS Firefox did, Linux Firefox never
+  // does. What matters is that it exists before anything is typed.
+  await alice.waitForSelector("textarea.inputarea", { state: "attached", timeout: 15_000 });
   await alice.click(".monaco-editor .view-lines");
   await alice.keyboard.type("Hello from Alice. ");
 
   const bob = await makePage("bob");
-  await bob.goto(roomUrl, { waitUntil: "domcontentloaded" });
+  bobPage = bob;
+  await gotoRoom(bob, "bob", roomUrl);
   await bob.waitForSelector(".monaco-editor", { timeout: 30_000 });
   await bob.click(".monaco-editor .view-lines");
   await bob.keyboard.type("And Bob agrees.");
@@ -228,6 +424,31 @@ async function main() {
   // places render to identical text. A real divergence report showed exactly
   // that shape — the same words, differently placed — so the preview could
   // never have caught it. Compare the editor's own lines instead.
+  /// Put the caret in a page's editor, and make sure it got there.
+  ///
+  /// Clicking `.view-lines` aims at the centre of that element, and once the
+  /// document is longer than the editor that element is taller than the editor
+  /// too. Its centre can then sit outside the visible area, the click lands on
+  /// whatever covers that point, and the keystrokes after it go to the page
+  /// body. That is what the Linux Firefox runner did: focus on <body>, the
+  /// typed text nowhere, reported as a shortcut that did not work. This clicks
+  /// just inside the top-left of the editor's visible area instead, and then
+  /// checks focus is inside the editor, so a miss says what it is.
+  const focusEditor = async (page) => {
+    const box = await page.locator(".monaco-editor .overflow-guard").first().boundingBox();
+    if (!box) throw new Error("[editor] the editor has no visible area to click");
+    await page.mouse.click(box.x + Math.min(120, box.width / 2), box.y + Math.min(24, box.height / 2));
+    try {
+      await page.waitForFunction(() => !!document.activeElement?.closest(".monaco-editor"), null, { timeout: 5000 });
+    } catch {
+      const focus = await page.evaluate(() => {
+        const a = document.activeElement;
+        return a ? `${a.tagName.toLowerCase()}.${String(a.className || "").split(" ")[0]}` : "nothing";
+      });
+      throw new Error(`[editor] clicking the editor did not focus it; focus is on ${focus}`);
+    }
+  };
+
   const editorText = (page) =>
     page.evaluate(() =>
       [...document.querySelectorAll(".view-lines .view-line")]
@@ -281,7 +502,7 @@ async function main() {
   // replay and Yjs's merge at once — and it is the shape a real report will
   // most often have, since a phone that locks or a laptop that sleeps looks
   // exactly like this.
-  await bob.context().setOffline(true);
+  await severNetwork(bob);
   await bob.click(".monaco-editor .view-lines");
   await Promise.all([
     alice.keyboard.type("\nwritten-while-bob-was-away\n", { delay: 8 }),
@@ -293,7 +514,7 @@ async function main() {
   if (splitA === splitB) {
     throw new Error("[sync] peers did not actually diverge while one was offline — the test proves nothing");
   }
-  await bob.context().setOffline(false);
+  await restoreNetwork(bob);
   let reA = "";
   let reB = "";
   let reconverged = false;
@@ -315,6 +536,73 @@ async function main() {
     throw new Error(`[sync] reconnect lost an edit instead of merging it: ${JSON.stringify(reA)}`);
   }
 
+  const aliceSees = async (marker, seconds) => {
+    for (let i = 0; i < seconds; i++) {
+      await alice.waitForTimeout(1000);
+      if ((await editorText(alice)).includes(marker)) return true;
+    }
+    return false;
+  };
+
+  // A connection that dies without the browser noticing. This is the common
+  // case, not the exotic one: a laptop waking, a phone moving between wifi and
+  // mobile data. The socket stays OPEN for as long as TCP takes to give up —
+  // minutes — and every edit sent into it in that time vanished, with nothing
+  // to notice and nothing to send it again. The split-brain test above cannot
+  // catch that, because closing the socket is exactly what does not happen.
+  await bob.evaluate(() => {
+    for (const ws of window.__runaSockets ?? []) ws.__runaDead = true;
+  });
+  await bob.click(".monaco-editor .view-lines");
+  await bob.keyboard.type("\ntyped-into-a-dead-connection\n", { delay: 8 });
+  if (await aliceSees("typed-into-a-dead-connection", 3)) {
+    throw new Error("[sync] the connection was not actually dead — the test proves nothing");
+  }
+  if (!(await aliceSees("typed-into-a-dead-connection", 45))) {
+    throw new Error("[sync] an edit typed into a silently dead connection never reached the other peer");
+  }
+
+  // Typing while the join is still in flight. The socket opens before the
+  // server confirms the join, and until it does the client does not know the
+  // peer id every receiver checks a frame's authentication against. Edits sent
+  // in that window were encrypted under the wrong label: every peer rejected
+  // them, the server stored them anyway, and nothing ever sent them again. The
+  // delay stands in for a slow round trip, which on a phone is often most of a
+  // second.
+  const socketsBefore = await bob.evaluate(() => window.__runaSockets.length);
+  await bob.evaluate(() => {
+    window.__runaDelayInboundMs = 3000;
+  });
+  await severNetwork(bob);
+  await restoreNetwork(bob);
+  await bob.waitForFunction(
+    (n) => {
+      const s = window.__runaSockets;
+      return s.length > n && s[s.length - 1].readyState === 1;
+    },
+    socketsBefore,
+    { timeout: 30_000 },
+  );
+  await bob.click(".monaco-editor .view-lines");
+  await bob.keyboard.type("\ntyped-before-the-join-landed\n", { delay: 5 });
+  const typedAt = await bob.evaluate(() => Date.now());
+  await bob.waitForTimeout(3500);
+  const joinLandedAt = await bob.evaluate(() => {
+    window.__runaDelayInboundMs = 0;
+    const s = window.__runaSockets;
+    const live = s[s.length - 1];
+    live.__runaDelayMs = 0;
+    return live.__runaFirstDeliveredAt ?? null;
+  });
+  // The edit is flushed within 80 ms of the last keystroke, so the join has to
+  // land well after that for the edit to have gone out before it.
+  if (joinLandedAt === null || joinLandedAt < typedAt + 300) {
+    throw new Error("[sync] the join landed before the typing was sent — the test proves nothing");
+  }
+  if (!(await aliceSees("typed-before-the-join-landed", 30))) {
+    throw new Error("[sync] an edit typed before the join was confirmed never reached the other peer");
+  }
+
   // The status bar counts who is actually here, not who the roster still
   // lists. A roster is a join-time snapshot patched with the events a client
   // happened to receive, so a missed PEER_LEAVE over-counts for the rest of
@@ -331,7 +619,7 @@ async function main() {
   if ((await shownPeople(alice)) !== 2) {
     throw new Error(`[presence] expected 2 people before the drop, saw ${await shownPeople(alice)}`);
   }
-  await bob.context().setOffline(true);
+  await severNetwork(bob);
   let dropped = false;
   for (let i = 0; i < 50; i++) {
     await alice.waitForTimeout(1000);
@@ -345,7 +633,7 @@ async function main() {
       `[presence] a silent peer never expired from the count; still showing ${await shownPeople(alice)}`,
     );
   }
-  await bob.context().setOffline(false);
+  await restoreNetwork(bob);
   let returned = false;
   for (let i = 0; i < 50; i++) {
     await alice.waitForTimeout(1000);
@@ -642,31 +930,53 @@ async function main() {
   // Checked through the keyboard rather than by asking whether the action is
   // registered: a registered action with the wrong keybinding would satisfy
   // the second and still leave the shortcut dead.
-  await alice.click(".monaco-editor .view-lines");
-  await alice.keyboard.press("ControlOrMeta+End");
+  //
+  // The modifier comes from the page, not the host. Monaco decides whether
+  // CtrlCmd means Cmd by looking for "Macintosh" in the user agent, and
+  // Playwright's WebKit reports a macOS user agent on every host — while
+  // `ControlOrMeta` is resolved from the machine running the test. On a Linux
+  // runner that pressed Ctrl into an editor listening for Cmd, and the
+  // shortcut looked dead in exactly the one engine where it was fine.
+  const mod = (await alice.evaluate(() => navigator.userAgent.includes("Macintosh"))) ? "Meta" : "Control";
+  // And end-of-document is not the same chord on both: Monaco binds it to
+  // Cmd+Down on a Mac and Ctrl+End elsewhere, so Cmd+End moved nothing and the
+  // text below only landed at the end because the cursor was already there.
+  const docEnd = mod === "Meta" ? "Meta+ArrowDown" : "Control+End";
+  await focusEditor(alice);
+  await alice.keyboard.press(docEnd);
   await alice.keyboard.press("Enter");
   await alice.keyboard.type("emphasise-me");
-  for (let i = 0; i < "emphasise-me".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
-  await alice.keyboard.press("ControlOrMeta+b");
-  await alice.waitForTimeout(400);
-  let line = await alice.evaluate(() => {
+  // Wait for the rendered line rather than pausing a fixed time. By here the
+  // document has grown past the fold, so the typed line is only drawn once the
+  // editor has scrolled to it, and on a slow runner that takes longer than any
+  // pause worth hard-coding. Checked before the shortcut too, so a failure says
+  // whether the typing or the shortcut is what went missing.
+  const lineWith = async (want) => {
+    let seen = "";
+    for (let i = 0; i < 50; i++) {
+      seen = await alice.evaluate(() => {
     const rows = [...document.querySelectorAll(".view-lines .view-line")]
       .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent.replace(/\u00a0/g, " ") }))
       .sort((a, b) => a.t - b.t);
     return rows.map((r) => r.x).find((x) => x.includes("emphasise-me")) ?? "";
   });
+      if (seen.includes(want)) return seen;
+      await alice.waitForTimeout(100);
+    }
+    return seen;
+  };
+  if (!(await lineWith("emphasise-me"))) {
+    throw new Error("[shortcuts] the typed text never appeared in the editor, so the shortcut was never tried");
+  }
+  for (let i = 0; i < "emphasise-me".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
+  await alice.keyboard.press(`${mod}+b`);
+  let line = await lineWith("**emphasise-me**");
   if (!line.includes("**emphasise-me**")) {
     throw new Error(`[shortcuts] Ctrl/Cmd+B did not bold the selection: ${JSON.stringify(line)}`);
   }
   for (let i = 0; i < "**emphasise-me**".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
-  await alice.keyboard.press("ControlOrMeta+i");
-  await alice.waitForTimeout(400);
-  line = await alice.evaluate(() => {
-    const rows = [...document.querySelectorAll(".view-lines .view-line")]
-      .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent.replace(/\u00a0/g, " ") }))
-      .sort((a, b) => a.t - b.t);
-    return rows.map((r) => r.x).find((x) => x.includes("emphasise-me")) ?? "";
-  });
+  await alice.keyboard.press(`${mod}+i`);
+  line = await lineWith("***emphasise-me***");
   if (!line.includes("***emphasise-me***")) {
     throw new Error(`[shortcuts] Ctrl/Cmd+I did not italicise the selection: ${JSON.stringify(line)}`);
   }
@@ -681,8 +991,8 @@ async function main() {
   // flat documents, which produce no folding ranges at all, so the widget was
   // zero-height whether the feature was on or off and every one of them
   // reported it inert. Indentation is what makes this able to fail.
-  await alice.click(".monaco-editor .view-lines");
-  await alice.keyboard.press("ControlOrMeta+End");
+  await focusEditor(alice);
+  await alice.keyboard.press(docEnd);
   await alice.keyboard.type("\nblock header\n");
   // Longer than the viewport on purpose: a block that fits on screen keeps its
   // header visible, so there is nothing to pin and the check passes whatever
@@ -753,9 +1063,9 @@ async function main() {
   // four to approve and hashed differently from everyone else's, and every
   // receiver dropped the request as `roster-mismatch`. Silently, because the
   // guard hook was an empty function.
-  await bob.context().setOffline(true);
+  await severNetwork(bob);
   await bob.waitForTimeout(1500);
-  await bob.context().setOffline(false);
+  await restoreNetwork(bob);
   let backTogether = false;
   for (let i = 0; i < 60; i++) {
     await alice.waitForTimeout(1000);
@@ -770,17 +1080,19 @@ async function main() {
   }
   if (!backTogether) throw new Error("[shred] peers never re-established before the shred check");
 
-  // Scope, honestly: this does NOT reproduce the roster merge that caused the
-  // reported failure. Doing so needs a real socket close, and a brief offline
-  // blip does not produce one — checked by reverting the fix and watching this
-  // stay green, twice, first with the wrong peer proposing and then with the
-  // right one. The merge itself is asserted directly in session.roster.test.ts,
-  // where it can be made to fail.
+  // Scope: this now does reproduce the roster merge that caused the reported
+  // failure, which it could not before. The previous note here said so
+  // honestly — a brief setOffline blip never produced a real socket close, so
+  // there was no second JOIN_ACK to merge a stale peer id out of, and the test
+  // stayed green with the fix reverted. severNetwork() does produce one.
+  // Rechecked the only way worth trusting: drop the `target.clear()` from
+  // replaceRoster and this fails with a denominator of 5 for two people.
   //
-  // What this does cover is the path end to end: a shred proposed after a
-  // network interruption still reaches the other side, and the bar it asks for
-  // describes the people actually in the room. Bob proposes because bob is the
-  // one that dropped.
+  // So the path is covered end to end — a shred proposed after a real
+  // interruption reaches the other side, and the bar it asks for describes the
+  // people actually in the room. session.roster.test.ts still asserts the
+  // merge directly; this is the same bug seen from the outside. Bob proposes
+  // because bob is the one that dropped.
   await bob.click('button:has-text("Shred")');
   await bob.waitForSelector('[role="alertdialog"]', { timeout: 5000 });
 
@@ -880,8 +1192,10 @@ async function main() {
     isMobile: true,
   });
   const touch = await touchCtx.newPage();
-  await touch.goto(roomUrl, { waitUntil: "domcontentloaded" });
-  await touch.waitForSelector(".pane-editor", { timeout: 10000 });
+  await gotoRoom(touch, "touch", roomUrl);
+  // Counted from commit now, not DOMContentLoaded, so it covers the scripts
+  // loading as well as the room coming up.
+  await touch.waitForSelector(".pane-editor", { timeout: 30_000 });
   await touch.waitForTimeout(1500);
   const zoomers = await touch.evaluate(() => {
     const out = [];
@@ -904,12 +1218,14 @@ async function main() {
   server.kill();
   await waitForProcessExit(server);
 
-  console.log("BROWSER E2E OK");
+  console.log(`BROWSER E2E OK (${ENGINE_NAME})`);
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);
   console.log(`  editors converged char-for-char after concurrent typing; no false divergence`);
   console.log(`  offline edits on both sides reconverged on reconnect, nothing lost`);
+  console.log(`  an edit typed into a silently dead connection still reached the other peer`);
+  console.log(`  an edit typed before the join was confirmed still reached the other peer`);
   console.log(`  presence count falls when a peer goes quiet and returns when it comes back`);
   console.log(`  a shred proposed after a reconnect reaches the peer, and counts only who is here`);
   console.log(`  export offers markdown and three PDF sizes; the .md lands with the source in it`);
@@ -941,6 +1257,54 @@ main().catch(async (e) => {
       console.error("ALICE URL:", alicePage.url());
     } catch {}
   }
-  for (const err of errors.slice(0, 8)) console.error(" captured:", err);
+  // What each peer's page looked like at the moment of failure. A CI-only
+  // failure cannot be reproduced locally, and "the text is not there" says
+  // nothing about whether it was never typed, typed somewhere else, or is
+  // hidden behind something.
+  for (const [label, page] of [["alice", alicePage], ["bob", bobPage]]) {
+    if (!page || page.isClosed()) continue;
+    try {
+      const state = await Promise.race([
+        page.evaluate(() => {
+          const name = (el) =>
+            el ? `${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""}.${String(el.className || "").split(" ")[0]}` : "none";
+          const lines = [...document.querySelectorAll(".view-lines .view-line")]
+            .map((el) => ({ t: parseInt(el.style.top || "0", 10), x: el.textContent }))
+            .sort((p, q) => p.t - q.t);
+          return {
+            focus: name(document.activeElement),
+            dialogs: [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].map((d) =>
+              d.textContent.trim().slice(0, 80),
+            ),
+            alerts: [...document.querySelectorAll('[role="alert"], .banner, .toast')]
+              .map((d) => d.textContent.trim().slice(0, 80))
+              .filter(Boolean),
+            renderedLines: lines.length,
+            lastLines: lines.slice(-4).map((l) => l.x),
+          };
+        }),
+        new Promise((r) => setTimeout(() => r("page did not answer within 3s"), 3000)),
+      ]);
+      console.error(`${label.toUpperCase()} STATE:`, JSON.stringify(state));
+    } catch {}
+  }
+  // Grouped by page. One peer's expected noise — a severed socket logs a
+  // connection error on every retry — used to fill the whole allowance and
+  // hide the one error from the other page that explained the failure.
+  const byPage = new Map();
+  for (const err of errors) {
+    const label = /^\[([^\]]+)\]/.exec(err)?.[1] ?? "?";
+    if (!byPage.has(label)) byPage.set(label, []);
+    byPage.get(label).push(err);
+  }
+  for (const [label, list] of byPage) {
+    console.error(` captured from ${label}: ${list.length}, last ${Math.min(list.length, 5)}:`);
+    for (const err of list.slice(-5)) console.error("   ", err.slice(0, 300));
+  }
+  if (serverLogRef?.length) {
+    const lines = serverLogRef.join("").replace(/\x1b\[[0-9;]*m/g, "").split("\n").filter(Boolean);
+    console.error(`SERVER LOG (last ${Math.min(lines.length, 40)} of ${lines.length} lines):`);
+    for (const l of lines.slice(-40)) console.error("  " + l.slice(0, 300));
+  }
   process.exit(1);
 });

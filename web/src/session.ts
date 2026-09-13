@@ -1,7 +1,7 @@
 import * as cbor2 from "cbor2";
 import { RunaSocket, fromB64, type JoinAck } from "./transport/socket";
 import { FT } from "./transport/frame";
-import { RunaDoc, wrapWithLengthAndPad } from "./doc/ydoc";
+import { RunaDoc, wrapWithLengthAndPad, mergeWrapped } from "./doc/ydoc";
 import { bindMonaco, type Binding } from "./doc/binding";
 import { AwarenessHub, handleFromPubkey } from "./doc/awareness";
 import { generateIdentity, type Identity } from "./crypto/identity";
@@ -230,8 +230,10 @@ export class Session {
       identity,
       contentKey: cfg.contentKey,
       insecureAllowed: cfg.insecureAllowed,
+      compactUpdates: mergeWrapped,
       events: {
         onJoinAck: (ack) => sessionRef?.handleJoinAck(ack),
+        onUpdatesStored: (count) => sessionRef?.noteUpdatesStored(count),
         onDocUpdate: (sender, envelope) =>
           sessionRef?.handleRemoteUpdate(envelope) ?? void sender,
         onSnapshot: (sender, covers, blob) => sessionRef?.handleSnapshot(sender, covers, blob),
@@ -355,6 +357,14 @@ export class Session {
     return session;
   }
 
+  /// Count entries this client has actually added to the room log. The
+  /// snapshot index is estimated from it, so it has to count what the server
+  /// stored rather than what was typed: several queued edits can go out as one
+  /// merged update, and one large edit as several parts.
+  noteUpdatesStored(count: number): void {
+    this.doc.storedCount += count;
+  }
+
   private async handleJoinAck(ack: JoinAck): Promise<void> {
     this.internals.myPeerId = ack.peer_id;
     this.internals.myJoinedSeq = ack.roster.find((r) => r.peer_id === ack.peer_id)?.joined_at_seq ?? 0;
@@ -432,6 +442,8 @@ export class Session {
     // Resume rather than replay: asking from 0 on every reconnect pulls the
     // entire room log down again each time.
     this.socket.sendSyncRequest(this.doc.syncFrom());
+    // Anything this client wrote that the room never stored is resent by the
+    // socket itself, once it has confirmed the join.
   }
 
   private async decryptConfigBlob(
@@ -580,6 +592,10 @@ export class Session {
     if (this.snapshotTimer) return;
     this.snapshotTimer = setInterval(() => {
       if (performance.now() - this.internals.joinPerfMs < 60_000) return;
+      // A snapshot claims to cover the log up to an index. Taken while this
+      // client still has updates the room has not stored, or parts of one it is
+      // still receiving, that claim would be wrong.
+      if (!this.socket.readyForSnapshot()) return;
       const roster = [...this.internals.roster.values()];
       if (!roster.length) return;
       const me = toB64(hexToBytes(this.cfg.roomIdHex)) && this.internals.myPeerId;
@@ -589,7 +605,7 @@ export class Session {
           : cmpBytes(a.peerId, b.peerId),
       )[0];
       if (toB64(elected.peerId) !== me) return;
-      const estimate = BigInt(this.doc.baseIndex + this.doc.updateCount);
+      const estimate = BigInt(this.doc.baseIndex + this.doc.storedCount);
       if (this.doc.shouldSnapshot(BigInt(Math.max(Number(estimate), 1)))) {
         void this.doc.createSnapshot(estimate);
       }

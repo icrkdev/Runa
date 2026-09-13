@@ -10,6 +10,7 @@ pub const FT_DOC_SYNC_RESP: u8 = 0x05;
 pub const FT_AWARENESS: u8 = 0x06;
 pub const FT_PEER_JOIN: u8 = 0x07;
 pub const FT_PEER_LEAVE: u8 = 0x08;
+pub const FT_DOC_ACK: u8 = 0x09;
 pub const FT_SHRED_REQUEST: u8 = 0x10;
 pub const FT_SHRED_VOTE: u8 = 0x11;
 pub const FT_SHRED_CANCEL: u8 = 0x12;

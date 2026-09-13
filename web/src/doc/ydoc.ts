@@ -35,11 +35,23 @@ export function unwrapLengthPrefix(wrapped: Uint8Array): Uint8Array {
   return wrapped.slice(4, 4 + len);
 }
 
+/// Merge several wrapped updates into one, for resending a backlog in fewer
+/// frames. A Yjs merge is exact, so the result applies the same as the updates
+/// it replaces.
+export function mergeWrapped(items: Uint8Array[]): Uint8Array[] {
+  if (items.length < 2) return items;
+  return [wrapWithLengthAndPad(Y.mergeUpdates(items.map((w) => unwrapLengthPrefix(w))))];
+}
+
 export class RunaDoc {
   readonly ydoc = new Y.Doc();
   readonly text: Y.Text;
   updateCount = 0;
   baseIndex = 0;
+  /// Entries this client has added to the room log since its last snapshot,
+  /// as the transport reports them. Not updateCount, which counts local edits
+  /// before they are merged or split for sending.
+  storedCount = 0;
 
   private buffer: Uint8Array[] = [];
   private bufferedBytes = 0;
@@ -140,6 +152,7 @@ export class RunaDoc {
     }
     this.lastSnapshotAt = Date.now();
     this.updateCount = 0;
+    this.storedCount = 0;
     this.baseIndex = Number(logLen);
   }
 

@@ -696,3 +696,114 @@ async fn creation_refuses_non_canonical_kdf_parameters() {
         );
     }
 }
+
+fn join_frame_with_acks(room_hex: &str, auth_key: &[u8; 32], pubkey: &[u8; 32]) -> Message {
+    let mut frame = [0x52u8, 0x55, 0x01, 0x01]
+        .iter()
+        .copied()
+        .chain(hex::decode(room_hex).unwrap())
+        .chain([0u8; 4])
+        .chain([1u8, 2, 3, 4])
+        .chain([0u8; 4])
+        .collect::<Vec<u8>>();
+    let body = json!({
+        "auth_key": B64.encode(auth_key),
+        "pubkey": B64.encode(pubkey),
+        "acks": true,
+    });
+    frame.extend_from_slice(&serde_json::to_vec(&body).unwrap());
+    Message::Binary(frame.into())
+}
+
+/// An edit is only safe once the server has stored it. Without an ack the
+/// client cannot tell a frame that arrived from one written into a connection
+/// that had already died, so it could never know what to send again.
+#[tokio::test]
+async fn doc_updates_are_acknowledged_to_their_sender_in_order_when_asked() {
+    let server = spawn_server().await;
+    let keys = create_room(&server).await;
+
+    let mut a = connect(&server, &keys.room_id_hex).await;
+    a.send(join_frame_with_acks(&keys.room_id_hex, &keys.auth_key, &[1u8; 32]))
+        .await
+        .unwrap();
+    let (ft, ack) = recv_json(&mut a).await;
+    assert_eq!(ft, 0x02);
+    assert_eq!(ack["acks"], true);
+    let cfg = test_config();
+    assert_eq!(ack["limits"]["max_frame_bytes"], cfg.max_frame_bytes as u64);
+    assert_eq!(ack["limits"]["frames_per_sec"], cfg.frames_per_conn_per_sec as u64);
+    assert_eq!(ack["limits"]["bytes_per_sec"], cfg.bytes_per_conn_per_sec);
+
+    // A client that did not ask is told nothing and sent nothing new.
+    let mut b = connect(&server, &keys.room_id_hex).await;
+    b.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[2u8; 32]))
+        .await
+        .unwrap();
+    let (_, ack_b) = recv_json(&mut b).await;
+    assert!(ack_b.get("acks").is_none(), "acks advertised to a client that never asked");
+    assert!(ack_b.get("limits").is_none());
+
+    for i in 0..3u8 {
+        a.send(doc_update_frame(&keys.room_id_hex, &[i; 40])).await.unwrap();
+    }
+    let mut indices = Vec::new();
+    for _ in 0..3 {
+        let bytes = next_frame_of(&mut a, 0x09).await;
+        assert_eq!(&bytes[20..24], &[0u8; 4], "server-authored frames carry epoch 0");
+        let v: Value = serde_json::from_slice(&bytes[32..]).expect("DOC_ACK is unenveloped JSON");
+        assert_eq!(v["ok"], true);
+        indices.push(v["index"].as_u64().expect("a stored update reports its log index"));
+    }
+    assert!(
+        indices.windows(2).all(|w| w[1] == w[0] + 1),
+        "acks must arrive in send order: {indices:?}"
+    );
+
+    // The other peer receives the updates themselves, never the acks.
+    for _ in 0..3 {
+        let _ = next_frame_of(&mut b, 0x03).await;
+    }
+    b.send(doc_update_frame(&keys.room_id_hex, &[9; 40])).await.unwrap();
+    let _ = next_frame_of(&mut a, 0x03).await;
+    let b_got_ack = tokio::time::timeout(Duration::from_millis(600), async {
+        while let Some(Ok(msg)) = b.next().await {
+            if let Message::Binary(bytes) = msg {
+                if bytes.len() >= 4 && bytes[3] == 0x09 {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await;
+    assert!(!matches!(b_got_ack, Ok(true)), "DOC_ACK sent to a client that never asked for it");
+}
+
+/// A full log refused the update with an ERROR frame the client could not tie
+/// to any particular edit. The ack says which one, so the client can stop
+/// retrying something that will never be stored.
+#[tokio::test]
+async fn an_update_the_log_cannot_hold_is_acknowledged_as_not_stored() {
+    let cfg = runa_server::config::Config { max_log_bytes: 8192, ..test_config() };
+    let server = spawn_server_with(cfg).await;
+    let keys = create_room(&server).await;
+    let mut a = connect(&server, &keys.room_id_hex).await;
+    a.send(join_frame_with_acks(&keys.room_id_hex, &keys.auth_key, &[3u8; 32]))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut a).await;
+
+    let mut refused = false;
+    for i in 0..32u8 {
+        a.send(doc_update_frame(&keys.room_id_hex, &[i; 1024])).await.unwrap();
+        let bytes = next_frame_of(&mut a, 0x09).await;
+        let v: Value = serde_json::from_slice(&bytes[32..]).unwrap();
+        if v["ok"] == false {
+            assert!(v.get("index").is_none(), "an update that was not stored has no index");
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused, "a full log must say the update was not stored");
+}
