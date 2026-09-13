@@ -273,7 +273,11 @@ async function main() {
 
   // Wait for editor to mount (proves CSP + Trusted Types + WASM all survived)
   await alice.waitForSelector(".monaco-editor", { timeout: 60_000 });
-  await alice.waitForSelector("textarea.inputarea", { timeout: 15_000 });
+  // Attached, not visible. Monaco's input is a deliberately hidden textarea
+  // that follows the cursor, and whether an engine calls it visible is not
+  // something the editor promises: macOS Firefox did, Linux Firefox never
+  // does. What matters is that it exists before anything is typed.
+  await alice.waitForSelector("textarea.inputarea", { state: "attached", timeout: 15_000 });
   await alice.click(".monaco-editor .view-lines");
   await alice.keyboard.type("Hello from Alice. ");
 
@@ -722,12 +726,24 @@ async function main() {
   // Checked through the keyboard rather than by asking whether the action is
   // registered: a registered action with the wrong keybinding would satisfy
   // the second and still leave the shortcut dead.
+  //
+  // The modifier comes from the page, not the host. Monaco decides whether
+  // CtrlCmd means Cmd by looking for "Macintosh" in the user agent, and
+  // Playwright's WebKit reports a macOS user agent on every host — while
+  // `ControlOrMeta` is resolved from the machine running the test. On a Linux
+  // runner that pressed Ctrl into an editor listening for Cmd, and the
+  // shortcut looked dead in exactly the one engine where it was fine.
+  const mod = (await alice.evaluate(() => navigator.userAgent.includes("Macintosh"))) ? "Meta" : "Control";
+  // And end-of-document is not the same chord on both: Monaco binds it to
+  // Cmd+Down on a Mac and Ctrl+End elsewhere, so Cmd+End moved nothing and the
+  // text below only landed at the end because the cursor was already there.
+  const docEnd = mod === "Meta" ? "Meta+ArrowDown" : "Control+End";
   await alice.click(".monaco-editor .view-lines");
-  await alice.keyboard.press("ControlOrMeta+End");
+  await alice.keyboard.press(docEnd);
   await alice.keyboard.press("Enter");
   await alice.keyboard.type("emphasise-me");
   for (let i = 0; i < "emphasise-me".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
-  await alice.keyboard.press("ControlOrMeta+b");
+  await alice.keyboard.press(`${mod}+b`);
   await alice.waitForTimeout(400);
   let line = await alice.evaluate(() => {
     const rows = [...document.querySelectorAll(".view-lines .view-line")]
@@ -739,7 +755,7 @@ async function main() {
     throw new Error(`[shortcuts] Ctrl/Cmd+B did not bold the selection: ${JSON.stringify(line)}`);
   }
   for (let i = 0; i < "**emphasise-me**".length; i++) await alice.keyboard.press("Shift+ArrowLeft");
-  await alice.keyboard.press("ControlOrMeta+i");
+  await alice.keyboard.press(`${mod}+i`);
   await alice.waitForTimeout(400);
   line = await alice.evaluate(() => {
     const rows = [...document.querySelectorAll(".view-lines .view-line")]
@@ -762,7 +778,7 @@ async function main() {
   // zero-height whether the feature was on or off and every one of them
   // reported it inert. Indentation is what makes this able to fail.
   await alice.click(".monaco-editor .view-lines");
-  await alice.keyboard.press("ControlOrMeta+End");
+  await alice.keyboard.press(docEnd);
   await alice.keyboard.type("\nblock header\n");
   // Longer than the viewport on purpose: a block that fits on screen keeps its
   // header visible, so there is nothing to pin and the check passes whatever
