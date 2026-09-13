@@ -37,13 +37,12 @@ function waitForProcessExit(proc) {
   return new Promise((resolve) => proc.once("exit", resolve));
 }
 
-/// Requests each page has started and not yet seen finish or fail.
+/// Requests each page has started and not yet seen finish or fail, printed
+/// when a room navigation times out.
 ///
-/// A room navigation that never reaches DOMContentLoaded says nothing about
-/// why: on the Linux runner Firefox timed out loading a room twice, at two
-/// different points, with nothing in the log but the URL. DOMContentLoaded
-/// waits on every module script, so the open requests at the moment of the
-/// timeout are the answer, and this is what prints them.
+/// Added to explain a Firefox hang on the Linux runner, and it did, by
+/// showing what was *not* wrong: see gotoRoom. Kept, because the next stalled
+/// navigation deserves the same answer in one run rather than three.
 const openRequests = new Map();
 
 function trackRequests(page) {
@@ -54,9 +53,24 @@ function trackRequests(page) {
   page.on("requestfailed", (r) => open.delete(r));
 }
 
+/// Open a room and return once the navigation has committed.
+///
+/// Not "domcontentloaded". On the Linux runner Firefox timed out waiting for
+/// it on three runs, at three different room pages. The third run had the
+/// diagnostics: the page had rendered the room, not one request was still
+/// open, and Playwright still reported the page as about:blank. The load had
+/// finished; Playwright had lost track of the navigation. Every room URL
+/// carries its keys in the fragment, and none of the landing-page loads, which
+/// do not, ever did this. The app does not change the URL while a room loads:
+/// it only does so when a room is shredded or purged, or when the landing page
+/// creates one, and none of that had happened with the room on screen. So the
+/// cause is on the automation side, and it is not understood beyond that.
+///
+/// Waiting for commit and then for the editor, which every caller does next,
+/// checks what the tests need: that the room actually came up.
 async function gotoRoom(page, label, url) {
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded" });
+    await page.goto(url, { waitUntil: "commit" });
   } catch (e) {
     const open = [...(openRequests.get(page)?.values() ?? [])];
     throw new Error(
@@ -1009,7 +1023,9 @@ async function main() {
   const touch = await touchCtx.newPage();
   trackRequests(touch);
   await gotoRoom(touch, "touch", roomUrl);
-  await touch.waitForSelector(".pane-editor", { timeout: 10000 });
+  // Counted from commit now, not DOMContentLoaded, so it covers the scripts
+  // loading as well as the room coming up.
+  await touch.waitForSelector(".pane-editor", { timeout: 30_000 });
   await touch.waitForTimeout(1500);
   const zoomers = await touch.evaluate(() => {
     const out = [];
