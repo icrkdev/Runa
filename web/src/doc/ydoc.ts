@@ -35,11 +35,23 @@ export function unwrapLengthPrefix(wrapped: Uint8Array): Uint8Array {
   return wrapped.slice(4, 4 + len);
 }
 
+/// Merge several wrapped updates into one, for resending a backlog in fewer
+/// frames. A Yjs merge is exact, so the result applies the same as the updates
+/// it replaces.
+export function mergeWrapped(items: Uint8Array[]): Uint8Array[] {
+  if (items.length < 2) return items;
+  return [wrapWithLengthAndPad(Y.mergeUpdates(items.map((w) => unwrapLengthPrefix(w))))];
+}
+
 export class RunaDoc {
   readonly ydoc = new Y.Doc();
   readonly text: Y.Text;
   updateCount = 0;
   baseIndex = 0;
+  /// Entries this client has added to the room log since its last snapshot,
+  /// as the transport reports them. Not updateCount, which counts local edits
+  /// before they are merged or split for sending.
+  storedCount = 0;
 
   private buffer: Uint8Array[] = [];
   private bufferedBytes = 0;
@@ -121,24 +133,6 @@ export class RunaDoc {
     this.opts.transport.sendSyncRequest(0);
   }
 
-  /// Send everything this client holds.
-  ///
-  /// The counterpart to requesting a sync: that pulls what the room has, this
-  /// offers what this client has. A reconnect needs both, because an edit made
-  /// while the socket was down was dropped on the way out and exists nowhere
-  /// else — pulling cannot recover what the server never received.
-  ///
-  /// Idempotent by construction: Yjs discards state it already holds, so the
-  /// cost of sending this when nothing was actually lost is bandwidth, not
-  /// correctness. It is still sent only when a drop was recorded, because the
-  /// server appends it to the room log and a full state on every reconnect
-  /// would spend the log budget on nothing.
-  async pushLocalState(): Promise<void> {
-    if (this.destroyed) return;
-    const state = Y.encodeStateAsUpdate(this.ydoc);
-    await this.opts.transport.sendUpdate(wrapWithLengthAndPad(state));
-  }
-
   shouldSnapshot(logLen: bigint): boolean {
     const bytesOk = logLen > BigInt(this.opts.snapshotBytesThreshold ?? 2 * 1024 * 1024);
     const countOk = this.updateCount > (this.opts.snapshotCountThreshold ?? 2000);
@@ -158,6 +152,7 @@ export class RunaDoc {
     }
     this.lastSnapshotAt = Date.now();
     this.updateCount = 0;
+    this.storedCount = 0;
     this.baseIndex = Number(logLen);
   }
 

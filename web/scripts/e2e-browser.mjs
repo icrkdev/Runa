@@ -177,6 +177,34 @@ async function main() {
         // onopen can never fire, so nothing reaches the server, and the client
         // gets the close event after it has attached its handlers — the same
         // thing it sees when the network is really gone.
+        // Two more ways a network fails, for the tests that need them. A
+        // connection that has died without the browser noticing stays OPEN:
+        // what it sends vanishes and nothing arrives. And a slow round trip
+        // delivers JOIN_ACK late, leaving the socket open before the join is
+        // confirmed. Each socket takes its delay from when it was made, and a
+        // test can lift it afterwards.
+        const realSend = ws.send.bind(ws);
+        ws.send = (data) => {
+          if (!ws.__runaDead) realSend(data);
+        };
+        ws.__runaDelayMs = window.__runaDelayInboundMs || 0;
+        let handler = null;
+        Object.defineProperty(ws, "onmessage", {
+          configurable: true,
+          get: () => handler,
+          set: (h) => {
+            handler = h;
+          },
+        });
+        ws.addEventListener("message", (ev) => {
+          if (ws.__runaDead) return;
+          const run = () => {
+            if (ws.__runaFirstDeliveredAt === undefined) ws.__runaFirstDeliveredAt = Date.now();
+            handler?.call(ws, ev);
+          };
+          if (ws.__runaDelayMs > 0) setTimeout(run, ws.__runaDelayMs);
+          else run();
+        });
         if (window.__runaSevered) ws.close();
         return ws;
       };
@@ -479,6 +507,73 @@ async function main() {
   }
   if (!reA.includes("written-while-bob-was-away") || !reA.includes("written-by-bob-offline")) {
     throw new Error(`[sync] reconnect lost an edit instead of merging it: ${JSON.stringify(reA)}`);
+  }
+
+  const aliceSees = async (marker, seconds) => {
+    for (let i = 0; i < seconds; i++) {
+      await alice.waitForTimeout(1000);
+      if ((await editorText(alice)).includes(marker)) return true;
+    }
+    return false;
+  };
+
+  // A connection that dies without the browser noticing. This is the common
+  // case, not the exotic one: a laptop waking, a phone moving between wifi and
+  // mobile data. The socket stays OPEN for as long as TCP takes to give up —
+  // minutes — and every edit sent into it in that time vanished, with nothing
+  // to notice and nothing to send it again. The split-brain test above cannot
+  // catch that, because closing the socket is exactly what does not happen.
+  await bob.evaluate(() => {
+    for (const ws of window.__runaSockets ?? []) ws.__runaDead = true;
+  });
+  await bob.click(".monaco-editor .view-lines");
+  await bob.keyboard.type("\ntyped-into-a-dead-connection\n", { delay: 8 });
+  if (await aliceSees("typed-into-a-dead-connection", 3)) {
+    throw new Error("[sync] the connection was not actually dead — the test proves nothing");
+  }
+  if (!(await aliceSees("typed-into-a-dead-connection", 45))) {
+    throw new Error("[sync] an edit typed into a silently dead connection never reached the other peer");
+  }
+
+  // Typing while the join is still in flight. The socket opens before the
+  // server confirms the join, and until it does the client does not know the
+  // peer id every receiver checks a frame's authentication against. Edits sent
+  // in that window were encrypted under the wrong label: every peer rejected
+  // them, the server stored them anyway, and nothing ever sent them again. The
+  // delay stands in for a slow round trip, which on a phone is often most of a
+  // second.
+  const socketsBefore = await bob.evaluate(() => window.__runaSockets.length);
+  await bob.evaluate(() => {
+    window.__runaDelayInboundMs = 3000;
+  });
+  await severNetwork(bob);
+  await restoreNetwork(bob);
+  await bob.waitForFunction(
+    (n) => {
+      const s = window.__runaSockets;
+      return s.length > n && s[s.length - 1].readyState === 1;
+    },
+    socketsBefore,
+    { timeout: 30_000 },
+  );
+  await bob.click(".monaco-editor .view-lines");
+  await bob.keyboard.type("\ntyped-before-the-join-landed\n", { delay: 5 });
+  const typedAt = await bob.evaluate(() => Date.now());
+  await bob.waitForTimeout(3500);
+  const joinLandedAt = await bob.evaluate(() => {
+    window.__runaDelayInboundMs = 0;
+    const s = window.__runaSockets;
+    const live = s[s.length - 1];
+    live.__runaDelayMs = 0;
+    return live.__runaFirstDeliveredAt ?? null;
+  });
+  // The edit is flushed within 80 ms of the last keystroke, so the join has to
+  // land well after that for the edit to have gone out before it.
+  if (joinLandedAt === null || joinLandedAt < typedAt + 300) {
+    throw new Error("[sync] the join landed before the typing was sent — the test proves nothing");
+  }
+  if (!(await aliceSees("typed-before-the-join-landed", 30))) {
+    throw new Error("[sync] an edit typed before the join was confirmed never reached the other peer");
   }
 
   // The status bar counts who is actually here, not who the roster still
@@ -1092,6 +1187,8 @@ async function main() {
   console.log(`  status bars showed a 2-person count on both sides`);
   console.log(`  editors converged char-for-char after concurrent typing; no false divergence`);
   console.log(`  offline edits on both sides reconverged on reconnect, nothing lost`);
+  console.log(`  an edit typed into a silently dead connection still reached the other peer`);
+  console.log(`  an edit typed before the join was confirmed still reached the other peer`);
   console.log(`  presence count falls when a peer goes quiet and returns when it comes back`);
   console.log(`  a shred proposed after a reconnect reaches the peer, and counts only who is here`);
   console.log(`  export offers markdown and three PDF sizes; the .md lands with the source in it`);

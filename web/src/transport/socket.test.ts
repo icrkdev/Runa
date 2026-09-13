@@ -1,0 +1,323 @@
+import * as Y from "yjs";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { decryptEnvelope } from "../crypto/aead";
+import type { Identity } from "../crypto/identity";
+import { mergeWrapped, unwrapLengthPrefix, wrapWithLengthAndPad } from "../doc/ydoc";
+import { FT, HEADER_LEN, buildJsonFrame, concatBytes } from "./frame";
+import { PART_MARKER, RunaSocket, readPart, splitIntoParts, toB64, type SocketEvents } from "./socket";
+
+/// Stands in for the browser's WebSocket. `dead` models a connection that has
+/// died without the browser noticing: it stays OPEN, sends vanish, and nothing
+/// arrives — which is what a laptop waking or a phone changing networks does.
+class FakeWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static all: FakeWebSocket[] = [];
+  readyState = FakeWebSocket.CONNECTING;
+  binaryType = "blob";
+  sent: Uint8Array[] = [];
+  dead = false;
+  onopen: (() => void) | null = null;
+  onmessage: ((ev: { data: ArrayBuffer }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(readonly url: string) {
+    FakeWebSocket.all.push(this);
+  }
+  send(bytes: Uint8Array): void {
+    if (this.readyState !== FakeWebSocket.OPEN) throw new Error("send on a socket that is not open");
+    if (!this.dead) this.sent.push(bytes.slice());
+  }
+  close(): void {
+    if (this.readyState === FakeWebSocket.CLOSED) return;
+    this.readyState = FakeWebSocket.CLOSED;
+    this.onclose?.();
+  }
+  open(): void {
+    this.readyState = FakeWebSocket.OPEN;
+    this.onopen?.();
+  }
+  deliver(frame: Uint8Array): void {
+    if (this.dead) return;
+    this.onmessage?.({ data: frame.slice().buffer });
+  }
+}
+
+const ROOM = new Uint8Array(16).fill(7);
+const PEER = new Uint8Array(16).fill(0x42);
+const realWebSocket = globalThis.WebSocket;
+let sockets: RunaSocket[] = [];
+
+beforeEach(() => {
+  FakeWebSocket.all = [];
+  (globalThis as { WebSocket: unknown }).WebSocket = FakeWebSocket;
+});
+
+afterEach(() => {
+  for (const s of sockets) s.close();
+  sockets = [];
+  (globalThis as { WebSocket: unknown }).WebSocket = realWebSocket;
+});
+
+const noop = () => {};
+
+async function makeSocket(
+  opts: { events?: Partial<SocketEvents>; ackTimeoutMs?: number; compact?: (w: Uint8Array[]) => Uint8Array[] } = {},
+) {
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(9), { name: "AES-GCM" }, false, [
+    "encrypt",
+    "decrypt",
+  ]);
+  const socket = new RunaSocket({
+    url: "ws://127.0.0.1:1/socket/test",
+    roomId: ROOM,
+    authKey: new Uint8Array(32).fill(1),
+    identity: { publicKeyRaw: new Uint8Array(32).fill(5) } as unknown as Identity,
+    contentKey: key,
+    insecureAllowed: true,
+    ackTimeoutMs: opts.ackTimeoutMs,
+    compactUpdates: opts.compact,
+    events: {
+      onJoinAck: noop,
+      onDocUpdate: noop,
+      onSnapshot: noop,
+      onAwareness: noop,
+      onShredFrame: noop,
+      onPeerJoin: noop,
+      onPeerLeave: noop,
+      onPurge: noop,
+      onTtlExtended: noop,
+      onError: noop,
+      onSnapshotTooLarge: noop,
+      onEpochStale: noop,
+      onDisconnected: noop,
+      ...opts.events,
+    },
+  });
+  sockets.push(socket);
+  await socket.connect();
+  return { socket, key };
+}
+
+const latest = () => FakeWebSocket.all[FakeWebSocket.all.length - 1];
+
+const LIMITS = { max_frame_bytes: 1024 * 1024, frames_per_sec: 1000, bytes_per_sec: 64 * 1024 * 1024 };
+
+function joinAck(extra: Record<string, unknown> = {}): Uint8Array {
+  return buildJsonFrame(FT.JOIN_ACK, ROOM, 0, {
+    peer_id: toB64(PEER),
+    epoch: 0,
+    log_len: 0,
+    base_index: 0,
+    has_snapshot: false,
+    ttl: { kind: "none", secs: 0 },
+    ceiling_optout: false,
+    kdf: { alg: "argon2id", m_kib: 65536, t: 3, p: 1, salt: "" },
+    roster: [],
+    acks: true,
+    limits: LIMITS,
+    ...extra,
+  });
+}
+
+const docAck = (ok = true) => buildJsonFrame(FT.DOC_ACK, ROOM, 0, ok ? { ok, index: 0 } : { ok });
+const docFrames = (ws: FakeWebSocket) => ws.sent.filter((f) => f[3] === FT.DOC_UPDATE);
+const text = (s: string) => wrapWithLengthAndPad(new TextEncoder().encode(s));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/// Opens a frame the way a receiving peer would: against the peer id the
+/// server assigned, not the key the sender started with.
+function readAsPeer(frame: Uint8Array, key: CryptoKey): Promise<Uint8Array> {
+  return decryptEnvelope(key, frame.slice(0, HEADER_LEN), PEER, frame.slice(HEADER_LEN));
+}
+
+async function waitFor(check: () => boolean, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) throw new Error("timed out waiting");
+    await sleep(10);
+  }
+}
+
+describe("a document update is kept until the room has stored it", () => {
+  it("sends nothing encrypted before the join is confirmed, then sends what was typed so peers can read it", async () => {
+    const { socket, key } = await makeSocket();
+    const ws = latest();
+    ws.open();
+    const typed = text("typed while the join was still in flight");
+    await socket.sendUpdate(typed.slice());
+    await socket.sendAwareness(text("cursor"));
+    await expect(socket.sendSnapshot(text("state"), 0n)).rejects.toThrow();
+    await sleep(30);
+    expect(ws.sent.map((f) => f[3])).toEqual([FT.JOIN]);
+
+    ws.deliver(joinAck());
+    await waitFor(() => docFrames(ws).length === 1);
+    expect(await readAsPeer(docFrames(ws)[0], key)).toEqual(typed);
+  });
+
+  it("resends an update the server never acknowledged on the next connection, and only that one", async () => {
+    const { socket, key } = await makeSocket();
+    const first = latest();
+    first.open();
+    first.deliver(joinAck());
+    const stored = text("stored");
+    const lost = text("lost with the connection");
+    await socket.sendUpdate(stored.slice());
+    await waitFor(() => docFrames(first).length === 1);
+    first.deliver(docAck());
+    await socket.sendUpdate(lost.slice());
+    await waitFor(() => docFrames(first).length === 2);
+    first.close();
+
+    await waitFor(() => FakeWebSocket.all.length === 2);
+    const second = latest();
+    second.open();
+    second.deliver(joinAck());
+    await waitFor(() => docFrames(second).length === 1);
+    await sleep(50);
+    expect(docFrames(second)).toHaveLength(1);
+    expect(await readAsPeer(docFrames(second)[0], key)).toEqual(lost);
+  });
+
+  it("abandons a connection that stops acknowledging, and resends on a new one", async () => {
+    const { socket, key } = await makeSocket({ ackTimeoutMs: 150 });
+    const first = latest();
+    first.open();
+    first.deliver(joinAck());
+    first.dead = true;
+    const typed = text("typed into a connection that had already died");
+    await socket.sendUpdate(typed.slice());
+
+    await waitFor(() => FakeWebSocket.all.length === 2);
+    const second = latest();
+    second.open();
+    second.deliver(joinAck());
+    await waitFor(() => docFrames(second).length === 1);
+    expect(await readAsPeer(docFrames(second)[0], key)).toEqual(typed);
+  });
+
+  it("does not resend an update the room refused to store", async () => {
+    const { socket } = await makeSocket();
+    const first = latest();
+    first.open();
+    first.deliver(joinAck());
+    await socket.sendUpdate(text("the log is full"));
+    await waitFor(() => docFrames(first).length === 1);
+    first.deliver(docAck(false));
+    first.close();
+
+    await waitFor(() => FakeWebSocket.all.length === 2);
+    const second = latest();
+    second.open();
+    second.deliver(joinAck());
+    await sleep(100);
+    expect(docFrames(second)).toHaveLength(0);
+  });
+
+  it("against a server without acks, sends each update once and never resends it", async () => {
+    const { socket } = await makeSocket();
+    const first = latest();
+    first.open();
+    first.deliver(joinAck({ acks: undefined, limits: undefined }));
+    await socket.sendUpdate(text("fire and forget"));
+    await waitFor(() => docFrames(first).length === 1);
+    first.close();
+
+    await waitFor(() => FakeWebSocket.all.length === 2);
+    const second = latest();
+    second.open();
+    second.deliver(joinAck({ acks: undefined, limits: undefined }));
+    await sleep(100);
+    expect(docFrames(second)).toHaveLength(0);
+  });
+});
+
+describe("resending a backlog", () => {
+  it("paces it under the rate the server advertised instead of tripping the limit", async () => {
+    const { socket } = await makeSocket();
+    const ws = latest();
+    ws.open();
+    for (let i = 0; i < 40; i++) await socket.sendUpdate(wrapWithLengthAndPad(new Uint8Array([i])));
+    ws.deliver(joinAck({ limits: { ...LIMITS, frames_per_sec: 10 } }));
+    await sleep(400);
+    const sent = docFrames(ws).length;
+    expect(sent).toBeGreaterThan(0);
+    // A burst of the bucket's ten, plus five a second after it.
+    expect(sent).toBeLessThanOrEqual(12);
+  });
+
+  it("merges updates queued while offline into one that applies the same", async () => {
+    const { socket, key } = await makeSocket({ compact: mergeWrapped });
+    const ws = latest();
+    ws.open();
+    const author = new Y.Doc();
+    const updates: Uint8Array[] = [];
+    author.on("update", (u: Uint8Array) => updates.push(u));
+    const t = author.getText("content");
+    for (let i = 0; i < 20; i++) t.insert(t.length, `line ${i}\n`);
+    for (const u of updates) await socket.sendUpdate(wrapWithLengthAndPad(u));
+
+    ws.deliver(joinAck());
+    await waitFor(() => docFrames(ws).length >= 1);
+    await sleep(50);
+    expect(docFrames(ws)).toHaveLength(1);
+    const reader = new Y.Doc();
+    Y.applyUpdate(reader, unwrapLengthPrefix(await readAsPeer(docFrames(ws)[0], key)));
+    expect(reader.getText("content").toString()).toBe(t.toString());
+  });
+});
+
+describe("an update larger than a frame", () => {
+  it("is split so no frame exceeds the limit, and a receiving peer puts it back together", async () => {
+    const limit = 64 * 1024;
+    const { socket } = await makeSocket();
+    const ws = latest();
+    ws.open();
+    ws.deliver(joinAck({ limits: { ...LIMITS, max_frame_bytes: limit } }));
+    const big = new Uint8Array(300 * 1024);
+    for (let i = 0; i < big.length; i++) big[i] = (i * 31) & 0xff;
+    const wrapped = wrapWithLengthAndPad(big);
+    await socket.sendUpdate(wrapped.slice());
+
+    // Acknowledge each frame as it goes out, until what has been sent adds up
+    // to at least the whole update.
+    let acked = 0;
+    await waitFor(() => {
+      const sent = docFrames(ws);
+      while (acked < sent.length) {
+        ws.deliver(docAck());
+        acked++;
+      }
+      return sent.reduce((n, f) => n + f.length, 0) >= wrapped.length;
+    }, 5000);
+    const frames = docFrames(ws);
+    expect(frames.length).toBeGreaterThan(1);
+    for (const f of frames) expect(f.length).toBeLessThanOrEqual(limit);
+    await waitFor(() => socket.readyForSnapshot(), 2000);
+
+    const received: Uint8Array[] = [];
+    await makeSocket({ events: { onDocUpdate: (_s, pt) => received.push(pt) } });
+    const rws = latest();
+    rws.open();
+    rws.deliver(joinAck());
+    // What the server relays: the frame with the sender's peer id spliced in.
+    for (const f of frames) rws.deliver(concatBytes(f.slice(0, HEADER_LEN), PEER, f.slice(HEADER_LEN)));
+    await waitFor(() => received.length === 1);
+    expect(received[0]).toEqual(wrapped);
+  });
+
+  it("marks its parts so a client that predates them drops a part rather than applying it", () => {
+    const wrapped = wrapWithLengthAndPad(new Uint8Array(5000).fill(3));
+    const parts = splitIntoParts(wrapped, 1500, new Uint8Array(8).fill(1));
+    expect(parts.length).toBeGreaterThan(1);
+    for (const p of parts) {
+      expect(new DataView(p.buffer).getUint32(0)).toBe(PART_MARKER);
+      expect(() => unwrapLengthPrefix(p)).toThrow();
+      expect(p.length % 256).toBe(0);
+    }
+    expect(concatBytes(...parts.map((p) => readPart(p)!.data))).toEqual(wrapped);
+  });
+});

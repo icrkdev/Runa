@@ -1,7 +1,7 @@
 # RÚNA Wire Protocol v1
 
 Normative reference for the frame format, handshake, and relay semantics.
-Normative reference for implementers. Four documented amendments appear at
+Normative reference for implementers. Five documented amendments appear at
 the bottom — additions the original design required implicitly but did not
 enumerate in its frame-type table.
 
@@ -13,7 +13,7 @@ enumerate in its frame-type table.
   JOIN_ACK, PEER_JOIN/LEAVE, PURGE_ACK, ERROR) are UTF-8 JSON. Document
   payloads are ciphertext blobs; shred payloads are canonical CBOR *inside*
   AES-256-GCM.
-- Limits: frame ≤ 256 KiB · room log ≤ 32 MiB · peers per room ≤ 32.
+- Limits: frame ≤ 1 MiB · room log ≤ 32 MiB · peers per room ≤ 32.
   Configurable downward only.
 
 ## Frame layout
@@ -40,14 +40,15 @@ Encrypted body = `counter` (8 B BE) `||` AES-256-GCM output `||` tag (16 B).
 
 | Value | Name | Dir | Body |
 |---|---|---|---|
-| 0x01 | JOIN | C→S | JSON `{auth_key_b64? (32 B), session_pubkey_b64 (32 B), client_version}` |
-| 0x02 | JOIN_ACK | S→C | JSON `{peer_id, epoch, log_len, base_index, has_snapshot, ttl, kdf:{alg,m,t,p,salt_b64}, roster:[{peer_id,pubkey_b64,joined_at_seq}]}` |
-| 0x03 | DOC_UPDATE | both | encrypted Yjs update |
+| 0x01 | JOIN | C→S | JSON `{auth_key_b64? (32 B), session_pubkey_b64 (32 B), client_version, acks?}` |
+| 0x02 | JOIN_ACK | S→C | JSON `{peer_id, epoch, log_len, base_index, has_snapshot, ttl, kdf:{alg,m,t,p,salt_b64}, roster:[{peer_id,pubkey_b64,joined_at_seq}], acks?, limits?:{max_frame_bytes,frames_per_sec,bytes_per_sec}}` — amendment E |
+| 0x03 | DOC_UPDATE | both | encrypted Yjs update, or one part of a split one — amendment E |
 | 0x04 | DOC_SYNC_REQ | C→S | JSON `{from_index}` (index form; state vectors leak clocks and are not used) |
 | 0x05 | DOC_SYNC_RESP | S→C | one or more encrypted entries: snapshot blob then tail |
 | 0x06 | AWARENESS | both | encrypted y-protocols awareness update |
 | 0x07 | PEER_JOIN | S→C | JSON `{peer_id, pubkey_b64, joined_at_seq}` |
 | 0x08 | PEER_LEAVE | S→C | JSON `{peer_id, reason}` |
+| 0x09 | **DOC_ACK** | S→C | JSON `{ok, index?}`, to the sender of each DOC_UPDATE, only if its JOIN asked — amendment E |
 | 0x10 | SHRED_REQUEST / SHRED_VOTE / SHRED_CANCEL (0x11, 0x12) | both | encrypted canonical-CBOR payload + Ed25519 signature over CBOR. No count fields exist anywhere. |
 | 0x13 | PURGE | S→C | JSON `{reason}` tombstone signal |
 | 0x14 | **PURGE_ACK** | C→S | JSON `{request_id}` — amendment A, below |
@@ -76,7 +77,8 @@ identical timing (250 ms floor on the auth path).
 - The server parses **only** the 32-byte header (plus SNAPSHOT's 8-byte index).
   It never reads past that boundary. Any function that inspects payload bytes is
   a design violation.
-- DOC_UPDATE: append to room log (cap enforced), fan out to other peers.
+- DOC_UPDATE: append to room log (cap enforced), fan out to other peers, and
+  acknowledge to the sender if it asked (amendment E).
 - DOC_SYNC_REQ `{from_index}`: if `from_index <= base_index` send latest
   snapshot (if any) followed by the full tail; else send tail from
   `from_index`. Responses are re-framed as encrypted blobs relayed verbatim
@@ -121,7 +123,7 @@ original_body`. These 16 bytes are written by the server, never inspected by
 it, and are consumed by receivers as an AAD input. Sync responses reuse the
 stored entry's original frame type; frame type 0x05 therefore stays reserved.
 Server-authored event frames (JOIN_ACK, PEER_JOIN, PEER_LEAVE, PURGE, ERROR,
-TTL_EXTEND) are **never enveloped** — receivers read their JSON directly from
+TTL_EXTEND, DOC_ACK) are **never enveloped** — receivers read their JSON directly from
 the body; only relayed peer ciphertext carries the sender envelope. These
 frames also carry epoch 0 by construction, so receivers must exempt them from
 the epoch-staleness check. Both invariants are pinned by tests in
@@ -138,6 +140,40 @@ cannot pin a room in memory indefinitely. The broadcast carries both
 added its own request locally would drift past the real deadline once the
 clamp engaged. The clear-text form is acceptable because TTL is public
 scheduling information by design — the server must know it to enforce it.
+
+**E · DOC_ACK (0x09), resending, and split updates.** DOC_UPDATE was
+fire-and-forget, so a client could not tell an update the server stored from
+one written into a connection that had already died — which a browser goes on
+reporting as open until TCP gives up, often for minutes. Edits typed in that
+window were lost, and nothing noticed.
+
+- A client that sends `acks: true` in JOIN receives one DOC_ACK per DOC_UPDATE
+  it sends, in the order sent: `{ok: true, index}` once the frame is in the
+  log, `{ok: false}` when the log refused it. Its JOIN_ACK carries `acks: true`
+  and `limits: {max_frame_bytes, frames_per_sec, bytes_per_sec}`. A client that
+  does not ask sees neither field and never receives 0x09.
+- The client keeps each update until it is acknowledged and resends whatever
+  is outstanding on its next connection, paced under half of `limits`. An
+  update unacknowledged for ten seconds means the connection is dead, and the
+  client abandons it without waiting for the browser to agree. Yjs discards
+  what it already holds, so resending something that did arrive costs log
+  space and nothing else.
+- No encrypted frame is sent before JOIN_ACK. Until then the client does not
+  know the peer id that receivers bind into the AAD, so anything it sent would
+  be rejected by every peer while the server stored it regardless.
+- An update that does not fit in `max_frame_bytes` is sent as parts, each its
+  own DOC_UPDATE. A part's plaintext is `u32 0xFFFFFFFF` ‖ 8-byte random
+  message id ‖ `index` u16 ‖ `total` u16 ‖ data length u32 ‖ data ‖ zero
+  padding to a 256-byte bucket. The marker is larger than any real length
+  prefix, so a client that predates parts drops one as corrupt rather than
+  applying half an update. Receivers apply the update once every part has
+  arrived, and do not take a snapshot while any message is incomplete.
+
+The server writes DOC_ACK straight to the sender's socket rather than through
+its outbound queue, so a queue full of log replay cannot cost a client its
+acks. An ack is not authenticated: a hostile server can acknowledge an update
+and then discard it. That is no new power — it holds the log and can drop
+anything — and it is the same exposure every relayed frame already has.
 
 All amendments keep the invariant that matters: the server never learns
 anything about document content.

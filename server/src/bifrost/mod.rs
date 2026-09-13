@@ -54,6 +54,9 @@ struct JoinBody {
     auth_key: Option<String>,
     #[serde(default)]
     pubkey: Option<String>,
+    /// Ask for a DOC_ACK after every DOC_UPDATE this connection sends.
+    #[serde(default)]
+    acks: bool,
 }
 
 #[derive(Serialize)]
@@ -62,6 +65,18 @@ struct RosterJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pubkey: Option<String>,
     joined_at_seq: u64,
+}
+
+/// The limits a connection is held to, sent to a client that resends its
+/// backlog so it can pace itself under them. Without this, a client coming
+/// back from a long outage with hundreds of queued edits sends them at once,
+/// trips the per-connection rate limit, is disconnected, reconnects, and sends
+/// them all again — forever.
+#[derive(Serialize)]
+struct LimitsJson {
+    max_frame_bytes: usize,
+    frames_per_sec: u32,
+    bytes_per_sec: u64,
 }
 
 #[derive(Serialize)]
@@ -87,6 +102,12 @@ struct JoinAck {
     elapsed_secs: u64,
     ceiling_optout: bool,
     kdf: KdfJson,
+    /// True only when the JOIN asked for acks. A client that predates them
+    /// never sees the field, and never receives a frame type it does not know.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    acks: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limits: Option<LimitsJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_blob: Option<String>,
     roster: Vec<RosterJson>,
@@ -279,7 +300,8 @@ async fn run_connection(
     }
 
     let join: JoinBody = serde_json::from_slice(&first[HEADER_LEN..])
-        .unwrap_or(JoinBody { auth_key: None, pubkey: None });
+        .unwrap_or(JoinBody { auth_key: None, pubkey: None, acks: false });
+    let wants_acks = join.acks;
 
     // A throttled room must not answer differently from a room that does not
     // exist. Returning 4002 here was a clean existence oracle: five bad
@@ -351,6 +373,12 @@ async fn run_connection(
                 p: room.kdf_p,
                 salt: B64.encode(room.salt),
             },
+            acks: wants_acks,
+            limits: wants_acks.then(|| LimitsJson {
+                max_frame_bytes: cfg.max_frame_bytes,
+                frames_per_sec: cfg.frames_per_conn_per_sec,
+                bytes_per_sec: cfg.bytes_per_conn_per_sec,
+            }),
             config_blob: room.config_blob.as_ref().map(|b| B64.encode(b)),
             roster: room
                 .roster()
@@ -391,6 +419,7 @@ async fn run_connection(
     // whole room log, so letting them queue turns one small frame into an
     // unbounded fan-out of spawned tasks and egress.
     let sync_slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let mut pending_acks: Vec<Bytes> = Vec::new();
 
     loop {
         tokio::select! {
@@ -405,10 +434,30 @@ async fn run_connection(
                             conn_ok = Err(WireCode::RateLimited);
                             break;
                         }
-                        match process_frame(&state, &room, peer_id, &data, &sync_slot).await {
+                        let acks_out = wants_acks.then_some(&mut pending_acks);
+                        match process_frame(&state, &room, peer_id, &data, &sync_slot, acks_out).await {
                             Ok(()) => {}
                             Err(Some(code)) => { conn_ok = Err(code); break; }
                             Err(None) => {}
+                        }
+                        // Written straight to this socket, in order, rather
+                        // than through the peer's outbound queue. That queue
+                        // refuses a frame when it is full and the peer is
+                        // dropped, and during a large log replay it is full:
+                        // a client typing through its own sync would be
+                        // dropped, reconnect, replay, and be dropped again.
+                        // Awaiting the write also paces this reader to its
+                        // own socket, which is the backpressure it should
+                        // have.
+                        let mut ack_write_failed = false;
+                        for ack in pending_acks.drain(..) {
+                            if sink.send(Message::Binary(ack)).await.is_err() {
+                                ack_write_failed = true;
+                                break;
+                            }
+                        }
+                        if ack_write_failed {
+                            break;
                         }
                     }
                     Some(Ok(Message::Text(_))) => {
@@ -473,6 +522,7 @@ async fn process_frame(
     sender: [u8; 16],
     data: &[u8],
     sync_slot: &std::sync::Arc<tokio::sync::Semaphore>,
+    acks: Option<&mut Vec<Bytes>>,
 ) -> Result<(), Option<WireCode>> {
     let Some(header) = Header::decode(data) else {
         return Err(Some(WireCode::ProtocolError));
@@ -493,8 +543,26 @@ async fn process_frame(
                 log.append(sender, FT_DOC_UPDATE, header.epoch, frame_bytes.clone())
             };
             match append_result {
-                Ok(_) => room.broadcast(&frame_bytes, Some(sender)).await,
-                Err(_) => send_direct(room, sender, error_frame(room.id, WireCode::FrameTooLarge)),
+                Ok(index) => {
+                    room.broadcast(&frame_bytes, Some(sender)).await;
+                    // The client keeps every update until this comes back, and
+                    // sends it again on its next connection if it never does.
+                    // That is what makes an edit typed into a connection that
+                    // has silently died recoverable: the browser reports such
+                    // a socket as open until TCP gives up, and nothing sent in
+                    // that time arrives anywhere.
+                    if let Some(out) = acks {
+                        let body = serde_json::json!({ "ok": true, "index": index });
+                        out.push(json_frame(room.id, FT_DOC_ACK, &body));
+                    }
+                }
+                Err(_) => {
+                    send_direct(room, sender, error_frame(room.id, WireCode::FrameTooLarge));
+                    if let Some(out) = acks {
+                        let body = serde_json::json!({ "ok": false });
+                        out.push(json_frame(room.id, FT_DOC_ACK, &body));
+                    }
+                }
             }
             Ok(())
         }

@@ -147,3 +147,9 @@ may not return pages promptly; a root-level attacker on the host reads process
 memory regardless; JavaScript strings are immutable and cannot be individually
 zeroized, which is why client wipe ends in realm destruction via hard
 navigation. `zeroize` narrows a window; it does not close a door.
+
+Delivery acknowledgements come from the server and are not authenticated. A
+client stops resending an edit once the server says it stored it, so a hostile
+server can confirm an edit and then throw it away. That is the same power as
+dropping it, which a server holding the only copy of the log always had; the
+acknowledgement is there to survive a dead connection, not a dishonest relay.

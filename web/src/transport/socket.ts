@@ -35,6 +35,11 @@ export interface JoinAck {
   kdf: { alg: string; m_kib: number; t: number; p: number; salt: string };
   config_blob?: string;
   roster: { peer_id: string; pubkey?: string; joined_at_seq: number }[];
+  /// True when the server acknowledges every DOC_UPDATE it stores. A server
+  /// that predates acks omits it, and its updates are sent once and trusted.
+  acks?: boolean;
+  /// What this connection is held to, so a resend can be paced under it.
+  limits?: { max_frame_bytes: number; frames_per_sec: number; bytes_per_sec: number };
 }
 
 export interface SocketEvents {
@@ -53,6 +58,10 @@ export interface SocketEvents {
   onSnapshotTooLarge(bytes: number): void;
   onEpochStale(epoch: number): void;
   onDisconnected(): void;
+  /// This many of our document frames are now in the room log — or, against
+  /// a server without acks, have been sent. The snapshot index is estimated
+  /// from it.
+  onUpdatesStored?(count: number): void;
 }
 
 export interface SocketOptions {
@@ -64,14 +73,145 @@ export interface SocketOptions {
   events: SocketEvents;
   insecureAllowed?: boolean;
   maxBackoffMs?: number;
+  /// Merge queued updates before a backlog is resent. Takes and returns
+  /// wrapped payloads; without it every queued update goes out on its own.
+  compactUpdates?: (wrapped: Uint8Array[]) => Uint8Array[];
+  /// How long a sent update may go unacknowledged before the connection it
+  /// went out on is treated as dead.
+  ackTimeoutMs?: number;
 }
 
 const textDecoder = new TextDecoder();
 
-/// Must not exceed the server's RUNA_MAX_FRAME. Sending an oversized frame
-/// does not fail gracefully: the server closes the connection with 4004, and
-/// since snapshots are retried on a timer that becomes a disconnect loop.
-const MAX_FRAME_BYTES = 1024 * 1024;
+interface Limits {
+  maxFrameBytes: number;
+  framesPerSec: number;
+  bytesPerSec: number;
+}
+
+/// The server's defaults. Used until a JOIN_ACK says otherwise, and against a
+/// server that predates advertising its limits.
+const DEFAULT_LIMITS: Limits = {
+  maxFrameBytes: 1024 * 1024,
+  framesPerSec: 100,
+  bytesPerSec: 1024 * 1024,
+};
+
+/// What encryption adds to a DOC_UPDATE plaintext on the wire: the header,
+/// the nonce session and counter, and the GCM tag.
+const DOC_FRAME_OVERHEAD = HEADER_LEN + 4 + 8 + 16;
+
+/// An update unacknowledged for this long means the connection it went out on
+/// has died without the browser noticing. A browser keeps such a socket OPEN
+/// until TCP gives up, which takes minutes, and everything sent into it in
+/// that time is lost.
+const ACK_TIMEOUT_MS = 10_000;
+
+/// Updates queued while disconnected are merged once there are this many,
+/// rather than holding one entry per keystroke for the whole outage.
+const COMPACT_WHILE_OFFLINE_AT = 256;
+
+const REASSEMBLY_MAX_BYTES = 64 * 1024 * 1024;
+const REASSEMBLY_MAX_GROUPS = 32;
+/// A message whose parts stop arriving is abandoned after this long. Parts
+/// can be orphaned legitimately — a sender whose connection died mid-message,
+/// or a snapshot that compacted away the first parts of one already applied.
+const REASSEMBLY_STALE_MS = 120_000;
+
+/// A DOC_UPDATE too large for one frame travels as parts. Each part's
+/// plaintext opens with a length no real payload can have, so a client that
+/// predates parts reads one as a corrupt update and drops it rather than
+/// applying half of something:
+///
+///   u32 0xFFFFFFFF ‖ message id (8 B) ‖ index u16 ‖ total u16 ‖ data length u32 ‖ data ‖ zero pad
+///
+/// The id is random and stays with the message across reconnects, so a part
+/// that is sent twice is recognised as the same part.
+export const PART_MARKER = 0xffffffff;
+export const PART_HEADER_LEN = 20;
+
+export function splitIntoParts(wrapped: Uint8Array, maxData: number, id: Uint8Array): Uint8Array[] {
+  if (id.length !== 8) throw new Error("part id must be 8 bytes");
+  const size = Math.max(1, Math.floor(maxData));
+  const total = Math.ceil(wrapped.length / size);
+  if (total < 2) throw new Error("an update that fits in one frame is not split");
+  if (total > 0xffff) throw new Error("update too large to split");
+  const parts: Uint8Array[] = [];
+  for (let i = 0; i < total; i++) {
+    const data = wrapped.subarray(i * size, Math.min(wrapped.length, (i + 1) * size));
+    const unpadded = PART_HEADER_LEN + data.length;
+    const rem = unpadded % 256;
+    const out = new Uint8Array(unpadded + (rem === 0 ? 0 : 256 - rem));
+    const view = new DataView(out.buffer);
+    view.setUint32(0, PART_MARKER, false);
+    out.set(id, 4);
+    view.setUint16(12, i, false);
+    view.setUint16(14, total, false);
+    view.setUint32(16, data.length, false);
+    out.set(data, PART_HEADER_LEN);
+    parts.push(out);
+  }
+  return parts;
+}
+
+export interface Part {
+  id: string;
+  index: number;
+  total: number;
+  data: Uint8Array;
+}
+
+function isPart(plaintext: Uint8Array): boolean {
+  return (
+    plaintext.length >= 4 &&
+    new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength).getUint32(0, false) ===
+      PART_MARKER
+  );
+}
+
+/// Null for anything that is not a well-formed part.
+export function readPart(plaintext: Uint8Array): Part | null {
+  if (plaintext.length < PART_HEADER_LEN || !isPart(plaintext)) return null;
+  const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
+  const index = view.getUint16(12, false);
+  const total = view.getUint16(14, false);
+  const len = view.getUint32(16, false);
+  if (total < 2 || index >= total || PART_HEADER_LEN + len > plaintext.length) return null;
+  let id = "";
+  for (let i = 4; i < 12; i++) id += plaintext[i].toString(16).padStart(2, "0");
+  return { id, index, total, data: plaintext.slice(PART_HEADER_LEN, PART_HEADER_LEN + len) };
+}
+
+/// One update this client has written, held until the room has stored it.
+interface Pending {
+  wrapped: Uint8Array;
+  /// Built the first time the update is found too large for one frame.
+  parts: Uint8Array[] | null;
+  /// Frames the server has confirmed storing.
+  acked: number;
+  /// Frames sent on the current connection, acknowledged or not.
+  sent: number;
+  /// The log refused it. Resending cannot help.
+  refused: boolean;
+}
+
+interface Group {
+  total: number;
+  parts: (Uint8Array | undefined)[];
+  have: number;
+  bytes: number;
+  at: number;
+}
+
+function limitsFrom(raw: JoinAck["limits"]): Limits {
+  const pick = (v: unknown, fallback: number, lo: number, hi: number) =>
+    typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.floor(v))) : fallback;
+  return {
+    maxFrameBytes: pick(raw?.max_frame_bytes, DEFAULT_LIMITS.maxFrameBytes, 4096, 8 * 1024 * 1024),
+    framesPerSec: pick(raw?.frames_per_sec, DEFAULT_LIMITS.framesPerSec, 2, 1_000_000),
+    bytesPerSec: pick(raw?.bytes_per_sec, DEFAULT_LIMITS.bytesPerSec, 4096, 2 ** 31),
+  };
+}
 
 export class RunaSocket {
   private ws: WebSocket | null = null;
@@ -84,6 +224,22 @@ export class RunaSocket {
   private joined = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   readonly events: SocketEvents;
+
+  /// Bumped whenever a connection starts or is lost, so work that awaited
+  /// across the change can tell it is stale.
+  private generation = 0;
+  private acksEnabled = false;
+  private limits: Limits = DEFAULT_LIMITS;
+  private outbox: Pending[] = [];
+  /// One entry per frame sent on the current connection and not yet
+  /// acknowledged, in send order. The server acknowledges in the order it
+  /// reads, so the head is always the frame an ack refers to.
+  private inflight: { item: Pending; sentAt: number }[] = [];
+  private pumping = false;
+  private bucket = { frames: 0, bytes: 0, at: 0 };
+  private livenessTimer: ReturnType<typeof setInterval> | null = null;
+  private reassembly = new Map<string, Group>();
+  private reassemblyBytes = 0;
 
   constructor(private opts: SocketOptions) {
     this.maxBackoffMs = opts.maxBackoffMs ?? 15_000;
@@ -109,20 +265,23 @@ export class RunaSocket {
     if (url.startsWith("ws://") && !this.opts.insecureAllowed) {
       throw new Error("insecure ws:// refused; RUNA_ALLOW_INSECURE=1 required");
     }
-    this.ws = new WebSocket(url);
-    this.ws.binaryType = "arraybuffer";
+    const ws = new WebSocket(url);
+    this.ws = ws;
+    ws.binaryType = "arraybuffer";
     this.joined = false;
-    this.ws.onopen = () => {
+    this.generation += 1;
+    ws.onopen = () => {
       void this.sendJoin();
     };
-    this.ws.onmessage = (ev) => {
+    ws.onmessage = (ev) => {
       void this.handleMessage(new Uint8Array(ev.data as ArrayBuffer));
     };
-    this.ws.onclose = () => {
+    ws.onclose = () => {
+      if (this.ws === ws) this.connectionLost();
       this.events.onDisconnected();
       if (!this.closedByUs) this.scheduleReconnect();
     };
-    this.ws.onerror = () => {};
+    ws.onerror = () => {};
   }
 
   private scheduleReconnect(): void {
@@ -141,6 +300,53 @@ export class RunaSocket {
     }, this.backoffMs + jitter);
   }
 
+  /// Everything a connection held that dies with it. Queued updates survive:
+  /// they are resent on the next connection.
+  private connectionLost(): void {
+    this.joined = false;
+    this.generation += 1;
+    this.inflight = [];
+    this.stopLiveness();
+  }
+
+  /// Give up on a connection that has stopped acknowledging, without waiting
+  /// for the browser to agree that it is dead. Closing it asks for a closing
+  /// handshake the other end will never answer, and browsers wait up to a
+  /// minute for that before reporting the close, so its handlers are detached
+  /// and the reconnect starts now.
+  private abandonConnection(): void {
+    const ws = this.ws;
+    if (!ws) return;
+    this.ws = null;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    try {
+      ws.close();
+    } catch {
+      /* already closing */
+    }
+    this.connectionLost();
+    this.events.onDisconnected();
+    this.scheduleReconnect();
+  }
+
+  /// Forget everything queued or half-received. For when the room is gone or
+  /// being wiped: there is nowhere left to send it, and it is document text.
+  private discardQueues(): void {
+    for (const item of this.outbox) {
+      item.wrapped.fill(0);
+      for (const p of item.parts ?? []) p.fill(0);
+    }
+    this.outbox = [];
+    this.inflight = [];
+    for (const g of this.reassembly.values()) for (const p of g.parts) p?.fill(0);
+    this.reassembly.clear();
+    this.reassemblyBytes = 0;
+    this.stopLiveness();
+  }
+
   /// Stop retrying without tearing down keys — used when the server says the
   /// room is gone, where reconnecting can only ever fail again.
   stopReconnecting(): void {
@@ -149,6 +355,7 @@ export class RunaSocket {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.discardQueues();
     try {
       this.ws?.close();
     } catch {
@@ -162,6 +369,7 @@ export class RunaSocket {
     this.joined = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.discardQueues();
     this.ws?.close();
     this.ws = null;
     // Final teardown is the only point at which the auth key may be wiped.
@@ -179,6 +387,7 @@ export class RunaSocket {
   /// realm takes them with it.
   dropKeys(): void {
     this.closedByUs = true;
+    this.discardQueues();
     (this.opts as unknown as { contentKey: CryptoKey | null }).contentKey = null;
   }
 
@@ -190,6 +399,7 @@ export class RunaSocket {
       auth_key: toB64(keyCopy),
       pubkey: toB64(this.opts.identity.publicKeyRaw),
       client_version: "runa/1.0",
+      acks: true,
     };
     keyCopy.fill(0);
     const frame = buildJsonFrame(FT.JOIN, this.opts.roomId, this.epoch, body);
@@ -213,7 +423,8 @@ export class RunaSocket {
       header.frameType === FT.PEER_JOIN ||
       header.frameType === FT.PEER_LEAVE ||
       header.frameType === FT.PURGE ||
-      header.frameType === FT.TTL_EXTEND;
+      header.frameType === FT.TTL_EXTEND ||
+      header.frameType === FT.DOC_ACK;
     if (!isServerEvent && header.epoch < this.epoch) {
       this.events.onEpochStale(header.epoch);
       return;
@@ -236,7 +447,22 @@ export class RunaSocket {
       // in place: the nonce stream must never restart.
       this.peerId = fromB64(ack.peer_id);
       this.cipher.bindPeerId(this.peerId);
+      // A successful join is what ends a run of failed attempts. The backoff
+      // used to only ever grow, so a session that had reconnected a handful
+      // of times waited fifteen seconds on every reconnect after that.
+      this.backoffMs = 250;
+      this.acksEnabled = ack.acks === true;
+      this.limits = limitsFrom(ack.limits);
+      this.bucket = { frames: this.limits.framesPerSec, bytes: this.limits.bytesPerSec, at: performance.now() };
+      for (const item of this.outbox) item.sent = item.acked;
+      this.compactOutbox();
+      if (this.acksEnabled) this.startLiveness();
       this.events.onJoinAck(ack);
+      void this.pump();
+      return;
+    }
+    if (header.frameType === FT.DOC_ACK) {
+      this.handleAck(parsed.body);
       return;
     }
     if (header.frameType === FT.ERROR) {
@@ -320,7 +546,8 @@ export class RunaSocket {
             senderId,
             env.body,
           );
-          this.events.onDocUpdate(senderId, pt);
+          const whole = this.acceptPlaintext(pt);
+          if (whole) this.events.onDocUpdate(senderId, whole);
         } catch {
           return;
         }
@@ -379,6 +606,83 @@ export class RunaSocket {
     }
   }
 
+  private handleAck(body: Uint8Array): void {
+    let ok: boolean;
+    try {
+      ok = (JSON.parse(textDecoder.decode(body)) as { ok?: unknown }).ok === true;
+    } catch {
+      return;
+    }
+    const entry = this.inflight.shift();
+    if (!entry) return;
+    const { item } = entry;
+    if (item.refused) return;
+    if (!ok) {
+      // The log is full. Resending cannot help, and the ERROR sent alongside
+      // this has already told the person their edits did not reach anyone.
+      item.refused = true;
+      this.removeFromOutbox(item);
+      return;
+    }
+    item.acked += 1;
+    this.events.onUpdatesStored?.(1);
+    if (item.acked >= this.framesFor(item).length) this.removeFromOutbox(item);
+  }
+
+  /// Receive one DOC_UPDATE plaintext. Returns a whole update to apply, or
+  /// null while a split one is still arriving.
+  private acceptPlaintext(pt: Uint8Array): Uint8Array | null {
+    if (!isPart(pt)) return pt;
+    const part = readPart(pt);
+    if (!part) return null;
+    this.pruneReassembly();
+    let group = this.reassembly.get(part.id);
+    if (group && group.total !== part.total) return null;
+    if (!group) {
+      group = { total: part.total, parts: new Array(part.total), have: 0, bytes: 0, at: performance.now() };
+      this.reassembly.set(part.id, group);
+    }
+    if (group.parts[part.index]) return null;
+    group.parts[part.index] = part.data;
+    group.have += 1;
+    group.bytes += part.data.length;
+    group.at = performance.now();
+    this.reassemblyBytes += part.data.length;
+    if (group.have < group.total) {
+      this.enforceReassemblyBounds(part.id);
+      return null;
+    }
+    this.dropGroup(part.id, group);
+    return concatBytes(...(group.parts as Uint8Array[]));
+  }
+
+  private dropGroup(id: string, group: Group): void {
+    this.reassembly.delete(id);
+    this.reassemblyBytes -= group.bytes;
+  }
+
+  private pruneReassembly(): void {
+    const now = performance.now();
+    for (const [id, g] of this.reassembly) {
+      if (now - g.at > REASSEMBLY_STALE_MS) this.dropGroup(id, g);
+    }
+  }
+
+  private enforceReassemblyBounds(current: string): void {
+    while (this.reassembly.size > REASSEMBLY_MAX_GROUPS || this.reassemblyBytes > REASSEMBLY_MAX_BYTES) {
+      let oldest: [string, Group] | null = null;
+      for (const e of this.reassembly) {
+        if (e[0] !== current && (!oldest || e[1].at < oldest[1].at)) oldest = e;
+      }
+      if (!oldest) {
+        const g = this.reassembly.get(current);
+        if (g) this.dropGroup(current, g);
+        return;
+      }
+      this.dropGroup(oldest[0], oldest[1]);
+    }
+  }
+
   private ownHeader(frameType: number): Uint8Array {
     return encodeHeader({
       version: PROTOCOL_VERSION,
@@ -390,30 +694,166 @@ export class RunaSocket {
     });
   }
 
+  /// Nothing encrypted may leave before JOIN_ACK. Until then the cipher is
+  /// labelled with this client's public key instead of the peer id receivers
+  /// will check it against, so every receiver rejects the frame — while the
+  /// server, which cannot tell, stores a document update in the log for good
+  /// and would compact history under a snapshot nobody can read.
+  private canSendDocuments(): boolean {
+    return this.joined && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /// Queue an update for the room. It is sent once the connection is joined,
+  /// and kept — across reconnects — until the server says it stored it.
   async sendUpdate(plaintext: Uint8Array): Promise<void> {
-    const header = this.ownHeader(FT.DOC_UPDATE);
-    const envelope = await this.cipher.encrypt(header, plaintext);
-    // Only a document frame counts as something lost. Presence and snapshots
-    // go through the same door, but a dropped heartbeat expires and is sent
-    // again, and a dropped snapshot costs a compaction rather than any data.
-    if (!this.rawSend(concatBytes(header, envelope))) {
-      this.droppedWhileClosed = true;
+    if (this.closedByUs) return;
+    this.outbox.push({ wrapped: plaintext, parts: null, acked: 0, sent: 0, refused: false });
+    if (!this.joined && this.outbox.length >= COMPACT_WHILE_OFFLINE_AT) this.compactOutbox();
+    void this.pump();
+  }
+
+  /// Whether a snapshot taken now would cover what it claims to: joined, with
+  /// nothing of ours still unstored and nothing of anyone's half-received.
+  readyForSnapshot(): boolean {
+    this.pruneReassembly();
+    return (
+      this.canSendDocuments() &&
+      this.outbox.length === 0 &&
+      this.inflight.length === 0 &&
+      this.reassembly.size === 0
+    );
+  }
+
+  private framesFor(item: Pending): Uint8Array[] {
+    if (item.parts) return item.parts;
+    if (item.wrapped.length + DOC_FRAME_OVERHEAD <= this.limits.maxFrameBytes) return [item.wrapped];
+    const id = new Uint8Array(8);
+    crypto.getRandomValues(id);
+    const room = this.limits.maxFrameBytes - DOC_FRAME_OVERHEAD - PART_HEADER_LEN - 255;
+    item.parts = splitIntoParts(item.wrapped, Math.max(1024, Math.min(room, Math.floor(this.limits.bytesPerSec / 2))), id);
+    return item.parts;
+  }
+
+  private removeFromOutbox(item: Pending): void {
+    const i = this.outbox.indexOf(item);
+    if (i >= 0) this.outbox.splice(i, 1);
+  }
+
+  /// Merge updates that have not been partly stored into fewer. A backlog of
+  /// keystrokes resent one frame each is slow at a paced rate, and a split
+  /// update keeps its parts so a resend completes the message it started.
+  private compactOutbox(): void {
+    const compact = this.opts.compactUpdates;
+    if (!compact) return;
+    const loose = this.outbox.filter((i) => i.acked === 0 && !i.parts && !i.refused);
+    if (loose.length < 2) return;
+    let merged: Uint8Array[];
+    try {
+      merged = compact(loose.map((i) => i.wrapped));
+    } catch {
+      return;
+    }
+    const looseSet = new Set(loose);
+    this.outbox = [
+      ...this.outbox.filter((i) => !looseSet.has(i)),
+      ...merged.map((wrapped) => ({ wrapped, parts: null, acked: 0, sent: 0, refused: false })),
+    ];
+  }
+
+  /// Send queued frames, one at a time and in order, for as long as the
+  /// connection is joined. Order matters twice over: acks are matched to
+  /// frames by position, and a part must not overtake the parts before it.
+  private async pump(): Promise<void> {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      while (this.canSendDocuments()) {
+        const item = this.outbox.find((i) => !i.refused && i.sent < this.framesFor(i).length);
+        if (!item) return;
+        const plaintext = this.framesFor(item)[item.sent];
+        const gen = this.generation;
+        await this.pace(plaintext.length + DOC_FRAME_OVERHEAD);
+        if (gen !== this.generation || item.refused || !this.outbox.includes(item)) continue;
+        if (!this.canSendDocuments()) return;
+        const header = this.ownHeader(FT.DOC_UPDATE);
+        const envelope = await this.cipher.encrypt(header, plaintext);
+        if (gen !== this.generation) continue;
+        if (!this.rawSend(concatBytes(header, envelope))) return;
+        item.sent += 1;
+        if (this.acksEnabled) {
+          this.inflight.push({ item, sentAt: performance.now() });
+        } else {
+          item.acked = item.sent;
+          this.events.onUpdatesStored?.(1);
+          if (item.acked >= this.framesFor(item).length) this.removeFromOutbox(item);
+        }
+      }
+    } finally {
+      this.pumping = false;
     }
   }
 
+  /// Hold to half of the rate the server enforces. The rest is headroom for
+  /// presence, shred frames and sync requests, which share the same limit.
+  private async pace(bytes: number): Promise<void> {
+    const frameRate = this.limits.framesPerSec / 2;
+    const byteRate = this.limits.bytesPerSec / 2;
+    const frameCap = this.limits.framesPerSec;
+    const byteCap = Math.max(bytes, this.limits.bytesPerSec);
+    for (;;) {
+      const now = performance.now();
+      const dt = Math.max(0, now - this.bucket.at) / 1000;
+      this.bucket.at = now;
+      this.bucket.frames = Math.min(frameCap, this.bucket.frames + dt * frameRate);
+      this.bucket.bytes = Math.min(byteCap, this.bucket.bytes + dt * byteRate);
+      if (this.bucket.frames >= 1 && this.bucket.bytes >= bytes) {
+        this.bucket.frames -= 1;
+        this.bucket.bytes -= bytes;
+        return;
+      }
+      const waitFrames = this.bucket.frames >= 1 ? 0 : (1 - this.bucket.frames) / frameRate;
+      const waitBytes = this.bucket.bytes >= bytes ? 0 : (bytes - this.bucket.bytes) / byteRate;
+      await new Promise((r) => setTimeout(r, Math.max(1, Math.ceil(Math.max(waitFrames, waitBytes) * 1000))));
+    }
+  }
+
+  private startLiveness(): void {
+    this.stopLiveness();
+    const timeout = this.opts.ackTimeoutMs ?? ACK_TIMEOUT_MS;
+    const gen = this.generation;
+    this.livenessTimer = setInterval(() => {
+      if (gen !== this.generation) {
+        this.stopLiveness();
+        return;
+      }
+      const oldest = this.inflight[0];
+      if (oldest && performance.now() - oldest.sentAt > timeout) this.abandonConnection();
+    }, Math.max(25, Math.min(1000, Math.floor(timeout / 4))));
+  }
+
+  private stopLiveness(): void {
+    if (this.livenessTimer) clearInterval(this.livenessTimer);
+    this.livenessTimer = null;
+  }
+
   async sendAwareness(plaintext: Uint8Array): Promise<void> {
+    if (!this.canSendDocuments()) return;
     const header = this.ownHeader(FT.AWARENESS);
     const envelope = await this.cipher.encrypt(header, plaintext);
     this.rawSend(concatBytes(header, envelope));
   }
 
   async sendShredFrame(frameType: number, plaintext: Uint8Array): Promise<void> {
+    if (!this.canSendDocuments()) return;
     const header = this.ownHeader(frameType);
     const envelope = await this.cipher.encrypt(header, plaintext);
     this.rawSend(concatBytes(header, envelope));
   }
 
+  /// Throws when nothing was sent, so the caller does not move its sync index
+  /// past history the server still holds.
   async sendSnapshot(plaintext: Uint8Array, covers: bigint): Promise<void> {
+    if (!this.canSendDocuments()) throw new Error("not joined");
     // The truncation index rides outside the ciphertext but inside the AEAD:
     // a relay that rewrites it breaks authentication (amendment B).
     const header = this.ownHeader(FT.SNAPSHOT);
@@ -422,13 +862,13 @@ export class RunaSocket {
     new DataView(body.buffer).setBigUint64(0, covers, false);
     body.set(envelope, 8);
     const frame = buildFrame(FT.SNAPSHOT, this.opts.roomId, this.epoch, this.cipher.sess, body);
-    if (frame.length > MAX_FRAME_BYTES) {
+    if (frame.length > this.limits.maxFrameBytes) {
       // Skipping leaves the log uncompacted, which is a slow problem.
       // Sending it closes the connection, which is an immediate one.
       this.events.onSnapshotTooLarge(frame.length);
-      return;
+      throw new Error("snapshot too large");
     }
-    this.rawSend(frame);
+    if (!this.rawSend(frame)) throw new Error("snapshot not sent");
   }
 
   sendSyncRequest(fromIndex: number): void {
@@ -443,26 +883,6 @@ export class RunaSocket {
 
   sendPurgeAck(requestId: string): void {
     this.rawSend(buildJsonFrame(FT.PURGE_ACK, this.opts.roomId, this.epoch, { request_id: requestId }));
-  }
-
-  /// Set when a document frame was thrown away because the socket was closed.
-  ///
-  /// Dropping it is the right thing to do — there is nowhere to put it, and it
-  /// is encrypted against a cipher and a peer id that will both be different
-  /// after the next join, so it cannot be held and replayed. Dropping it
-  /// *silently* was the mistake: RunaDoc.flush() empties its buffer before
-  /// handing the update over, so what is dropped here has already left the
-  /// outbound path for good. It survives in the local document, where only its
-  /// author can see it, and the reconnect does not recover it because the
-  /// reconnect only pulls — the server never had it to send back.
-  private droppedWhileClosed = false;
-
-  /// Whether a document frame was lost since this was last asked, clearing the
-  /// flag. The caller uses it to decide whether a reconnect must push state.
-  takeDroppedWhileClosed(): boolean {
-    const dropped = this.droppedWhileClosed;
-    this.droppedWhileClosed = false;
-    return dropped;
   }
 
   /// Returns whether the bytes actually went out.
