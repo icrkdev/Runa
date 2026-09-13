@@ -21,6 +21,7 @@ if (!ENGINE) {
 const BASE = "http://127.0.0.1:3001";
 const errors = [];
 let alicePage = null;
+let serverLogRef = null;
 const enc = new TextEncoder();
 const INFO_AUTH = enc.encode("runa/v1/auth");
 const INFO_CONTENT = enc.encode("runa/v1/content");
@@ -36,6 +37,34 @@ function waitForProcessExit(proc) {
   return new Promise((resolve) => proc.once("exit", resolve));
 }
 
+/// Requests each page has started and not yet seen finish or fail.
+///
+/// A room navigation that never reaches DOMContentLoaded says nothing about
+/// why: on the Linux runner Firefox timed out loading a room twice, at two
+/// different points, with nothing in the log but the URL. DOMContentLoaded
+/// waits on every module script, so the open requests at the moment of the
+/// timeout are the answer, and this is what prints them.
+const openRequests = new Map();
+
+function trackRequests(page) {
+  const open = new Map();
+  openRequests.set(page, open);
+  page.on("request", (r) => open.set(r, `${r.method()} ${r.url()}`));
+  page.on("requestfinished", (r) => open.delete(r));
+  page.on("requestfailed", (r) => open.delete(r));
+}
+
+async function gotoRoom(page, label, url) {
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+  } catch (e) {
+    const open = [...(openRequests.get(page)?.values() ?? [])];
+    throw new Error(
+      `[${label}] ${String(e.message).split("\n")[0]}\n  requests still open: ${open.length ? "\n    " + open.join("\n    ") : "none"}`,
+    );
+  }
+}
+
 async function main() {
   const server = spawn(`${process.cwd()}/../target/release/runa-server`, [], {
     env: { ...process.env, RUNA_DIST: "dist", RUNA_BIND: "127.0.0.1:3001" },
@@ -44,6 +73,7 @@ async function main() {
   const serverLog = [];
   server.stdout.on("data", (d) => serverLog.push(d.toString()));
   server.stderr.on("data", (d) => serverLog.push(d.toString()));
+  serverLogRef = serverLog;
   const killServer = () => { try { server.kill(); } catch {} };
   process.on("exit", killServer);
   process.on("uncaughtException", (e) => { console.error("UNCAUGHT:", e); killServer(); process.exit(1); });
@@ -78,10 +108,6 @@ async function main() {
 
   const browser = await ENGINE.launch();
 
-  /// Pages whose network has been taken away. Consulted by the route
-  /// installed in makePage, so a sever survives the reconnects that follow.
-  const severed = new WeakSet();
-
   async function makePage(label) {
     const page = await browser.newPage();
     // Keep a handle on every WebSocket the page opens, so a test can sever one.
@@ -93,6 +119,11 @@ async function main() {
       const Patched = function (...args) {
         const ws = new Original(...args);
         opened.push(ws);
+        // Severed: refuse the connection. Closing while still CONNECTING means
+        // onopen can never fire, so nothing reaches the server, and the client
+        // gets the close event after it has attached its handlers — the same
+        // thing it sees when the network is really gone.
+        if (window.__runaSevered) ws.close();
         return ws;
       };
       Patched.prototype = Original.prototype;
@@ -104,17 +135,7 @@ async function main() {
       if (t === "error") errors.push(`[${label}] console.error: ${msg.text()}`);
     });
     page.on("pageerror", (err) => errors.push(`[${label}] pageerror: ${err.message}`));
-    // Route every WebSocket through here from the very start, because the
-    // route is installed into the page as an init script and applying it
-    // later does nothing at all. A page that is not severed is passed
-    // straight through to the real server.
-    await page.routeWebSocket(/.*/, (ws) => {
-      if (severed.has(page)) {
-        ws.close();
-        return;
-      }
-      ws.connectToServer();
-    });
+    trackRequests(page);
     return page;
   }
 
@@ -128,15 +149,21 @@ async function main() {
   /// the same tick, stayed in sync, and the split-brain test then failed its
   /// own precondition rather than passing on a setup that never happened.
   ///
-  /// So do neither engine's version of offline. Close the socket that is up,
-  /// from inside the page, and have the route installed in makePage refuse
-  /// every new one — Playwright implements that itself, so it behaves
-  /// identically in all three. The client sees a close it did not ask for and
-  /// retries on its backoff, which is what a lost network actually looks
-  /// like.
+  /// So do neither engine's version of offline. From inside the page, close
+  /// the socket that is up and refuse every new one until restored — the
+  /// patched constructor in makePage does the refusing. The client sees a
+  /// close it did not ask for and retries on its backoff, which is what a lost
+  /// network actually looks like.
+  ///
+  /// Not `page.routeWebSocket`, which was the first version of this. It relays
+  /// every frame of every routed socket through the Playwright driver, so the
+  /// sync tests were measuring traffic that took a detour through the test
+  /// harness rather than the connection they claim to test — and on the Linux
+  /// runner Firefox then hung loading the second peer while the first one's
+  /// frames were being relayed. Cause not proven; the detour is wrong anyway.
   async function severNetwork(page) {
-    severed.add(page);
     await page.evaluate(() => {
+      window.__runaSevered = true;
       for (const ws of window.__runaSockets ?? []) {
         try {
           ws.close();
@@ -150,7 +177,9 @@ async function main() {
 
   /// Give it back. The next backoff attempt connects for real.
   async function restoreNetwork(page) {
-    severed.delete(page);
+    await page.evaluate(() => {
+      window.__runaSevered = false;
+    });
   }
 
   // Guards against horizontal scroll on the landing page at phone widths.
@@ -269,7 +298,7 @@ async function main() {
 
   const alice = await makePage("alice");
   alicePage = alice;
-  await alice.goto(roomUrl, { waitUntil: "domcontentloaded" });
+  await gotoRoom(alice, "alice", roomUrl);
 
   // Wait for editor to mount (proves CSP + Trusted Types + WASM all survived)
   await alice.waitForSelector(".monaco-editor", { timeout: 60_000 });
@@ -282,7 +311,7 @@ async function main() {
   await alice.keyboard.type("Hello from Alice. ");
 
   const bob = await makePage("bob");
-  await bob.goto(roomUrl, { waitUntil: "domcontentloaded" });
+  await gotoRoom(bob, "bob", roomUrl);
   await bob.waitForSelector(".monaco-editor", { timeout: 30_000 });
   await bob.click(".monaco-editor .view-lines");
   await bob.keyboard.type("And Bob agrees.");
@@ -978,7 +1007,8 @@ async function main() {
     isMobile: true,
   });
   const touch = await touchCtx.newPage();
-  await touch.goto(roomUrl, { waitUntil: "domcontentloaded" });
+  trackRequests(touch);
+  await gotoRoom(touch, "touch", roomUrl);
   await touch.waitForSelector(".pane-editor", { timeout: 10000 });
   await touch.waitForTimeout(1500);
   const zoomers = await touch.evaluate(() => {
@@ -1040,5 +1070,10 @@ main().catch(async (e) => {
     } catch {}
   }
   for (const err of errors.slice(0, 8)) console.error(" captured:", err);
+  if (serverLogRef?.length) {
+    const lines = serverLogRef.join("").replace(/\x1b\[[0-9;]*m/g, "").split("\n").filter(Boolean);
+    console.error(`SERVER LOG (last ${Math.min(lines.length, 40)} of ${lines.length} lines):`);
+    for (const l of lines.slice(-40)) console.error("  " + l.slice(0, 300));
+  }
   process.exit(1);
 });
