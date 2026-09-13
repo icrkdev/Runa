@@ -424,6 +424,31 @@ async function main() {
   // places render to identical text. A real divergence report showed exactly
   // that shape — the same words, differently placed — so the preview could
   // never have caught it. Compare the editor's own lines instead.
+  /// Put the caret in a page's editor, and make sure it got there.
+  ///
+  /// Clicking `.view-lines` aims at the centre of that element, and once the
+  /// document is longer than the editor that element is taller than the editor
+  /// too. Its centre can then sit outside the visible area, the click lands on
+  /// whatever covers that point, and the keystrokes after it go to the page
+  /// body. That is what the Linux Firefox runner did: focus on <body>, the
+  /// typed text nowhere, reported as a shortcut that did not work. This clicks
+  /// just inside the top-left of the editor's visible area instead, and then
+  /// checks focus is inside the editor, so a miss says what it is.
+  const focusEditor = async (page) => {
+    const box = await page.locator(".monaco-editor .overflow-guard").first().boundingBox();
+    if (!box) throw new Error("[editor] the editor has no visible area to click");
+    await page.mouse.click(box.x + Math.min(120, box.width / 2), box.y + Math.min(24, box.height / 2));
+    try {
+      await page.waitForFunction(() => !!document.activeElement?.closest(".monaco-editor"), null, { timeout: 5000 });
+    } catch {
+      const focus = await page.evaluate(() => {
+        const a = document.activeElement;
+        return a ? `${a.tagName.toLowerCase()}.${String(a.className || "").split(" ")[0]}` : "nothing";
+      });
+      throw new Error(`[editor] clicking the editor did not focus it; focus is on ${focus}`);
+    }
+  };
+
   const editorText = (page) =>
     page.evaluate(() =>
       [...document.querySelectorAll(".view-lines .view-line")]
@@ -917,7 +942,7 @@ async function main() {
   // Cmd+Down on a Mac and Ctrl+End elsewhere, so Cmd+End moved nothing and the
   // text below only landed at the end because the cursor was already there.
   const docEnd = mod === "Meta" ? "Meta+ArrowDown" : "Control+End";
-  await alice.click(".monaco-editor .view-lines");
+  await focusEditor(alice);
   await alice.keyboard.press(docEnd);
   await alice.keyboard.press("Enter");
   await alice.keyboard.type("emphasise-me");
@@ -966,7 +991,7 @@ async function main() {
   // flat documents, which produce no folding ranges at all, so the widget was
   // zero-height whether the feature was on or off and every one of them
   // reported it inert. Indentation is what makes this able to fail.
-  await alice.click(".monaco-editor .view-lines");
+  await focusEditor(alice);
   await alice.keyboard.press(docEnd);
   await alice.keyboard.type("\nblock header\n");
   // Longer than the viewport on purpose: a block that fits on screen keeps its
