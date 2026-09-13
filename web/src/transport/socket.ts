@@ -393,7 +393,12 @@ export class RunaSocket {
   async sendUpdate(plaintext: Uint8Array): Promise<void> {
     const header = this.ownHeader(FT.DOC_UPDATE);
     const envelope = await this.cipher.encrypt(header, plaintext);
-    this.rawSend(concatBytes(header, envelope));
+    // Only a document frame counts as something lost. Presence and snapshots
+    // go through the same door, but a dropped heartbeat expires and is sent
+    // again, and a dropped snapshot costs a compaction rather than any data.
+    if (!this.rawSend(concatBytes(header, envelope))) {
+      this.droppedWhileClosed = true;
+    }
   }
 
   async sendAwareness(plaintext: Uint8Array): Promise<void> {
@@ -440,10 +445,33 @@ export class RunaSocket {
     this.rawSend(buildJsonFrame(FT.PURGE_ACK, this.opts.roomId, this.epoch, { request_id: requestId }));
   }
 
-  private rawSend(bytes: Uint8Array): void {
+  /// Set when a document frame was thrown away because the socket was closed.
+  ///
+  /// Dropping it is the right thing to do — there is nowhere to put it, and it
+  /// is encrypted against a cipher and a peer id that will both be different
+  /// after the next join, so it cannot be held and replayed. Dropping it
+  /// *silently* was the mistake: RunaDoc.flush() empties its buffer before
+  /// handing the update over, so what is dropped here has already left the
+  /// outbound path for good. It survives in the local document, where only its
+  /// author can see it, and the reconnect does not recover it because the
+  /// reconnect only pulls — the server never had it to send back.
+  private droppedWhileClosed = false;
+
+  /// Whether a document frame was lost since this was last asked, clearing the
+  /// flag. The caller uses it to decide whether a reconnect must push state.
+  takeDroppedWhileClosed(): boolean {
+    const dropped = this.droppedWhileClosed;
+    this.droppedWhileClosed = false;
+    return dropped;
+  }
+
+  /// Returns whether the bytes actually went out.
+  private rawSend(bytes: Uint8Array): boolean {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(bytes);
+      return true;
     }
+    return false;
   }
 }
 

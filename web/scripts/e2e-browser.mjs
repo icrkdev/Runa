@@ -1,7 +1,22 @@
 import { spawn } from "node:child_process";
 import { webcrypto as crypto } from "node:crypto";
 import { createHash } from "node:crypto";
-import { chromium } from "playwright";
+import { chromium, firefox, webkit } from "playwright";
+
+/// Which engine this run drives. Chromium by default so a bare `npm run smoke`
+/// behaves as it always did; CI runs all three.
+///
+/// Two of the faults that reached real users could not have been caught here
+/// on one engine. The line-ending corruption needed a client whose Monaco
+/// model used CRLF, which no headless Chromium on macOS produces, so peers
+/// agreed in CI and diverged in the field. The <select> overflow in #13 is
+/// documented as unreproducible in Chromium at all, headless or emulated.
+const ENGINES = { chromium, firefox, webkit };
+const ENGINE_NAME = process.env.RUNA_E2E_BROWSER ?? "chromium";
+const ENGINE = ENGINES[ENGINE_NAME];
+if (!ENGINE) {
+  throw new Error(`unknown RUNA_E2E_BROWSER "${ENGINE_NAME}"; expected one of ${Object.keys(ENGINES).join(", ")}`);
+}
 
 const BASE = "http://127.0.0.1:3001";
 const errors = [];
@@ -61,16 +76,81 @@ async function main() {
   const b64url = (b) => Buffer.from(b).toString("base64url");
   const roomUrl = `${BASE}/r/${roomIdHex}#k=${b64url(linkSecret)}&s=${b64url(salt)}`;
 
-  const browser = await chromium.launch();
+  const browser = await ENGINE.launch();
+
+  /// Pages whose network has been taken away. Consulted by the route
+  /// installed in makePage, so a sever survives the reconnects that follow.
+  const severed = new WeakSet();
 
   async function makePage(label) {
     const page = await browser.newPage();
+    // Keep a handle on every WebSocket the page opens, so a test can sever one.
+    // See severNetwork() for why the tests do not use setOffline for this.
+    await page.addInitScript(() => {
+      const Original = WebSocket;
+      const opened = [];
+      window.__runaSockets = opened;
+      const Patched = function (...args) {
+        const ws = new Original(...args);
+        opened.push(ws);
+        return ws;
+      };
+      Patched.prototype = Original.prototype;
+      Object.assign(Patched, Original);
+      window.WebSocket = Patched;
+    });
     page.on("console", (msg) => {
       const t = msg.type();
       if (t === "error") errors.push(`[${label}] console.error: ${msg.text()}`);
     });
     page.on("pageerror", (err) => errors.push(`[${label}] pageerror: ${err.message}`));
+    // Route every WebSocket through here from the very start, because the
+    // route is installed into the page as an init script and applying it
+    // later does nothing at all. A page that is not severed is passed
+    // straight through to the real server.
+    await page.routeWebSocket(/.*/, (ws) => {
+      if (severed.has(page)) {
+        ws.close();
+        return;
+      }
+      ws.connectToServer();
+    });
     return page;
+  }
+
+  /// Take one page's network away, the same way on every engine.
+  ///
+  /// `context.setOffline` is not that. Running the suite on three engines was
+  /// what showed how far apart they are: all three refuse new *HTTP* requests
+  /// while offline, but only Chromium tears down an established WebSocket —
+  /// Gecko leaves it up, and WebKit will happily open a brand new one while
+  /// `navigator.onLine` is false. The offline peer there reconnected inside
+  /// the same tick, stayed in sync, and the split-brain test then failed its
+  /// own precondition rather than passing on a setup that never happened.
+  ///
+  /// So do neither engine's version of offline. Close the socket that is up,
+  /// from inside the page, and have the route installed in makePage refuse
+  /// every new one — Playwright implements that itself, so it behaves
+  /// identically in all three. The client sees a close it did not ask for and
+  /// retries on its backoff, which is what a lost network actually looks
+  /// like.
+  async function severNetwork(page) {
+    severed.add(page);
+    await page.evaluate(() => {
+      for (const ws of window.__runaSockets ?? []) {
+        try {
+          ws.close();
+        } catch {
+          /* already closed */
+        }
+      }
+    });
+    await page.waitForTimeout(300);
+  }
+
+  /// Give it back. The next backoff attempt connects for real.
+  async function restoreNetwork(page) {
+    severed.delete(page);
   }
 
   // Guards against horizontal scroll on the landing page at phone widths.
@@ -281,7 +361,7 @@ async function main() {
   // replay and Yjs's merge at once — and it is the shape a real report will
   // most often have, since a phone that locks or a laptop that sleeps looks
   // exactly like this.
-  await bob.context().setOffline(true);
+  await severNetwork(bob);
   await bob.click(".monaco-editor .view-lines");
   await Promise.all([
     alice.keyboard.type("\nwritten-while-bob-was-away\n", { delay: 8 }),
@@ -293,7 +373,7 @@ async function main() {
   if (splitA === splitB) {
     throw new Error("[sync] peers did not actually diverge while one was offline — the test proves nothing");
   }
-  await bob.context().setOffline(false);
+  await restoreNetwork(bob);
   let reA = "";
   let reB = "";
   let reconverged = false;
@@ -331,7 +411,7 @@ async function main() {
   if ((await shownPeople(alice)) !== 2) {
     throw new Error(`[presence] expected 2 people before the drop, saw ${await shownPeople(alice)}`);
   }
-  await bob.context().setOffline(true);
+  await severNetwork(bob);
   let dropped = false;
   for (let i = 0; i < 50; i++) {
     await alice.waitForTimeout(1000);
@@ -345,7 +425,7 @@ async function main() {
       `[presence] a silent peer never expired from the count; still showing ${await shownPeople(alice)}`,
     );
   }
-  await bob.context().setOffline(false);
+  await restoreNetwork(bob);
   let returned = false;
   for (let i = 0; i < 50; i++) {
     await alice.waitForTimeout(1000);
@@ -753,9 +833,9 @@ async function main() {
   // four to approve and hashed differently from everyone else's, and every
   // receiver dropped the request as `roster-mismatch`. Silently, because the
   // guard hook was an empty function.
-  await bob.context().setOffline(true);
+  await severNetwork(bob);
   await bob.waitForTimeout(1500);
-  await bob.context().setOffline(false);
+  await restoreNetwork(bob);
   let backTogether = false;
   for (let i = 0; i < 60; i++) {
     await alice.waitForTimeout(1000);
@@ -770,17 +850,19 @@ async function main() {
   }
   if (!backTogether) throw new Error("[shred] peers never re-established before the shred check");
 
-  // Scope, honestly: this does NOT reproduce the roster merge that caused the
-  // reported failure. Doing so needs a real socket close, and a brief offline
-  // blip does not produce one — checked by reverting the fix and watching this
-  // stay green, twice, first with the wrong peer proposing and then with the
-  // right one. The merge itself is asserted directly in session.roster.test.ts,
-  // where it can be made to fail.
+  // Scope: this now does reproduce the roster merge that caused the reported
+  // failure, which it could not before. The previous note here said so
+  // honestly — a brief setOffline blip never produced a real socket close, so
+  // there was no second JOIN_ACK to merge a stale peer id out of, and the test
+  // stayed green with the fix reverted. severNetwork() does produce one.
+  // Rechecked the only way worth trusting: drop the `target.clear()` from
+  // replaceRoster and this fails with a denominator of 5 for two people.
   //
-  // What this does cover is the path end to end: a shred proposed after a
-  // network interruption still reaches the other side, and the bar it asks for
-  // describes the people actually in the room. Bob proposes because bob is the
-  // one that dropped.
+  // So the path is covered end to end — a shred proposed after a real
+  // interruption reaches the other side, and the bar it asks for describes the
+  // people actually in the room. session.roster.test.ts still asserts the
+  // merge directly; this is the same bug seen from the outside. Bob proposes
+  // because bob is the one that dropped.
   await bob.click('button:has-text("Shred")');
   await bob.waitForSelector('[role="alertdialog"]', { timeout: 5000 });
 
@@ -904,7 +986,7 @@ async function main() {
   server.kill();
   await waitForProcessExit(server);
 
-  console.log("BROWSER E2E OK");
+  console.log(`BROWSER E2E OK (${ENGINE_NAME})`);
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);

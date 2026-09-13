@@ -432,6 +432,13 @@ export class Session {
     // Resume rather than replay: asking from 0 on every reconnect pulls the
     // entire room log down again each time.
     this.socket.sendSyncRequest(this.doc.syncFrom());
+    // Pulling is only half of it. If anything was written while the socket was
+    // down it was dropped on the way out, and the server has no copy to send
+    // back, so it would live on in one browser and nowhere else. Offer what
+    // this client holds whenever that happened.
+    if (this.socket.takeDroppedWhileClosed()) {
+      void this.doc.pushLocalState();
+    }
   }
 
   private async decryptConfigBlob(

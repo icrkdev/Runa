@@ -10,7 +10,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "smoke": "node scripts/e2e-smoke.mjs"
+    "smoke": "node scripts/e2e-smoke.mjs",
+    "smoke:browser": "node scripts/e2e-browser.mjs",
+    "smoke:browser:all": "for b in chromium firefox webkit; do RUNA_E2E_BROWSER=$b node scripts/e2e-browser.mjs || exit 1; done"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",

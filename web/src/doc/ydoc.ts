@@ -121,6 +121,24 @@ export class RunaDoc {
     this.opts.transport.sendSyncRequest(0);
   }
 
+  /// Send everything this client holds.
+  ///
+  /// The counterpart to requesting a sync: that pulls what the room has, this
+  /// offers what this client has. A reconnect needs both, because an edit made
+  /// while the socket was down was dropped on the way out and exists nowhere
+  /// else — pulling cannot recover what the server never received.
+  ///
+  /// Idempotent by construction: Yjs discards state it already holds, so the
+  /// cost of sending this when nothing was actually lost is bandwidth, not
+  /// correctness. It is still sent only when a drop was recorded, because the
+  /// server appends it to the room log and a full state on every reconnect
+  /// would spend the log budget on nothing.
+  async pushLocalState(): Promise<void> {
+    if (this.destroyed) return;
+    const state = Y.encodeStateAsUpdate(this.ydoc);
+    await this.opts.transport.sendUpdate(wrapWithLengthAndPad(state));
+  }
+
   shouldSnapshot(logLen: bigint): boolean {
     const bytesOk = logLen > BigInt(this.opts.snapshotBytesThreshold ?? 2 * 1024 * 1024);
     const countOk = this.updateCount > (this.opts.snapshotCountThreshold ?? 2000);
