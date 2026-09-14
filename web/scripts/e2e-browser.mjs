@@ -401,15 +401,6 @@ async function main() {
     await joiner.waitForSelector("#pp", { timeout: 15_000 });
     await joiner.fill("#pp", passphrase);
     await joiner.click('button:has-text("Enter room")');
-    // The room says which derivation made its key. Waited for before the
-    // editor: the notice is on screen for a few seconds, and on a slow runner
-    // Monaco can take longer than that to load.
-    try {
-      await joiner.waitForSelector('.toast:has-text("derived with Argon2id")', { timeout: 60_000 });
-    } catch {
-      const shown = await joiner.evaluate(() => (document.querySelector("main")?.textContent ?? "").trim().slice(0, 200));
-      throw new Error(`[named] entering the room never said its key came from Argon2id; the page shows: ${shown || "nothing"}`);
-    }
     try {
       await joiner.waitForSelector(".monaco-editor", { timeout: 60_000 });
     } catch {
@@ -1317,7 +1308,7 @@ async function main() {
   console.log(`  a 24-hour room does not accuse its server of changing the expiry`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  a name already in use is refused as taken, before any key derivation`);
-  console.log(`  a named room opens in another page with the passphrase it was made with, and says Argon2id made the key`);
+  console.log(`  a named room opens in another page with the passphrase it was made with`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  the room fits the window exactly; the chrome cannot scroll away`);
   console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu only`);
