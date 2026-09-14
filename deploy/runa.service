@@ -56,6 +56,10 @@ LimitNOFILE=16384
 LimitMEMLOCK=infinity
 Restart=on-failure
 RestartSec=2
+# On stop, RUNA warns every open room and waits RUNA_SHUTDOWN_GRACE_SECS (60 s
+# by default) so people can export before their room ends. This has to be
+# longer, or systemd kills the process in the middle of that warning.
+TimeoutStopSec=90
 
 [Install]
 WantedBy=multi-user.target

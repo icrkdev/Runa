@@ -40,6 +40,11 @@ fn json_frame(room_id: [u8; 16], frame_type: u8, body: &impl Serialize) -> Bytes
     Bytes::from(raw)
 }
 
+/// A server-authored RESTART_NOTICE for one room (amendment F).
+pub fn restart_notice(room_id: [u8; 16], body: &serde_json::Value) -> Bytes {
+    json_frame(room_id, FT_RESTART_NOTICE, body)
+}
+
 fn error_frame(room_id: [u8; 16], code: WireCode) -> Bytes {
     json_frame(room_id, FT_ERROR, &serde_json::json!({ "code": u16::from(code) }))
 }
@@ -174,7 +179,7 @@ impl ConnLimits {
     }
 }
 
-pub async fn handle_socket(socket: WebSocket, state: AppState, room_hex: String, ip: String) {
+pub async fn handle_socket(mut socket: WebSocket, state: AppState, room_hex: String, ip: String) {
     // Process-wide first: the per-IP guard bounds one address, not the sum.
     let max = state.cfg.max_connections;
     if state
@@ -187,11 +192,17 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, room_hex: String,
         .is_err()
     {
         tracing::warn!(max, "connection ceiling reached; refusing socket");
+        refuse(&mut socket, WireCode::ServerFull).await;
         return;
     }
     let _conn_slot = ConnSlot(state.live_conns.clone());
 
     if !state.conn_guard.acquire(&ip) {
+        tracing::info!(
+            limit = state.cfg.max_conns_per_ip,
+            "per-address connection limit reached; refusing socket"
+        );
+        refuse(&mut socket, WireCode::TooManyConnections).await;
         return;
     }
     let ip_for_release = ip.clone();
@@ -201,6 +212,22 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, room_hex: String,
     if let Err(code) = result {
         tracing::debug!(closed_by = u16::from(code), "socket closed");
     }
+}
+
+/// Close a socket that is being turned away, with a code that says why.
+///
+/// Both refusals used to return without a word. The browser saw a connection
+/// open and drop at once, retried on its backoff forever, and nobody was ever
+/// told anything. A close code is the only thing a page can read here:
+/// browsers do not expose the status of a refused WebSocket upgrade, which is
+/// why the refusal waits until after it.
+async fn refuse(socket: &mut WebSocket, code: WireCode) {
+    let _ = socket
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: u16::from(code),
+            reason: "".into(),
+        })))
+        .await;
 }
 
 /// Returns the process-wide connection slot on every exit path, including
@@ -392,6 +419,16 @@ async fn run_connection(
         };
         let frame = json_frame(room_id, FT_JOIN_ACK, &ack);
         if sink.send(Message::Binary(frame)).await.is_err() {
+            room.remove_peer(&peer_id);
+            return Err(WireCode::ProtocolError);
+        }
+    }
+
+    // Joining during a restart countdown: say so at once, rather than let
+    // someone start writing into a room with seconds left.
+    if let Some(in_secs) = state.restart_in_secs() {
+        let notice = restart_notice(room_id, &serde_json::json!({ "in_secs": in_secs }));
+        if sink.send(Message::Binary(notice)).await.is_err() {
             room.remove_peer(&peer_id);
             return Err(WireCode::ProtocolError);
         }

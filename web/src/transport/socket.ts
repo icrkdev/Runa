@@ -62,6 +62,11 @@ export interface SocketEvents {
   /// a server without acks, have been sent. The snapshot index is estimated
   /// from it.
   onUpdatesStored?(count: number): void;
+  /// The server stops in this many seconds, taking every room with it.
+  onRestartNotice?(inSecs: number): void;
+  /// The server turned this connection away: 4007 when this address holds as
+  /// many connections as one address may, 4008 when the server is full.
+  onRefused?(code: number): void;
 }
 
 export interface SocketOptions {
@@ -276,8 +281,10 @@ export class RunaSocket {
     ws.onmessage = (ev) => {
       void this.handleMessage(new Uint8Array(ev.data as ArrayBuffer));
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (this.ws === ws) this.connectionLost();
+      const code = (ev as CloseEvent | undefined)?.code;
+      if (code === 4007 || code === 4008) this.events.onRefused?.(code);
       this.events.onDisconnected();
       if (!this.closedByUs) this.scheduleReconnect();
     };
@@ -424,7 +431,8 @@ export class RunaSocket {
       header.frameType === FT.PEER_LEAVE ||
       header.frameType === FT.PURGE ||
       header.frameType === FT.TTL_EXTEND ||
-      header.frameType === FT.DOC_ACK;
+      header.frameType === FT.DOC_ACK ||
+      header.frameType === FT.RESTART_NOTICE;
     if (!isServerEvent && header.epoch < this.epoch) {
       this.events.onEpochStale(header.epoch);
       return;
@@ -463,6 +471,17 @@ export class RunaSocket {
     }
     if (header.frameType === FT.DOC_ACK) {
       this.handleAck(parsed.body);
+      return;
+    }
+    if (header.frameType === FT.RESTART_NOTICE) {
+      try {
+        const { in_secs } = JSON.parse(textDecoder.decode(parsed.body)) as { in_secs: unknown };
+        if (typeof in_secs === "number" && Number.isFinite(in_secs) && in_secs >= 0) {
+          this.events.onRestartNotice?.(Math.min(in_secs, 3600));
+        }
+      } catch {
+        return;
+      }
       return;
     }
     if (header.frameType === FT.ERROR) {

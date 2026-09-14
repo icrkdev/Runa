@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         cfg.default_idle_ceiling,
     ));
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     if !std::path::Path::new(&cfg.dist_dir).join("index.html").is_file() {
         tracing::warn!(
@@ -64,12 +64,12 @@ async fn main() -> Result<()> {
     }
     tracing::info!(%addr, "runa server listening");
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(state))
         .await?;
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn wait_for_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.ok();
     };
@@ -87,5 +87,48 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    tracing::info!("shutdown signal received; rooms die with the process, by design");
+}
+
+/// Resolves when the process should stop serving.
+///
+/// Rooms live only in memory, so stopping ends every one of them. With people
+/// connected, the first signal warns every open room and waits out
+/// `RUNA_SHUTDOWN_GRACE_SECS` so they can export. It stops early if everyone
+/// leaves, and a second signal stops it at once. With nobody connected there
+/// is nobody to warn, so it stops straight away.
+async fn shutdown_signal(state: AppState) {
+    wait_for_signal().await;
+    let grace = state.cfg.shutdown_grace;
+    let live = state.live_connections();
+    if live == 0 || grace.is_zero() {
+        tracing::info!("shutdown signal received; rooms die with the process, by design");
+        return;
+    }
+    // Listening for the second signal starts before the countdown, so one sent
+    // during it cannot be missed.
+    let second = wait_for_signal();
+    tokio::pin!(second);
+    let rooms = state.begin_restart(grace).await;
+    tracing::info!(
+        connections = live,
+        rooms,
+        grace_secs = grace.as_secs(),
+        "shutdown signal received; warned every open room. Send it again to stop now"
+    );
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => break,
+            _ = &mut second => {
+                tracing::info!("second shutdown signal; stopping now");
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                if state.live_connections() == 0 {
+                    tracing::info!("everyone left before the restart; stopping now");
+                    break;
+                }
+            }
+        }
+    }
 }

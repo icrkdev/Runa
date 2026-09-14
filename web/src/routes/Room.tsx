@@ -81,6 +81,11 @@ function JoinableRoom(props: RoomProps) {
   const [historyPressure, setHistoryPressure] = useState<string | null>(null);
   const [tally, setTally] = useState<{ approved: number; total: number; waitingOn?: string } | null>(null);
   const [diverged, setDiverged] = useState(false);
+  // A restart the server has announced, as a deadline on this page's clock.
+  const [restartAt, setRestartAt] = useState<number | null>(null);
+  const [clock, setClock] = useState(() => performance.now());
+  const [connRefused, setConnRefused] = useState<string | null>(null);
+  const restartAnnouncedRef = useRef(false);
   const [showExtNotice, setShowExtNotice] = useState(() => !extNoticeShown);
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const editorAdapterRef = useRef<{
@@ -106,6 +111,12 @@ function JoinableRoom(props: RoomProps) {
   );
 
   useAccent(temper);
+
+  useEffect(() => {
+    if (restartAt === null) return;
+    const id = setInterval(() => setClock(performance.now()), 500);
+    return () => clearInterval(id);
+  }, [restartAt]);
 
   // Presence expires on a timer rather than on an event, so it has to be
   // sampled: nobody sends a frame to say they have gone quiet.
@@ -260,6 +271,12 @@ function JoinableRoom(props: RoomProps) {
           onDivergence: (d) => setDiverged(d),
           onPurge: () => setPhase({ kind: "purged" }),
           onRoomUnavailable: () => setPhase({ kind: "unavailable" }),
+          onServerRestart: (inSecs) => {
+            restartAnnouncedRef.current = true;
+            setClock(performance.now());
+            setRestartAt(performance.now() + inSecs * 1000);
+          },
+          onConnectionRefused: (message) => setConnRefused(message),
         },
       );
       sessionRef.current = session;
@@ -489,8 +506,9 @@ function JoinableRoom(props: RoomProps) {
         <p className="micro-label tag">THIS ROOM IS GONE</p>
         <div className="panel">
           <p>
-            It was shredded, it expired, or the server restarted. Rooms live
-            only in memory — there is no copy to recover, which is the point.
+            {restartAnnouncedRef.current
+              ? "The server restarted for an update, and this room ended with it. Rooms live only in memory — there is no copy to recover, which is the point."
+              : "It was shredded, it expired, or the server restarted. Rooms live only in memory — there is no copy to recover, which is the point."}
           </p>
           <p style={{ marginBottom: 0 }}>
             <a href="/">← New room</a>
@@ -537,6 +555,7 @@ function JoinableRoom(props: RoomProps) {
     return (
       <main className="landing">
         <p className="micro-label">{phase.kind === "connecting" ? "CONNECTING…" : ""}</p>
+        {connRefused && <p className="hint">{connRefused}</p>}
       </main>
     );
   }
@@ -588,6 +607,17 @@ function JoinableRoom(props: RoomProps) {
             Resync
           </button>
           <button onClick={() => setDiverged(false)}>Dismiss</button>
+        </div>
+      )}
+      {restartAt !== null && (
+        <div className="banner" role="alert">
+          <span className="error-text">{restartMessage(restartAt - clock)}</span>
+          <button onClick={() => setExportOpen(true)}>Export</button>
+        </div>
+      )}
+      {connRefused && (
+        <div className="banner" role="status">
+          <span>{connRefused}</span>
         </div>
       )}
       {historyPressure && (
@@ -949,6 +979,15 @@ function PassphraseGate({ name, onSubmit }: { name: string; onSubmit(p: string):
 }
 
 let announcer: ((msg: string) => void) | null = null;
+/// The restart warning, counting down. Rooms live only in memory, so the one
+/// thing worth saying is what to do with the time left.
+function restartMessage(msLeft: number): string {
+  if (msLeft <= 0) return "The server is restarting now. Anything not exported from this room is gone.";
+  const total = Math.ceil(msLeft / 1000);
+  const time = `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  return `This server restarts in ${time} to update. Rooms live only in memory, so this room and everything in it will be gone. Export your work now.`;
+}
+
 export function announce(msg: string): void {
   announcer?.(msg);
 }

@@ -149,6 +149,10 @@ export interface SessionEvents {
   /// indistinguishable from one that is always on.
   onDivergence(diverged: boolean): void;
   onRoomUnavailable(code: number): void;
+  /// The server stops in this many seconds, taking every room with it.
+  onServerRestart(inSecs: number): void;
+  /// Why the server is refusing this connection, or null once it is accepted.
+  onConnectionRefused(message: string | null): void;
 }
 
 export interface SessionConfig {
@@ -234,6 +238,13 @@ export class Session {
       events: {
         onJoinAck: (ack) => sessionRef?.handleJoinAck(ack),
         onUpdatesStored: (count) => sessionRef?.noteUpdatesStored(count),
+        onRestartNotice: (inSecs) => events.onServerRestart(inSecs),
+        onRefused: (code) =>
+          events.onConnectionRefused(
+            code === 4007
+              ? "Your network already has as many connections to this server as one address may. Retrying…"
+              : "This server is at its connection limit. Retrying…",
+          ),
         onDocUpdate: (sender, envelope) =>
           sessionRef?.handleRemoteUpdate(envelope) ?? void sender,
         onSnapshot: (sender, covers, blob) => sessionRef?.handleSnapshot(sender, covers, blob),
@@ -366,6 +377,7 @@ export class Session {
   }
 
   private async handleJoinAck(ack: JoinAck): Promise<void> {
+    this.events.onConnectionRefused(null);
     this.internals.myPeerId = ack.peer_id;
     this.internals.myJoinedSeq = ack.roster.find((r) => r.peer_id === ack.peer_id)?.joined_at_seq ?? 0;
     this.internals.joinPerfMs = performance.now();

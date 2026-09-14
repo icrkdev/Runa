@@ -21,7 +21,7 @@ class FakeWebSocket {
   dead = false;
   onopen: (() => void) | null = null;
   onmessage: ((ev: { data: ArrayBuffer }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((ev?: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor(readonly url: string) {
     FakeWebSocket.all.push(this);
@@ -30,10 +30,10 @@ class FakeWebSocket {
     if (this.readyState !== FakeWebSocket.OPEN) throw new Error("send on a socket that is not open");
     if (!this.dead) this.sent.push(bytes.slice());
   }
-  close(): void {
+  close(code?: number): void {
     if (this.readyState === FakeWebSocket.CLOSED) return;
     this.readyState = FakeWebSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.(code === undefined ? undefined : { code });
   }
   open(): void {
     this.readyState = FakeWebSocket.OPEN;
@@ -319,5 +319,28 @@ describe("an update larger than a frame", () => {
       expect(p.length % 256).toBe(0);
     }
     expect(concatBytes(...parts.map((p) => readPart(p)!.data))).toEqual(wrapped);
+  });
+});
+
+describe("the server explaining itself", () => {
+  it("passes on a restart the server announces", async () => {
+    const seen: number[] = [];
+    await makeSocket({ events: { onRestartNotice: (s) => seen.push(s) } });
+    const ws = latest();
+    ws.open();
+    ws.deliver(joinAck());
+    ws.deliver(buildJsonFrame(FT.RESTART_NOTICE, ROOM, 0, { in_secs: 60 }));
+    await waitFor(() => seen.length === 1);
+    expect(seen).toEqual([60]);
+  });
+
+  it("says why a connection was refused, and keeps trying", async () => {
+    const refused: number[] = [];
+    await makeSocket({ events: { onRefused: (c) => refused.push(c) } });
+    const first = latest();
+    first.open();
+    first.close(4007);
+    expect(refused).toEqual([4007]);
+    await waitFor(() => FakeWebSocket.all.length === 2);
   });
 });

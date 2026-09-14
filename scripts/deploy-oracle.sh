@@ -183,8 +183,24 @@ $SSH "MEM_MAX=$MEM_MAX MEM_HIGH=$MEM_HIGH LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS \
       /tmp/runa.service | sudo tee /etc/systemd/system/runa.service >/dev/null
   sudo chmod 644 /etc/systemd/system/runa.service
 
+  # Required behind Caddy, which this script puts in front of RUNA. An env file
+  # installed before the template carried it would leave every visitor sharing
+  # one set of per-IP limits, and a redeploy never rewrites that file.
+  if ! grep -q '^RUNA_TRUSTED_PROXY=1' /etc/runa/runa.env; then
+    echo 'RUNA_TRUSTED_PROXY=1' | sudo tee -a /etc/runa/runa.env >/dev/null
+    echo "added RUNA_TRUSTED_PROXY=1 to /etc/runa/runa.env; it was missing"
+  fi
+
   sudo systemctl daemon-reload
   sudo systemctl enable runa >/dev/null 2>&1 || true
+  PORT=$(grep -oP '^RUNA_BIND=.*:\K[0-9]+' /etc/runa/runa.env || echo 3000)
+  LIVE=$(ss -Htn state established "( sport = :$PORT )" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${LIVE:-0}" -gt 0 ]; then
+    echo "$LIVE connection(s) open: each open room gets a restart countdown, and the"
+    echo "restart waits it out (RUNA_SHUTDOWN_GRACE_SECS, 60 s by default)"
+  else
+    echo "no open connections; restarting straight away"
+  fi
   sudo systemctl restart runa
 REMOTE
 ok "binary, assets, unit installed and service restarted"

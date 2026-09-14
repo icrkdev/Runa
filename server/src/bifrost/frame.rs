@@ -16,6 +16,7 @@ pub const FT_SHRED_VOTE: u8 = 0x11;
 pub const FT_SHRED_CANCEL: u8 = 0x12;
 pub const FT_PURGE: u8 = 0x13;
 pub const FT_PURGE_ACK: u8 = 0x14;
+pub const FT_RESTART_NOTICE: u8 = 0x15;
 pub const FT_EPOCH_KEY: u8 = 0x20;
 pub const FT_TTL_EXTEND: u8 = 0x22;
 pub const FT_SNAPSHOT: u8 = 0x21;

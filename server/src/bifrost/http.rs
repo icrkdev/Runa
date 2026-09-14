@@ -284,6 +284,11 @@ pub async fn create_unlisted(
     headers: HeaderMap,
     Json(body): Json<CreateRoomBody>,
 ) -> Response {
+    // A room created during a restart countdown would be gone within the
+    // minute. Say that, rather than hand out a room with seconds to live.
+    if state.is_restarting() {
+        return code_response(StatusCode::SERVICE_UNAVAILABLE, "RESTARTING");
+    }
     let ip = rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
     if !state.rooms_created.check(&ip) {
         return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);
@@ -328,6 +333,11 @@ pub async fn create_named(
     headers: HeaderMap,
     Json(body): Json<CreateRoomBody>,
 ) -> Response {
+    // A room created during a restart countdown would be gone within the
+    // minute. Say that, rather than hand out a room with seconds to live.
+    if state.is_restarting() {
+        return code_response(StatusCode::SERVICE_UNAVAILABLE, "RESTARTING");
+    }
     let ip = rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
     if !state.named_created.check(&ip) {
         return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);

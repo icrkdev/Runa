@@ -807,3 +807,128 @@ async fn an_update_the_log_cannot_hold_is_acknowledged_as_not_stored() {
     }
     assert!(refused, "a full log must say the update was not stored");
 }
+
+async fn spawn_server_state(cfg: runa_server::config::Config) -> (String, runa_server::AppState) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = runa_server::AppState::new(cfg);
+    let app = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    });
+    (format!("http://{addr}"), state)
+}
+
+async fn close_code(ws: &mut Ws) -> Option<u16> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(m) = ws.next().await {
+            match m {
+                Ok(Message::Close(f)) => return f.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .unwrap_or(None)
+}
+
+/// A refused connection used to open and drop without a word, so the page
+/// retried forever and nobody could see why. The cap is also on connections
+/// held, not ever made.
+#[tokio::test]
+async fn a_connection_over_the_per_address_limit_is_refused_with_a_code_the_page_can_show() {
+    let cfg = runa_server::config::Config { max_conns_per_ip: 2, ..test_config() };
+    let server = spawn_server_with(cfg).await;
+    let keys = create_room(&server).await;
+    let mut held = Vec::new();
+    for pk in [1u8, 2] {
+        let mut ws = connect(&server, &keys.room_id_hex).await;
+        ws.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[pk; 32]))
+            .await
+            .unwrap();
+        let (ft, _) = recv_json(&mut ws).await;
+        assert_eq!(ft, 0x02);
+        held.push(ws);
+    }
+    let mut extra = connect(&server, &keys.room_id_hex).await;
+    assert_eq!(
+        close_code(&mut extra).await,
+        Some(4007),
+        "a connection past the per-address limit must be refused, and say why"
+    );
+
+    let mut first = held.remove(0);
+    first.close(None).await.unwrap();
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let mut again = connect(&server, &keys.room_id_hex).await;
+    again
+        .send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[3u8; 32]))
+        .await
+        .unwrap();
+    let (ft, _) = recv_json(&mut again).await;
+    assert_eq!(ft, 0x02, "a slot freed by a closed connection must be usable again");
+}
+
+#[tokio::test]
+async fn a_connection_over_the_server_ceiling_is_refused_with_its_own_code() {
+    let cfg = runa_server::config::Config { max_connections: 1, ..test_config() };
+    let server = spawn_server_with(cfg).await;
+    let keys = create_room(&server).await;
+    let mut a = connect(&server, &keys.room_id_hex).await;
+    a.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[1u8; 32]))
+        .await
+        .unwrap();
+    let (ft, _) = recv_json(&mut a).await;
+    assert_eq!(ft, 0x02);
+    let mut b = connect(&server, &keys.room_id_hex).await;
+    assert_eq!(close_code(&mut b).await, Some(4008));
+}
+
+/// Rooms live only in memory, so a restart ends every one. It used to do so
+/// in silence, mid-session.
+#[tokio::test]
+async fn a_restart_warns_open_rooms_and_new_joins_and_stops_creating_rooms() {
+    let (server, state) = spawn_server_state(test_config()).await;
+    let keys = create_room(&server).await;
+    let mut a = connect(&server, &keys.room_id_hex).await;
+    a.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[1u8; 32]))
+        .await
+        .unwrap();
+    let _ = recv_json(&mut a).await;
+
+    assert_eq!(state.begin_restart(Duration::from_secs(30)).await, 1);
+    let bytes = next_frame_of(&mut a, 0x15).await;
+    assert_eq!(&bytes[20..24], &[0u8; 4], "server-authored frames carry epoch 0");
+    let v: Value = serde_json::from_slice(&bytes[32..]).expect("the notice is unenveloped JSON");
+    let secs = v["in_secs"].as_u64().unwrap();
+    assert!((1..=30).contains(&secs), "in_secs={secs}");
+
+    let mut b = connect(&server, &keys.room_id_hex).await;
+    b.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[2u8; 32]))
+        .await
+        .unwrap();
+    let (ft, _) = recv_json(&mut b).await;
+    assert_eq!(ft, 0x02);
+    let joined = next_frame_of(&mut b, 0x15).await;
+    let v: Value = serde_json::from_slice(&joined[32..]).unwrap();
+    assert!(v["in_secs"].as_u64().unwrap() <= 30, "someone joining mid-countdown is told at once");
+
+    let r = reqwest::Client::new()
+        .post(format!("{server}/api/rooms/unlisted"))
+        .json(&json!({
+            "verifier": B64.encode(rand_bytes_32()),
+            "kdf": {"m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode([0u8; 16])},
+            "ttl": {"kind": "idle-peers", "secs": 60},
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["code"], "RESTARTING");
+}
