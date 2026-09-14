@@ -1,5 +1,12 @@
 name: ci
 
+# What runs when. Minutes are billed on a private repository, so each job runs
+# only where its result can still change something:
+#   pull request   everything except fuzzing
+#   push to main   the quick checks; the full suite already passed on the pull
+#                  request that produced the commit
+#   schedule       supply-chain advisories and fuzzing, which find new things
+#                  without any new commit
 on:
   push:
     branches: [main]
@@ -10,8 +17,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A new push to a pull request makes the run already in progress worthless, so
+# stop paying for it. Runs on main and on the schedule are never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   server:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -33,6 +47,7 @@ jobs:
         run: cargo test -p runa-server --locked --test hardening
 
   web:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -120,6 +135,8 @@ jobs:
   # depend on — see severNetwork() in e2e-browser.mjs for the one that had a
   # disconnect test quietly not disconnecting anything.
   browser-e2e:
+    # Pull requests only: the most expensive job, three times over.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -159,6 +176,7 @@ jobs:
           node scripts/e2e-browser.mjs
 
   docker:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

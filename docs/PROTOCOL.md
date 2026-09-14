@@ -41,7 +41,7 @@ Encrypted body = `counter` (8 B BE) `||` AES-256-GCM output `||` tag (16 B).
 | Value | Name | Dir | Body |
 |---|---|---|---|
 | 0x01 | JOIN | C→S | JSON `{auth_key_b64? (32 B), session_pubkey_b64 (32 B), client_version, acks?}` |
-| 0x02 | JOIN_ACK | S→C | JSON `{peer_id, epoch, log_len, base_index, has_snapshot, ttl, kdf:{alg,m,t,p,salt_b64}, roster:[{peer_id,pubkey_b64,joined_at_seq}], acks?, limits?:{max_frame_bytes,frames_per_sec,bytes_per_sec}}` — amendment E |
+| 0x02 | JOIN_ACK | S→C | JSON `{peer_id, epoch, log_len, base_index, has_snapshot, ttl, elapsed_secs, ceiling_optout, kdf:{alg,m,t,p,salt_b64}, config_blob?, roster:[{peer_id,pubkey_b64,joined_at_seq}], acks?, limits?:{max_frame_bytes,frames_per_sec,bytes_per_sec}}` — amendment E |
 | 0x03 | DOC_UPDATE | both | encrypted Yjs update, or one part of a split one — amendment E |
 | 0x04 | DOC_SYNC_REQ | C→S | JSON `{from_index}` (index form; state vectors leak clocks and are not used) |
 | 0x05 | DOC_SYNC_RESP | S→C | one or more encrypted entries: snapshot blob then tail |
@@ -71,6 +71,16 @@ route.
 
 Wrong passphrase and missing room are deliberately the same code (4001) with
 identical timing (250 ms floor on the auth path).
+
+**JOIN_ACK's expiry fields.** For an absolute expiry, `ttl.secs` is the time
+*remaining*, and `elapsed_secs` is the room's age by the server's clock. It is
+sent rather than computed by the client, so a difference between the two clocks
+cannot look like tampering. `config_blob` is the room's AEAD-protected config,
+holding the expiry the creator chose. The client compares `ttl.secs +
+elapsed_secs` with that duration and, if the server claims less, shows a
+mismatch warning and uses the sealed value. This catches a server that
+contradicts itself, not one that lies about both fields; see the threat model's
+known limits.
 
 ## Server semantics per frame
 

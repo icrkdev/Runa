@@ -58,6 +58,10 @@ jobs:
   # people will actually deploy this on are ARM.
   image:
     needs: release-gate
+    # Final releases only. A pre-release never moves :latest, and building an
+    # arm64 image under emulation is the slowest job in this pipeline, spent on
+    # a tag whose purpose is to find out whether the release works.
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -112,14 +116,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The same installer the binary signing uses. This used to fetch
+      # `releases/latest/download` with curl: whatever cosign was newest that
+      # minute, with no checksum, on the one job holding a token that can push
+      # the image.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
       - name: Sign the image
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           # Same keyless Sigstore signing as the binaries, so an image can be
           # verified without us distributing or protecting a key.
-          curl -sSfL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
-            -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
           cosign sign --yes \
             "ghcr.io/${{ steps.tags.outputs.owner }}/runa@${DIGEST}"
 
@@ -230,6 +238,21 @@ jobs:
           cd web && npx --yes @cyclonedx/cyclonedx-npm@6.0.1 \
             --output-file ../runa-web-sbom.json
 
+      # The binaries were signed and the bills of materials describing them were
+      # not, so an SBOM on the release page could be replaced with nothing to
+      # show it. Same keyless signing, same certificate identity, verified the
+      # same way (docs/SECURITY.md).
+      - name: Sign SBOMs (keyless)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          for f in runa-*-sbom.json; do
+            cosign sign-blob --yes \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem" \
+              "$f"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: runa-${{ matrix.target }}
@@ -239,6 +262,8 @@ jobs:
             runa-*.tar.gz.sig
             runa-*.tar.gz.pem
             runa-*-sbom.json
+            runa-*-sbom.json.sig
+            runa-*-sbom.json.pem
 
   publish:
     needs: [release-gate, build-release]
