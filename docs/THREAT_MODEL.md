@@ -60,7 +60,8 @@ What can be done, and what RÚNA does:
   same-origin URLs.
 - Reproducible builds, with the SHA-256 of the release bundle published in the
   git tag and served at `/version`.
-- Release artifacts signed with `cosign`.
+- Release binaries, their SBOMs and the container image signed with `cosign`,
+  keyless.
 - A self-host path that is one `docker run`, documented as the answer for
   anyone whose threat model includes the operator.
 
@@ -155,3 +156,15 @@ client stops resending an edit once the server says it stored it, so a hostile
 server can confirm an edit and then throw it away. That is the same power as
 dropping it, which a server holding the only copy of the log always had; the
 acknowledgement is there to survive a dead connection, not a dishonest relay.
+
+The expiry warning catches a server that contradicts itself, not one that lies
+consistently. For a room with an absolute expiry, JOIN_ACK reports the time
+remaining and `elapsed_secs`, the room's age by the server's clock. The client
+adds the two and compares the sum with the duration sealed in the room's
+encrypted config, and warns, and keeps the sealed value, if the server claims
+less. A server that also inflates `elapsed_secs` makes the sum come out right
+while ending the room early, and no warning appears. A server that omits
+`elapsed_secs` skips that comparison, though the check that the kind of expiry
+matches still runs. Neither gains the server anything, since it can delete a
+room whenever it likes. What the check does is stop a server from shortening a
+room by changing one number, and make a bug that does so visible.

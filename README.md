@@ -79,7 +79,7 @@ anything that matters.
 
 Prefer a binary to a container? Signed builds for Linux and macOS are on the
 [releases page](https://github.com/icrkdev/Runa/releases), with cosign
-signatures and verification instructions in
+signatures for the binaries and their SBOMs, and verification instructions in
 [docs/SECURITY.md](docs/SECURITY.md#release-integrity).
 
 Prefer to build it yourself? [Building from source](#what-you-need-before-you-start)

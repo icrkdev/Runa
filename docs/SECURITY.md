@@ -57,6 +57,23 @@ cosign verify-blob \
   runa-<target>.tar.gz
 ```
 
+The bills of materials, `runa-server-sbom.json` and `runa-web-sbom.json`, are
+signed the same way and verified with the same command:
+
+```sh
+cosign verify-blob \
+  --signature   runa-server-sbom.json.sig \
+  --certificate runa-server-sbom.json.pem \
+  --certificate-identity-regexp '^https://github\.com/icrkdev/Runa/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  runa-server-sbom.json
+```
+
+Releases up to and including v0.4.0 published the SBOMs unsigned, so one could
+have been replaced
+on the release page with nothing to show it. The container image on GHCR is
+signed too, for final releases; pre-release tags do not build an image.
+
 The identity regexp is what actually matters: it proves the artifact was built
 by this repository's tagged release workflow and not by someone who merely holds
 a key. `GET /version` returns the running commit and bundle SHA-256 so you can
