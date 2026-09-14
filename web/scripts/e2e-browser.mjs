@@ -122,7 +122,7 @@ async function releaseStuckNavigation(page, label, url) {
 
 async function main() {
   const server = spawn(`${process.cwd()}/../target/release/runa-server`, [], {
-    env: { ...process.env, RUNA_DIST: "dist", RUNA_BIND: "127.0.0.1:3001" },
+    env: { ...process.env, RUNA_DIST: "dist", RUNA_BIND: "127.0.0.1:3001", RUNA_SHUTDOWN_GRACE_SECS: "5" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const serverLog = [];
@@ -1288,9 +1288,30 @@ async function main() {
     );
   }
 
+  // A restart warns every open room before the process stops. The two peers
+  // are still in their room, so SIGTERM — what systemd sends on a redeploy —
+  // has to reach both as a countdown, and the server has to wait it out rather
+  // than vanish with their documents.
+  server.kill("SIGTERM");
+  const warned = (page) =>
+    page.waitForSelector('.banner:has-text("restarts in")', { timeout: 4000 }).then(
+      () => true,
+      () => false,
+    );
+  const [aliceWarned, bobWarned] = await Promise.all([warned(alice), warned(bob)]);
+  if (!aliceWarned || !bobWarned) {
+    throw new Error(`[restart] SIGTERM did not warn every open room (alice ${aliceWarned}, bob ${bobWarned})`);
+  }
+  if (server.exitCode !== null || server.signalCode !== null) {
+    throw new Error("[restart] the server stopped without waiting out its warning");
+  }
+  const stopped = await Promise.race([
+    waitForProcessExit(server).then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 20_000)),
+  ]);
+  if (!stopped) throw new Error("[restart] the server never stopped after its warning");
+
   await browser.close();
-  server.kill();
-  await waitForProcessExit(server);
 
   console.log(`BROWSER E2E OK (${ENGINE_NAME})`);
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
@@ -1314,6 +1335,7 @@ async function main() {
   console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu only`);
   console.log(`  no block header pins itself to the top of an indented document`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
+  console.log(`  a restart warns both open rooms with a countdown, and the server waits it out`);
   console.log(`  display math renders with the exponent raised and smaller`);
   console.log(`  layout tabs: one press per mode, active marked, no Split on a phone`);
   console.log(`  pressed tab outlined evenly on all four sides; control does not resize`);

@@ -59,7 +59,7 @@ export class Api {
     });
     if (res.status === 409) throw new ApiError("UNAVAILABLE");
     if (res.status === 429) throw new ApiError("RATE_LIMITED");
-    if (res.status === 503) throw new ApiError("AT_CAPACITY");
+    if (res.status === 503) throw new ApiError(await unavailableCode(res));
     if (res.status === 413) throw new ApiError("CONFIG_TOO_LARGE");
     if (!res.ok) throw new ApiError("CREATE_FAILED");
     return res.json() as Promise<CreateRoomResponse>;
@@ -91,11 +91,17 @@ export class Api {
     if (res.status === 422) throw new ApiError("PASSPHRASE_REQUIRED");
     if (res.status === 400) throw new ApiError("NAME_INVALID");
     if (res.status === 429) throw new ApiError("RATE_LIMITED");
-    if (res.status === 503) throw new ApiError("AT_CAPACITY");
+    if (res.status === 503) throw new ApiError(await unavailableCode(res));
     if (res.status === 413) throw new ApiError("CONFIG_TOO_LARGE");
     if (!res.ok) throw new ApiError("CREATE_FAILED");
     return res.json() as Promise<CreateRoomResponse>;
   }
+}
+
+/// A 503 means one of two things, and they call for different advice.
+async function unavailableCode(res: Response): Promise<string> {
+  const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+  return body?.code === "RESTARTING" ? "RESTARTING" : "AT_CAPACITY";
 }
 
 export class ApiError extends Error {

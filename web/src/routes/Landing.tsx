@@ -324,6 +324,8 @@ function describeError(e: unknown): string {
       return "Too many rooms created from here just now. Wait a minute.";
     case "AT_CAPACITY":
       return "This server is at its room limit right now. Try again shortly.";
+    case "RESTARTING":
+      return "This server is restarting for an update. Try again in a minute.";
     default:
       return `Could not create the room (${code}).`;
   }

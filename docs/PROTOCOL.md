@@ -1,7 +1,7 @@
 # RÚNA Wire Protocol v1
 
 Normative reference for the frame format, handshake, and relay semantics.
-Normative reference for implementers. Five documented amendments appear at
+Normative reference for implementers. Six documented amendments appear at
 the bottom — additions the original design required implicitly but did not
 enumerate in its frame-type table.
 
@@ -52,6 +52,7 @@ Encrypted body = `counter` (8 B BE) `||` AES-256-GCM output `||` tag (16 B).
 | 0x10 | SHRED_REQUEST / SHRED_VOTE / SHRED_CANCEL (0x11, 0x12) | both | encrypted canonical-CBOR payload + Ed25519 signature over CBOR. No count fields exist anywhere. |
 | 0x13 | PURGE | S→C | JSON `{reason}` tombstone signal |
 | 0x14 | **PURGE_ACK** | C→S | JSON `{request_id}` — amendment A, below |
+| 0x15 | **RESTART_NOTICE** | S→C | JSON `{in_secs}`: the process stops in this many seconds, and every room with it — amendment F |
 | 0x20 | EPOCH_KEY | both | encrypted wrapped epoch secret (v1.1 consumer) |
 | 0x22 | **TTL_EXTEND** | both | JSON `{add_secs}` C→S; server broadcasts `{added_by, add_secs, effective_secs, kind}` — amendment D |
 | 0x21 | **SNAPSHOT** | C→S | header ‖ `covers_up_to_index` u64 BE (8 B plaintext) ‖ encrypted blob — amendment B, below |
@@ -59,7 +60,14 @@ Encrypted body = `counter` (8 B BE) `||` AES-256-GCM output `||` tag (16 B).
 
 Error codes: 4001 AUTH_FAILED · 4002 RATE_LIMITED · 4003 ROOM_FULL ·
 4004 FRAME_TOO_LARGE · 4005 PROTOCOL_ERROR · 4006 EPOCH_STALE ·
+4007 TOO_MANY_CONNECTIONS · 4008 SERVER_FULL ·
 4010 PURGED · 4011 EXPIRED · 4012 NAME_TAKEN · 4013 NAME_INVALID.
+
+4007 and 4008 arrive as WebSocket close codes, not ERROR frames: the server
+refuses these connections before any frame is read. 4007 means this address
+already holds `RUNA_MAX_CONNS_PER_IP` connections; 4008 means the process holds
+`RUNA_MAX_CONNECTIONS`. Both are temporary, so clients say so and keep retrying
+on their backoff.
 
 **Join failures are deliberately indistinguishable.** A bad key, an unknown
 room id, a room mid-purge, and a room that has exhausted its auth attempts all
@@ -133,7 +141,7 @@ original_body`. These 16 bytes are written by the server, never inspected by
 it, and are consumed by receivers as an AAD input. Sync responses reuse the
 stored entry's original frame type; frame type 0x05 therefore stays reserved.
 Server-authored event frames (JOIN_ACK, PEER_JOIN, PEER_LEAVE, PURGE, ERROR,
-TTL_EXTEND, DOC_ACK) are **never enveloped** — receivers read their JSON directly from
+TTL_EXTEND, DOC_ACK, RESTART_NOTICE) are **never enveloped** — receivers read their JSON directly from
 the body; only relayed peer ciphertext carries the sender envelope. These
 frames also carry epoch 0 by construction, so receivers must exempt them from
 the epoch-staleness check. Both invariants are pinned by tests in
@@ -184,6 +192,18 @@ its outbound queue, so a queue full of log replay cannot cost a client its
 acks. An ack is not authenticated: a hostile server can acknowledge an update
 and then discard it. That is no new power — it holds the log and can drop
 anything — and it is the same exposure every relayed frame already has.
+
+**F · RESTART_NOTICE (0x15).** Rooms live only in memory, so stopping the
+process ends every room, and a redeploy used to do that mid-session with no
+warning. On SIGTERM, with anyone connected, the server sends `{in_secs}` to
+every open room and waits that long (`RUNA_SHUTDOWN_GRACE_SECS`, default 60)
+before stopping, so people can export. A peer that joins during the countdown
+receives the notice straight after JOIN_ACK, with the seconds left. Room
+creation answers 503 `{"code":"RESTARTING"}` until the process stops. The wait
+ends early if everyone disconnects, and a second signal ends it at once. With
+nobody connected the server stops immediately. The notice is server-authored
+and unauthenticated, like every server event: a hostile server could announce a
+restart that never comes, but it could end a room at any moment regardless.
 
 All amendments keep the invariant that matters: the server never learns
 anything about document content.

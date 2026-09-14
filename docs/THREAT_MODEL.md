@@ -168,3 +168,9 @@ while ending the room early, and no warning appears. A server that omits
 matches still runs. Neither gains the server anything, since it can delete a
 room whenever it likes. What the check does is stop a server from shortening a
 room by changing one number, and make a bug that does so visible.
+
+The restart warning is server-authored and unauthenticated, like every other
+server event. A hostile server can announce a restart that never comes, or stop
+without announcing one. It could end a room at any moment regardless. The
+warning exists so that an honest operator's redeploys stop costing people their
+documents.

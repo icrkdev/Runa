@@ -17,6 +17,7 @@ export const FT = {
   SHRED_CANCEL: 0x12,
   PURGE: 0x13,
   PURGE_ACK: 0x14,
+  RESTART_NOTICE: 0x15,
   EPOCH_KEY: 0x20,
   TTL_EXTEND: 0x22,
   SNAPSHOT: 0x21,

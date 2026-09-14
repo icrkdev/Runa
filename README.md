@@ -587,6 +587,8 @@ with anything else needs.
 | `RUNA_MAX_FRAME` | `262144` | Bytes in one WebSocket message |
 | `RUNA_MAX_CONFIG_BLOB` | `4096` | Bytes of encrypted room config held for the room's life |
 | `RUNA_MAX_CONNECTIONS` | `1024` | Concurrent sockets, process-wide. The per-IP limit bounds one address; this bounds the sum |
+| `RUNA_MAX_CONNS_PER_IP` | `64` | Concurrent sockets one address may hold, at most a quarter of `RUNA_MAX_CONNECTIONS`. Offices and mobile carriers put many people behind one address |
+| `RUNA_SHUTDOWN_GRACE_SECS` | `60` | On SIGTERM, how long every open room is shown a countdown before the process stops. `0` stops at once |
 | `RUNA_MAX_QUEUE_KB` | `4096` | Bytes one connection may have queued but not yet written to its socket. Floored at twice `RUNA_MAX_FRAME`, so raising the frame cap raises this too |
 | `RUNA_ROOMS_PER_HR` | `20` | Unlisted rooms one address may create per hour |
 | `RUNA_NAMED_PER_HR` | `5` | Named rooms one address may create per hour |
@@ -731,6 +733,13 @@ docker run -d --name runa \
 > Rooms live only in RAM. Restarting the container, deploying, or rebooting the
 > host destroys every open document. That is the design, not a bug — but it
 > means you should not restart a production instance casually.
+>
+> A restart is not silent, though. On SIGTERM, which `systemctl restart`,
+> `docker stop` and both deploy scripts send, every open room is shown a
+> countdown (`RUNA_SHUTDOWN_GRACE_SECS`, 60 s by default) with an Export button,
+> and the process waits it out before stopping. With nobody connected it stops at
+> once. A reboot or a killed process still ends rooms without warning, so deploy
+> at a quiet time.
 
 ---
 
@@ -746,6 +755,7 @@ docker run -d --name runa \
 | "This page is not on HTTPS" | Serving over plain `http://` on a public hostname | Browsers refuse `ws://` from such a page. Put TLS in front — see [Behind a reverse proxy](#behind-a-reverse-proxy). `localhost` is exempt |
 | Room creation fails with `AT_CAPACITY` | The server is at `RUNA_MAX_ROOMS` | Raise it if the host has the memory, or wait for rooms to expire |
 | Only one client can connect behind a proxy | `RUNA_TRUSTED_PROXY` is not set | Every request appears to come from the proxy, so all clients share one rate-limit bucket. Set `RUNA_TRUSTED_PROXY=1` |
+| "Your network already has as many connections to this server as one address may" | More than `RUNA_MAX_CONNS_PER_IP` sockets from one address: many people behind one office or carrier address, or `RUNA_TRUSTED_PROXY` missing behind a proxy | Set `RUNA_TRUSTED_PROXY=1` behind a proxy; raise `RUNA_MAX_CONNS_PER_IP` if many people genuinely share an address |
 | Browser shows "Connection refused" | The Rust server isn't running | Check that `cargo run --release -p runa-server` is still active |
 | "This link is missing its key" | The `#k=…&s=…` part was stripped from the URL | Ask whoever shared the room for the full link including everything after the `#` |
 | Compilation errors mentioning OpenSSL | Missing system libraries | macOS: `brew install openssl` · Ubuntu: `sudo apt install libssl-dev pkg-config` · Fedora: `sudo dnf install openssl-devel` |

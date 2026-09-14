@@ -663,6 +663,11 @@ impl RoomRegistry {
         self.rooms.get(id).map(|r| r.clone())
     }
 
+    /// Every live room, for the rare message that goes to all of them.
+    pub fn all(&self) -> Vec<std::sync::Arc<Room>> {
+        self.rooms.iter().map(|r| r.value().clone()).collect()
+    }
+
     pub fn exists(&self, id: &[u8; 16]) -> bool {
         self.rooms.contains_key(id) || self.retired.contains_key(id)
     }

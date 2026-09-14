@@ -92,10 +92,14 @@ ok "image built and tagged runa:latest"
 bold "4/6  Start container"
 $SSH "MEM=$MEM LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS MAX_PEERS=$MAX_PEERS \
       MAX_CONNS=$MAX_CONNS QUEUE_KB=$QUEUE_KB bash -euo pipefail -s" <<'REMOTE'
+  # Stop, then remove. `rm -f` alone kills the process at once, which would cut
+  # off the countdown RUNA gives open rooms before it exits.
+  docker stop -t 90 runa >/dev/null 2>&1 || true
   docker rm -f runa >/dev/null 2>&1 || true
   docker run -d \
     --name runa \
     --restart unless-stopped \
+    --stop-timeout 90 \
     -p 127.0.0.1:3000:3000 \
     --memory="$MEM" --memory-swap="$MEM" \
     --pids-limit=256 \
@@ -198,5 +202,5 @@ fi
 
 bold "DEPLOYED  https://$HOST/"
 echo "  Logs:    ssh … 'docker logs -f runa'"
-echo "  Restart: ssh … 'docker restart runa'   (destroys every live room)"
+echo "  Restart: ssh … 'docker restart runa'   (warns open rooms, then ends every one)"
 echo "  Remove:  ./scripts/rollback-docker.sh"

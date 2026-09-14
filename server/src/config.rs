@@ -27,7 +27,14 @@ pub struct Config {
     pub auth_floor: Duration,
     pub auth_attempts_per_room_per_min: u32,
     pub auth_attempts_per_ip_per_min: u32,
-    pub new_conns_per_ip: usize,
+    /// Concurrent websocket connections one address may hold. Offices, schools
+    /// and mobile carriers put many people behind a single address, so this sits
+    /// well above what one person uses; `max_connections` is what bounds memory.
+    pub max_conns_per_ip: usize,
+    /// How long open rooms are warned before the process stops on SIGTERM.
+    /// Rooms live only in memory, so a restart ends every one of them, and this
+    /// is the time people get to export. Zero stops at once.
+    pub shutdown_grace: Duration,
     pub frames_per_conn_per_sec: u32,
     pub bytes_per_conn_per_sec: u64,
     pub rooms_created_per_ip_per_hour: u32,
@@ -78,7 +85,8 @@ impl Default for Config {
             auth_floor: Duration::from_millis(250),
             auth_attempts_per_room_per_min: 5,
             auth_attempts_per_ip_per_min: 30,
-            new_conns_per_ip: 10,
+            max_conns_per_ip: 64,
+            shutdown_grace: Duration::from_secs(60),
             frames_per_conn_per_sec: 100,
             bytes_per_conn_per_sec: 1024 * 1024,
             rooms_created_per_ip_per_hour: 20,
@@ -137,6 +145,16 @@ impl Config {
             c.max_queued_bytes_per_conn = kb.saturating_mul(1024);
         }
         c.max_connections = env::<usize>("RUNA_MAX_CONNECTIONS", c.max_connections).max(1);
+        // One address may take at most a quarter of the connection ceiling, so
+        // no single office, carrier or attacker can fill it alone.
+        let per_ip_default = c.max_conns_per_ip.min((c.max_connections / 4).max(1));
+        c.max_conns_per_ip =
+            env("RUNA_MAX_CONNS_PER_IP", per_ip_default).clamp(1, c.max_connections);
+        if let Some(secs) =
+            std::env::var("RUNA_SHUTDOWN_GRACE_SECS").ok().and_then(|v| v.parse::<u64>().ok())
+        {
+            c.shutdown_grace = Duration::from_secs(secs.min(600));
+        }
         c.allow_ceiling_optout =
             std::env::var("RUNA_ALLOW_CEILING_OPTOUT").is_ok_and(|v| v == "1");
         // A zero rate would brick the endpoint it guards rather than throttle
