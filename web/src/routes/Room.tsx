@@ -1,4 +1,4 @@
-import { KdfUnavailableError } from "../crypto/kdf";
+import { ARGON2_M_KIB, ARGON2_T, KdfUnavailableError } from "../crypto/kdf";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monacoModule from "monaco-editor";
@@ -95,6 +95,9 @@ function JoinableRoom(props: RoomProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  // Which derivation made this room's key and how long it took, shown once
+  // the room is open. The passphrase screen has no notice area of its own.
+  const kdfNoteRef = useRef<string | null>(null);
   // Below the panes breakpoint the split mode renders identically to
   // editor-only — the stylesheet hides the preview — so offering it there is
   // offering a control that does nothing observable.
@@ -106,6 +109,12 @@ function JoinableRoom(props: RoomProps) {
   );
 
   useAccent(temper);
+
+  useEffect(() => {
+    if (phase.kind !== "live" || !kdfNoteRef.current) return;
+    announce(kdfNoteRef.current);
+    kdfNoteRef.current = null;
+  }, [phase.kind]);
 
   // Presence expires on a timer rather than on an event, so it has to be
   // sampled: nobody sends a frame to say they have gone quiet.
@@ -438,6 +447,7 @@ function JoinableRoom(props: RoomProps) {
           }
           const roomSalt = b64ToBytes(resolved.kdf.salt);
           let derived: { material: Uint8Array | null };
+          const kdfStarted = performance.now();
           try {
             derived = await passphraseMaterial(passphrase, roomSalt);
           } catch (e) {
@@ -448,6 +458,7 @@ function JoinableRoom(props: RoomProps) {
             throw e;
           }
           if (!derived.material) return;
+          kdfNoteRef.current = argon2Note(performance.now() - kdfStarted);
           const material = derived.material;
           await startSession({
             roomIdHex: resolved.room_id,
@@ -931,7 +942,7 @@ function PassphraseGate({ name, onSubmit }: { name: string; onSubmit(p: string):
           e.preventDefault();
           if (busy) return;
           setBusy(true);
-          // Without the reset the button stays stuck on "Deriving keys…" for
+          // Without the reset the button stays stuck on "Deriving key…" for
           // any path that returns without replacing this component.
           void onSubmit(value).finally(() => setBusy(false));
         }}
@@ -942,13 +953,26 @@ function PassphraseGate({ name, onSubmit }: { name: string; onSubmit(p: string):
               may offer to remember a passphrase for an ephemeral room. */}
           <input id="pp" type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} />
         </div>
-        <button disabled={busy}>{busy ? "Deriving keys…" : "Enter room"}</button>
+        <button disabled={busy}>{busy ? "Deriving key with Argon2id…" : "Enter room"}</button>
       </form>
     </main>
   );
 }
 
 let announcer: ((msg: string) => void) | null = null;
+/// Says, inside the room, which derivation produced the key and how long it took.
+///
+/// Argon2id was blocked by the Content Security Policy in every browser for as
+/// long as the policy lacked 'wasm-unsafe-eval', and the client fell back to
+/// PBKDF2 without a word. From the outside the two are indistinguishable — on a
+/// laptop both take a fraction of a second — so nobody using a room could have
+/// noticed. There is no fallback any more, so this can only ever name Argon2id:
+/// if the derivation cannot run, the room refuses to open instead.
+function argon2Note(ms: number): string {
+  const took = ms < 1000 ? `${Math.max(1, Math.round(ms))} ms` : `${(ms / 1000).toFixed(1)} s`;
+  return `Passphrase key derived with Argon2id (${Math.round(ARGON2_M_KIB / 1024)} MiB, ${ARGON2_T} passes) in ${took}.`;
+}
+
 export function announce(msg: string): void {
   announcer?.(msg);
 }
