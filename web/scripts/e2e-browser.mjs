@@ -1122,6 +1122,13 @@ async function main() {
   // on the stand-in and is left to open, that the stand-in holds the
   // selection selected — what makes the browser enable Cut and Copy — and
   // that the copy and paste events the menu's items produce reach the editor.
+  //
+  // Those events are replayed with a clipboard object the test can read. A
+  // ClipboardEvent built by script is not the one a menu produces: Firefox
+  // hands its listeners a copy of the DataTransfer it was given, so what a
+  // handler writes never reaches the object the test holds. A real Copy from
+  // the menu is a trusted event whose clipboardData is written through, which
+  // is what Monaco's own copy has always relied on.
   const menuMarker = `menu-${Date.now().toString(36)}`;
   await focusEditor(alice);
   await alice.keyboard.type(`\n${menuMarker}`, { delay: 5 });
@@ -1174,9 +1181,13 @@ async function main() {
       const el = document.activeElement;
       if (!el?.classList.contains("runa-menu-stand-in")) return { error: `focus is on ${el?.tagName} ${el?.className}` };
       const selected = el.value.slice(el.selectionStart, el.selectionEnd);
-      const dt = new DataTransfer();
-      el.dispatchEvent(new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true }));
-      return { selected, copied: dt.getData("text/plain"), left: !!document.querySelector(".runa-menu-stand-in") };
+      const written = {};
+      const copy = new Event("copy", { bubbles: true, cancelable: true });
+      Object.defineProperty(copy, "clipboardData", {
+        value: { setData: (t, v) => { written[t] = v; }, getData: (t) => written[t] ?? "" },
+      });
+      el.dispatchEvent(copy);
+      return { selected, copied: written["text/plain"] ?? "", left: !!document.querySelector(".runa-menu-stand-in") };
     });
     if (copied.error) throw new Error(`[contextmenu] the stand-in does not have focus, so the menu's items would miss it: ${copied.error}`);
     if (copied.selected !== menuMarker) {
@@ -1188,9 +1199,11 @@ async function main() {
     const pasted = `pasted-${menuMarker}`;
     await rightClickSelection();
     await alice.evaluate((text) => {
-      const dt = new DataTransfer();
-      dt.setData("text/plain", text);
-      document.activeElement?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: (t) => (t === "text/plain" ? text : ""), setData: () => {} },
+      });
+      document.activeElement?.dispatchEvent(paste);
     }, pasted);
     let shown = "";
     for (let i = 0; i < 20 && !shown.includes(pasted); i++) {
