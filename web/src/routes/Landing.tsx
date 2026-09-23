@@ -17,6 +17,7 @@ import {
 import { estimatePassphrase } from "../crypto/passphrase";
 import { Field } from "../ui/Field";
 import { nameProblem } from "./name-rules";
+import { readJoinTarget, type JoinTarget } from "./join";
 
 type Class = "unlisted" | "named";
 
@@ -78,6 +79,8 @@ export function Landing() {
 
       {cls === "unlisted" ? <UnlistedForm /> : <NamedForm />}
 
+      <JoinForm />
+
       <footer className="landing-foot">
         <span className="micro-label">Apache-2.0 · no analytics · no cookies</span>
         <a
@@ -103,6 +106,66 @@ export function Landing() {
       </footer>
     </main>
   );
+}
+
+/// Opening a room someone else made. A private room could only be reached by
+/// its whole link and a shared one by typing its address into the browser's
+/// bar; this takes either, however it was pasted, and says what it found
+/// before anything is opened.
+function JoinForm() {
+  const [value, setValue] = useState("");
+  const target = readJoinTarget(value, window.location.origin);
+  const opens = target.kind === "private" || target.kind === "named";
+  return (
+    <form
+      className="panel join"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (opens) window.location.assign(target.href);
+      }}
+    >
+      <div className="field">
+        <label className="micro-label" htmlFor="join-room">JOIN A ROOM</label>
+        <div className="row">
+          <input
+            id="join-room"
+            type="text"
+            inputMode="url"
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="Paste a room link, or type a shared room’s name"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+          <button type="submit" disabled={!opens}>Join</button>
+        </div>
+      </div>
+      <p className={`join-hint${target.kind === "unrecognised" || target.kind === "private-no-key" ? " error-text" : ""}`} aria-live="polite">
+        {joinHint(target)}
+      </p>
+    </form>
+  );
+}
+
+function joinHint(t: JoinTarget): string {
+  switch (t.kind) {
+    case "nothing":
+      return "The link someone sent you, or a shared room’s name like copper-lantern.";
+    case "private":
+      return t.elsewhere ? `A private room on ${t.elsewhere}, with its key.` : "A private room, with its key.";
+    case "private-no-key":
+      return t.damaged
+        ? "The key after the # looks cut short. Copy the whole link again."
+        : "That is a private room without its key — the part after the # in the link. Ask for the whole link.";
+    case "named":
+      return t.elsewhere
+        ? `The shared room “${t.name}” on ${t.elsewhere}. You will need its passphrase.`
+        : `The shared room “${t.name}”. You will need its passphrase.`;
+    case "unrecognised":
+      return t.reason;
+  }
 }
 
 function ExpiryPicker({ onChange }: { onChange: (ttl: TtlBody) => void }) {

@@ -8,6 +8,10 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Added
 
+- **Join a room from the front page.** Paste the link someone sent you, or type
+  a shared room's name. It reads links with their `https://` lost, bare room
+  ids, old `/n/` addresses and stray spaces, says what it found before opening
+  anything, and warns when a private link has lost its key.
 - **Rooms survive a server restart.** Rooms still live only in memory, and the
   server still writes nothing down. With `RUNA_RESTART_KEY` set, the countdown
   before a restart now ends by handing every member a signed ticket for their
@@ -22,6 +26,20 @@ section — so this file is not documentation of the release, it is part of it.
   the room, so a list that missed a join or a leave is corrected.
 
 ### Fixed
+
+- **A shredded room could stay open.** The server destroys its copy once every
+  connected person has agreed — and that included anyone who opened the room
+  during the vote, who never saw the request and so could never agree. Every
+  voter's page wiped itself and showed the room as gone, while it stayed open
+  to anyone with the link. Someone who arrives mid-vote no longer counts, just
+  as the voters' own pages already did not count them; the server takes its
+  own note of who was present as the request passes through, so nobody can
+  shrink that list. An unfinished set of agreements now expires after half a
+  minute rather than five, so a stray one cannot stall the next shred.
+- **Another website could lock visitors out of their rooms.** Any page could
+  have its visitors' browsers send bad joins to RÚNA, spending their address's
+  guess limit until their real rooms answered "no such room". Requests from
+  other sites are refused now.
 
 - **The second Paste button in Firefox and Safari.** It was never a second
   menu. Monaco's Paste item reads the clipboard from script, and those

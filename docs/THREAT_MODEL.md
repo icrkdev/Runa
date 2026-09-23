@@ -192,6 +192,14 @@ server writing anything down. What makes that safe is what a ticket cannot do:
   guards entry. They could squat a name, which anyone can already do while it
   is free.
 
+Requests from pages on other sites are refused at `/api` and `/socket`, by
+`Origin` (sent on every WebSocket handshake and POST) and `Sec-Fetch-Site`.
+Nothing rides on cookies, so another site could never read anything; what it
+could do was make its visitors' browsers send bad joins, spending those
+visitors' own per-address guess budget until their real rooms were refused
+with the same answer as a missing room. Clients that are not browsers send
+neither header and pass, since they cannot act through someone else's browser.
+
 Log indexes on relayed updates (amendment H) are written by the server outside
 the AEAD. A server that lied about them could have a snapshot cover entries the
 client never received, and those would be lost to later joiners. That is the

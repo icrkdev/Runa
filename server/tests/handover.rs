@@ -388,3 +388,77 @@ async fn without_a_restart_key_no_tickets_are_issued_and_the_warning_says_so() {
         "no ticket, so the connection is left for the process exit to end"
     );
 }
+
+// ── Purge cohort ────────────────────────────────────────────────────────────
+
+/// Relayed through the real socket path: the server has to notice the
+/// SHRED_REQUEST go by, or someone joining mid-vote still blocks the purge.
+#[tokio::test]
+async fn a_shred_request_passing_through_decides_who_the_purge_waits_for() {
+    let (server, _) = spawn(config(None)).await;
+    let k = create_room(&server, json!({ "kind": "idle-peers", "secs": 3600 })).await;
+    let (mut a, _) = joined(&server, &k, 1, json!({})).await;
+    let (mut b, _) = joined(&server, &k, 2, json!({})).await;
+
+    let mut request = header(&k.room, 0x10);
+    request.extend_from_slice(&[0x5A; 64]);
+    a.send(Message::Binary(request.into())).await.unwrap();
+    let _ = next_of(&mut b, 0x10).await;
+
+    let (mut late, _) = joined(&server, &k, 3, json!({})).await;
+    for ws in [&mut a, &mut b] {
+        ws.send(json_frame(&k.room, 0x14, json!({ "request_id": "consensus" }))).await.unwrap();
+    }
+    assert_eq!(
+        body_json(&next_of(&mut late, 0x13).await)["reason"],
+        "shred-consensus",
+        "the voters agreed; the newcomer, who never saw the request, does not hold the room open"
+    );
+}
+
+// ── Cross-site requests ─────────────────────────────────────────────────────
+
+async fn ws_with_origin(server: &str, room: &str, origin: &str) -> Result<Ws, String> {
+    let url = format!("{}/socket/{room}", server.replacen("http://", "ws://", 1));
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert("origin", origin.parse().unwrap());
+    tokio_tungstenite::connect_async(request).await.map(|(ws, _)| ws).map_err(|e| e.to_string())
+}
+
+/// Another site could have its visitors' browsers send bad joins to RÚNA,
+/// spending those visitors' own guess budget until their real rooms answered
+/// "no such room". A page on another site must not reach the socket or the API.
+#[tokio::test]
+async fn a_page_on_another_site_cannot_reach_the_socket_or_the_api() {
+    let (server, _) = spawn(config(None)).await;
+    let k = create_room(&server, json!({ "kind": "idle-peers", "secs": 3600 })).await;
+    let own = server.clone();
+
+    let refused = ws_with_origin(&server, &k.room, "https://evil.example").await;
+    assert!(refused.is_err_and(|e| e.contains("403")), "a cross-site handshake must be refused");
+    assert!(ws_with_origin(&server, &k.room, "null").await.is_err(), "an opaque origin is refused too");
+
+    let mut ws = ws_with_origin(&server, &k.room, &own).await.expect("the page's own origin connects");
+    ws.send(join(&k, 1, json!({}))).await.unwrap();
+    let _ = next_of(&mut ws, 0x02).await;
+
+    let create = |headers: Vec<(&'static str, &'static str)>| {
+        let server = server.clone();
+        async move {
+            let mut req = reqwest::Client::new().post(format!("{server}/api/rooms/unlisted")).json(&json!({
+                "verifier": verifier_for(&random::<32>()),
+                "kdf": { "m_kib": 65536, "t": 3, "p": 1, "salt": B64.encode(random::<16>()) },
+                "ttl": { "kind": "idle-peers", "secs": 60 },
+            }));
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            req.send().await.unwrap().status().as_u16()
+        }
+    };
+    assert_eq!(create(vec![("origin", "https://evil.example")]).await, 403);
+    assert_eq!(create(vec![("sec-fetch-site", "cross-site")]).await, 403);
+    assert_eq!(create(vec![("sec-fetch-site", "same-site")]).await, 403);
+    assert_eq!(create(vec![("sec-fetch-site", "same-origin")]).await, 201);
+    assert_eq!(create(vec![]).await, 201, "a client that is not a browser sends neither header");
+}

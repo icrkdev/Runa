@@ -257,6 +257,10 @@ pub struct Room {
     pub log_id: [u8; 8],
     auth_guard: AuthGuard,
     purge_acks: Mutex<std::collections::HashMap<String, PurgeAckSet>>,
+    /// When the latest SHRED_REQUEST was relayed, and the join sequence number
+    /// the next peer would have had then. Everyone who joined before it could
+    /// have seen the request; nobody who joined after it could.
+    shred_opened: Mutex<Option<(Instant, u64)>>,
 }
 
 /// Acks for one request id, with the instant they were first seen so the
@@ -282,7 +286,17 @@ struct PurgeAckSet {
 /// nothing about it is trusted.
 pub const MAX_PURGE_REQUEST_IDS: usize = 16;
 pub const MAX_PURGE_REQUEST_ID_LEN: usize = 128;
-const PURGE_ACK_TTL: Duration = Duration::from_secs(300);
+/// How long a partial set of purge acks is kept. Every member acks the moment
+/// its own copy of the vote reaches a decision, and they all see the same
+/// votes at once, so a real set completes within a round trip or two. One
+/// still open after this is stale — a stray ack from a local timer, say — and
+/// kept longer it would hold a cohort that no longer matches the room over the
+/// next real decision.
+const PURGE_ACK_TTL: Duration = Duration::from_secs(30);
+
+/// How long after a SHRED_REQUEST its snapshot of who was present decides the
+/// purge cohort. Covers the longest vote a client will accept (one hour).
+const SHRED_REQUEST_WINDOW: Duration = Duration::from_secs(3600);
 
 /// A room may never be extended past this, no matter how many peers ask.
 /// Without it a single peer could pin a room — and its log — in memory
@@ -368,6 +382,7 @@ impl Room {
             },
             auth_guard: AuthGuard::new(auth_max_per_min),
             purge_acks: Mutex::new(std::collections::HashMap::new()),
+            shred_opened: Mutex::new(None),
         }
     }
 
@@ -517,7 +532,17 @@ impl Room {
     /// a lone hostile peer must never be able to destroy the shared copy,
     /// and the server holds no keys that would make premature destruction
     /// "safe". Fail-closed means fail-forever until real consensus.
+    /// A SHRED_REQUEST is being relayed. Remember who could have seen it.
+    pub fn note_shred_request(&self) {
+        *self.shred_opened.lock().unwrap() =
+            Some((Instant::now(), self.next_seq.load(Ordering::SeqCst)));
+    }
+
     pub fn note_purge_ack(&self, request_id: &str, peer_id: [u8; 16]) -> PurgeAckStatus {
+        self.note_purge_ack_at(request_id, peer_id, Instant::now())
+    }
+
+    fn note_purge_ack_at(&self, request_id: &str, peer_id: [u8; 16], now: Instant) -> PurgeAckStatus {
         if request_id.is_empty() || request_id.len() > MAX_PURGE_REQUEST_ID_LEN {
             return PurgeAckStatus::Pending;
         }
@@ -527,15 +552,37 @@ impl Room {
         // live count, so one peer could bank acks from throwaway connections,
         // drop them to shrink the denominator, and purge a room whose other
         // occupants had never agreed to anything.
-        let live: std::collections::HashSet<[u8; 16]> =
-            self.peers.lock().unwrap().iter().map(|p| p.peer_id).collect();
-        if !live.contains(&peer_id) {
+        let peers: Vec<([u8; 16], u64)> =
+            self.peers.lock().unwrap().iter().map(|p| (p.peer_id, p.joined_at_seq)).collect();
+        if !peers.iter().any(|(id, _)| *id == peer_id) {
             return PurgeAckStatus::Pending;
         }
+        // Who has to agree. Everyone connected, except anyone who joined after
+        // the latest shred request: the vote was sent before they arrived and
+        // is never replayed, so they can neither see it nor vote in it, and
+        // the voters' own clients count them out too (the roster is frozen
+        // into the request). Counting them here meant one person arriving
+        // mid-vote stopped the purge: every voter wiped and left believing
+        // the room destroyed, and it stayed open to anyone with the link.
+        //
+        // This gives nobody new power. The snapshot is taken by the server
+        // when the request passes through, not claimed by anyone, so a member
+        // cannot shrink it after the fact; a member who sent a request while
+        // alone could equally have purged the room while alone.
+        let since = self
+            .shred_opened
+            .lock()
+            .unwrap()
+            .filter(|(at, _)| now.saturating_duration_since(*at) < SHRED_REQUEST_WINDOW)
+            .map(|(_, seq)| seq);
+        let live: std::collections::HashSet<[u8; 16]> = peers
+            .iter()
+            .filter(|(_, joined)| since.is_none_or(|seq| *joined < seq))
+            .map(|(id, _)| *id)
+            .collect();
 
         let mut acks = self.purge_acks.lock().unwrap();
-        let now = Instant::now();
-        acks.retain(|_, set| now.duration_since(set.opened) < PURGE_ACK_TTL);
+        acks.retain(|_, set| now.saturating_duration_since(set.opened) < PURGE_ACK_TTL);
         if !acks.contains_key(request_id) && acks.len() >= MAX_PURGE_REQUEST_IDS {
             // Full of unresolved votes: drop the oldest rather than grow.
             if let Some(oldest) =
@@ -1285,6 +1332,67 @@ mod purge_ack_tests {
         // Only the honest peer's own ack completes it.
         assert_eq!(
             r.note_purge_ack("consensus", honest),
+            PurgeAckStatus::AllAcked("consensus".into())
+        );
+    }
+
+    /// Reported shape: everyone votes to shred, someone opens the link during
+    /// the vote, every voter's page wipes itself — and the room stays up,
+    /// because the newcomer, who never saw the request, never acked.
+    #[test]
+    fn someone_who_joins_during_the_vote_cannot_stop_the_purge() {
+        let r = room();
+        let a = connect(&r);
+        let b = connect(&r);
+        r.note_shred_request();
+        let _late = connect(&r);
+        assert_eq!(r.note_purge_ack("consensus", a), PurgeAckStatus::Pending);
+        assert_eq!(r.note_purge_ack("consensus", b), PurgeAckStatus::AllAcked("consensus".into()));
+    }
+
+    #[test]
+    fn with_no_shred_request_in_flight_everyone_connected_must_ack() {
+        let r = room();
+        let a = connect(&r);
+        let b = connect(&r);
+        let c = connect(&r);
+        assert_eq!(r.note_purge_ack("consensus", a), PurgeAckStatus::Pending);
+        assert_eq!(r.note_purge_ack("consensus", b), PurgeAckStatus::Pending);
+        assert_eq!(r.note_purge_ack("consensus", c), PurgeAckStatus::AllAcked("consensus".into()));
+    }
+
+    #[test]
+    fn a_request_long_past_no_longer_decides_who_counts() {
+        let r = room();
+        let a = connect(&r);
+        r.note_shred_request();
+        let later = connect(&r);
+        let now = Instant::now() + SHRED_REQUEST_WINDOW + Duration::from_secs(1);
+        assert_eq!(r.note_purge_ack_at("consensus", a, now), PurgeAckStatus::Pending);
+        assert_eq!(
+            r.note_purge_ack_at("consensus", later, now),
+            PurgeAckStatus::AllAcked("consensus".into())
+        );
+    }
+
+    /// A stray ack — a local timer running ahead, say — must not leave its
+    /// cohort waiting for the next real decision to complete it.
+    #[test]
+    fn a_partial_set_of_acks_goes_stale_quickly() {
+        let r = room();
+        let a = connect(&r);
+        let b = connect(&r);
+        let t0 = Instant::now();
+        assert_eq!(r.note_purge_ack_at("consensus", a, t0), PurgeAckStatus::Pending);
+        // Absolute times, not offsets from the constant: a test measured
+        // against PURGE_ACK_TTL would pass whatever the constant said.
+        assert_eq!(
+            r.note_purge_ack_at("consensus", b, t0 + Duration::from_secs(31)),
+            PurgeAckStatus::Pending,
+            "b alone, half a minute later, is not the room agreeing"
+        );
+        assert_eq!(
+            r.note_purge_ack_at("consensus", a, t0 + Duration::from_secs(32)),
             PurgeAckStatus::AllAcked("consensus".into())
         );
     }
