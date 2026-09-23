@@ -1105,53 +1105,116 @@ async function main() {
     throw new Error(`[sticky] the editor is pinning a block header again: ${sticky.h}px "${sticky.text}"`);
   }
 
-  // The editor must have a context menu at all. Turning Monaco's off to stop
-  // a doubled Paste left right-click useless — on Monaco's rendered text the
-  // platform menu is a generic page menu with no Cut or Copy, since the glyphs
-  // are divs and the real input is hidden — so this guards that regression.
+  // Right-click has to offer Cut, Copy and Paste, and Paste has to take one
+  // click.
   //
-  // The doubling itself was the browser, not a second menu. Monaco's Paste
-  // reads the clipboard from script, and Gecko and WebKit answer every such
-  // read with a Paste button of their own that needs a second click. So the
-  // menu there keeps everything except Paste; Chromium, which asks once per
-  // site, keeps Paste. Both halves are read off the rendered menu below.
+  // Turning Monaco's menu off everywhere left right-click useless: on
+  // Monaco's rendered text the platform menu is a generic page menu with no
+  // Cut or Copy, since the glyphs are divs and the real input is hidden. And
+  // in Firefox and Safari Monaco's own Paste can never be one click — it reads
+  // the clipboard from script, which those two answer with a Paste button of
+  // their own. So Chromium keeps Monaco's menu, and Firefox and WebKit get the
+  // browser's own menu, opened over a stand-in holding the selection, whose
+  // Paste is a real one.
   //
-  // Asserted on preventDefault as well as on the menu's items. The event is
-  // what proves the platform menu was suppressed; the items are what prove
-  // which menu replaced it.
+  // A native menu cannot be driven from here, so the WebKit and Firefox half
+  // proves what the menu depends on instead: that the menu event really lands
+  // on the stand-in and is left to open, that the stand-in holds the
+  // selection selected — what makes the browser enable Cut and Copy — and
+  // that the copy and paste events the menu's items produce reach the editor.
+  //
+  // Those events are replayed with a clipboard object the test can read. A
+  // ClipboardEvent built by script is not the one a menu produces: Firefox
+  // hands its listeners a copy of the DataTransfer it was given, so what a
+  // handler writes never reaches the object the test holds. A real Copy from
+  // the menu is a trusted event whose clipboardData is written through, which
+  // is what Monaco's own copy has always relied on.
+  const menuMarker = `menu-${Date.now().toString(36)}`;
+  await focusEditor(alice);
+  await alice.keyboard.type(`\n${menuMarker}`, { delay: 5 });
+  await alice.keyboard.press("Shift+Home");
   await alice.evaluate(() => {
-    window.__ctxPrevented = null;
+    window.__ctx = null;
     window.addEventListener(
       "contextmenu",
-      // Capture, because Monaco calls stopPropagation and the event never
-      // bubbles this far. The read is deferred so defaultPrevented is sampled
-      // after the whole dispatch, including handlers deeper than this one.
-      (e) => setTimeout(() => { window.__ctxPrevented = e.defaultPrevented; }, 0),
+      // Capture, because Monaco calls stopPropagation. Sampled after the
+      // whole dispatch, so every handler has had its say.
+      (e) =>
+        setTimeout(() => {
+          window.__ctx = { prevented: e.defaultPrevented, target: String(e.target?.className ?? "") };
+        }, 0),
       true,
     );
   });
-  await alice.click(".monaco-editor .view-lines", { button: "right" });
-  await alice.waitForTimeout(600);
-  const ctx = await alice.evaluate(() => window.__ctxPrevented);
+  const rightClickSelection = async () => {
+    const box = await alice.locator(".view-lines .view-line", { hasText: menuMarker }).first().boundingBox();
+    if (!box) throw new Error("[contextmenu] the selected line is not on screen");
+    // Inside the selection, which a right-click keeps.
+    await alice.mouse.click(box.x + 12, box.y + box.height / 2, { button: "right" });
+    await alice.waitForTimeout(400);
+    return alice.evaluate(() => window.__ctx);
+  };
+  const ctx = await rightClickSelection();
   if (ctx === null) throw new Error("[contextmenu] no contextmenu event reached the page");
-  if (ctx !== true) {
-    throw new Error("[contextmenu] the editor has no context menu of its own — right-click falls back to a generic page menu with no Cut or Copy");
-  }
-  const menuItems = (await alice.locator(".monaco-menu .action-label").allTextContents()).filter((t) => t.trim());
-  for (const needed of ["Cut", "Copy"]) {
-    if (!menuItems.includes(needed)) {
-      throw new Error(`[contextmenu] the editor's menu has no ${needed}: ${JSON.stringify(menuItems)}`);
+  if (ENGINE_NAME === "chromium") {
+    if (ctx.prevented !== true) {
+      throw new Error("[contextmenu] the editor has no context menu of its own — right-click falls back to a generic page menu with no Cut or Copy");
+    }
+    const menuItems = (await alice.locator(".monaco-menu .action-label").allTextContents()).filter((t) => t.trim());
+    for (const needed of ["Cut", "Copy", "Paste"]) {
+      if (!menuItems.includes(needed)) {
+        throw new Error(`[contextmenu] the editor's menu has no ${needed}: ${JSON.stringify(menuItems)}`);
+      }
+    }
+    await alice.keyboard.press("Escape");
+  } else {
+    if (ctx.prevented !== false || !ctx.target.includes("runa-menu-stand-in")) {
+      throw new Error(
+        `[contextmenu] ${ENGINE_NAME} must open its own menu over the stand-in, got target "${ctx.target}", prevented ${ctx.prevented}`,
+      );
+    }
+    const monacoItems = (await alice.locator(".monaco-menu .action-label").allTextContents()).filter((t) => t.trim());
+    if (monacoItems.length) {
+      throw new Error(`[contextmenu] Monaco's menu opened too, so there are two menus: ${JSON.stringify(monacoItems)}`);
+    }
+    const copied = await alice.evaluate(() => {
+      const el = document.activeElement;
+      if (!el?.classList.contains("runa-menu-stand-in")) return { error: `focus is on ${el?.tagName} ${el?.className}` };
+      const selected = el.value.slice(el.selectionStart, el.selectionEnd);
+      const written = {};
+      const copy = new Event("copy", { bubbles: true, cancelable: true });
+      Object.defineProperty(copy, "clipboardData", {
+        value: { setData: (t, v) => { written[t] = v; }, getData: (t) => written[t] ?? "" },
+      });
+      el.dispatchEvent(copy);
+      return { selected, copied: written["text/plain"] ?? "", left: !!document.querySelector(".runa-menu-stand-in") };
+    });
+    if (copied.error) throw new Error(`[contextmenu] the stand-in does not have focus, so the menu's items would miss it: ${copied.error}`);
+    if (copied.selected !== menuMarker) {
+      throw new Error(`[contextmenu] the stand-in does not hold the selection, so the browser would grey out Cut and Copy: "${copied.selected}"`);
+    }
+    if (copied.copied !== menuMarker) throw new Error(`[contextmenu] Copy from the browser's menu copied "${copied.copied}"`);
+    if (copied.left) throw new Error("[contextmenu] the stand-in stayed behind after Copy");
+
+    const pasted = `pasted-${menuMarker}`;
+    await rightClickSelection();
+    await alice.evaluate((text) => {
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: (t) => (t === "text/plain" ? text : ""), setData: () => {} },
+      });
+      document.activeElement?.dispatchEvent(paste);
+    }, pasted);
+    let shown = "";
+    for (let i = 0; i < 20 && !shown.includes(pasted); i++) {
+      await alice.waitForTimeout(150);
+      shown = await alice.evaluate(() => document.querySelector(".pane-preview .preview-body")?.textContent ?? "");
+    }
+    if (!shown.includes(pasted)) throw new Error("[contextmenu] Paste from the browser's menu did not reach the document");
+    if (await alice.locator(".runa-menu-stand-in").count()) {
+      throw new Error("[contextmenu] the stand-in stayed behind after Paste");
     }
   }
-  const wantsPaste = ENGINE_NAME === "chromium";
-  if (menuItems.includes("Paste") !== wantsPaste) {
-    throw new Error(
-      wantsPaste
-        ? `[contextmenu] Chromium lost Paste from the editor's menu: ${JSON.stringify(menuItems)}`
-        : `[contextmenu] ${ENGINE_NAME} offers Paste in the editor's menu, which makes the browser show a second Paste button: ${JSON.stringify(menuItems)}`,
-    );
-  }
-  await alice.keyboard.press("Escape");
 
 
   // A shred request must survive a reconnect. Reported from two machines: a
@@ -1438,7 +1501,7 @@ async function main() {
   console.log(`  a named room opens in another page with the passphrase it was made with`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  the room fits the window exactly; the chrome cannot scroll away`);
-  console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu, Paste only where it takes one click`);
+  console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; right-click offers Cut, Copy and a one-click Paste in every engine`);
   console.log(`  no block header pins itself to the top of an indented document`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  a restart warns both open rooms with a countdown, and the server waits it out`);

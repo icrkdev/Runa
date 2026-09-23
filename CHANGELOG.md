@@ -24,12 +24,14 @@ section — so this file is not documentation of the release, it is part of it.
 ### Fixed
 
 - **The second Paste button in Firefox and Safari.** It was never a second
-  menu. Monaco's Paste item reads the clipboard from script, and those browsers
-  answer every such read with a Paste button of their own that has to be
-  clicked as well — a permission prompt that no page can turn off. Paste is now
-  left off the editor's right-click menu in those two browsers; the rest of the
-  menu stays, and pasting from the keyboard never asked in the first place.
-  Chromium, which asks once per site, keeps it.
+  menu. Monaco's Paste item reads the clipboard from script, and those
+  browsers answer every such read with a Paste button of their own that has to
+  be clicked as well — a permission prompt no page can turn off, so no Paste a
+  page draws itself can ever take one click there. Right-click in those two
+  now opens the browser's own menu instead, over an invisible stand-in holding
+  your selection: Cut, Copy, Paste and Select All, each one click, carried out
+  on the editor. Change All Occurrences and Command Palette stay on ⌘F2/Ctrl+F2
+  and F1. Chromium keeps the editor's menu, whose Paste asks once per site.
 - **Long sessions stopped compacting their history, and could fill up.** A
   snapshot has to say how much of the room's log it covers, and a client could
   only count the edits it had written itself. The longer-present member, who

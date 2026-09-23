@@ -3,10 +3,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monacoModule from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
-import { keepPasteOffTheMenuWhereItAsksTwice } from "../ui/contextmenu";
+import { clipboardReadAsksEveryTime, openBrowserMenuOnRightClick } from "../ui/contextmenu";
 
 loader.config({ monaco: monacoModule });
-keepPasteOffTheMenuWhereItAsksTwice();
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -361,6 +360,14 @@ function JoinableRoom(props: RoomProps) {
         },
       };
       await sessionRef.current.attachEditor(monacoMod, editor);
+      // Firefox and Safari make any Paste the page draws take two clicks, so
+      // there right-click opens the browser's own menu, whose Paste is one.
+      // Touch screens keep Monaco's: their menu comes from a long press, not
+      // a mouse button, and never reaches the stand-in.
+      if (clipboardReadAsksEveryTime(navigator.userAgent) && !COARSE_POINTER) {
+        const undo = openBrowserMenuOnRightClick(editor);
+        editor.onDidDispose(undo);
+      }
 
 
       // Ctrl/Cmd+B and Ctrl/Cmd+I do nothing in Monaco on their own — bold and
@@ -1109,11 +1116,11 @@ export const MONACO_OPTIONS = {
   // platform menu on Monaco's rendered text is a generic page menu — no Cut, no
   // Copy — because the visible glyphs are divs and the real input is hidden.
   //
-  // The second Paste reported from Firefox and Safari was never a second menu.
-  // It is the browser asking permission: Monaco's Paste reads the clipboard
-  // from script, and those two engines answer every such read with a Paste
-  // button of their own that has to be clicked too. Paste is taken off this
-  // menu there and nowhere else — see ui/contextmenu.ts.
+  // In Firefox and Safari the right-click never reaches it, though. Its Paste
+  // reads the clipboard from script, which those two answer with a Paste button
+  // of their own that has to be clicked too — the "second Paste" reported from
+  // both. There, right-click opens the browser's menu over a stand-in instead,
+  // and its Paste is one click. See ui/contextmenu.ts.
   contextmenu: true,
   quickSuggestions: false,
   wordBasedSuggestions: "off",
