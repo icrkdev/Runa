@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { replaceRoster } from "./session";
+import { replaceRoster, rosterChanges, snapshotCover } from "./session";
 import { rosterHash, type RosterEntry } from "./shred/roster";
 
 // Peer ids and public keys are decoded from base64 on the way in, so the
@@ -53,5 +53,44 @@ describe("JOIN_ACK replaces the roster instead of merging into it", () => {
     replaceRoster(roster, ack(["ghost"]));
     replaceRoster(roster, []);
     expect(roster.size).toBe(0);
+  });
+});
+
+describe("the roster every PONG carries", () => {
+  it("corrects a roster that missed a join and a leave, and nothing else", () => {
+    const local = [pid("alice"), pid("ghost")];
+    const { joined, left } = rosterChanges(local, ack(["alice", "bob"]));
+    expect(joined.map((r) => r.peer_id)).toEqual([pid("bob")]);
+    expect(left).toEqual([pid("ghost")]);
+  });
+
+  it("changes nothing when the two agree", () => {
+    const { joined, left } = rosterChanges([pid("alice"), pid("bob")], ack(["bob", "alice"]));
+    expect(joined).toEqual([]);
+    expect(left).toEqual([]);
+  });
+});
+
+describe("the index a snapshot claims to cover", () => {
+  // The elected snapshotter is the member who has been there longest. Here it
+  // has only read: 400 entries in the log, none of them its own.
+  const reader = { watermark: 400, lastCovered: 0, baseIndex: 0, storedCount: 0 };
+
+  it("is everything the copy holds, not only what its holder typed", () => {
+    expect(snapshotCover({ indexed: true, ...reader })).toBe(400);
+    // What it used to be, and still is against a server without indexes: an
+    // index of zero compacts nothing, however long the room lives.
+    expect(snapshotCover({ indexed: false, ...reader })).toBe(0);
+  });
+
+  it("does not move backwards after someone else's snapshot, which the server would refuse", () => {
+    // Another member snapshotted to 300 and left; this one now holds 320.
+    const after = { watermark: 320, lastCovered: 300, baseIndex: 0, storedCount: 5 };
+    expect(snapshotCover({ indexed: true, ...after })).toBe(320);
+    expect(snapshotCover({ indexed: false, ...after })).toBeLessThan(300);
+  });
+
+  it("is nothing at all when nothing new has arrived since the last one", () => {
+    expect(snapshotCover({ indexed: true, watermark: 300, lastCovered: 300, baseIndex: 0, storedCount: 0 })).toBeNull();
   });
 });

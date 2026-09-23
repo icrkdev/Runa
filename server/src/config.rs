@@ -62,6 +62,10 @@ pub struct Config {
     /// `ceiling_optout`). Off by default: an immortal, never-swept room is a
     /// permanent memory reservation that any anonymous caller could make.
     pub allow_ceiling_optout: bool,
+    /// Signs the tickets that let rooms outlive a restart (amendment I). Both
+    /// the stopping and the starting process must have the same one. Unset,
+    /// no tickets are issued and a restart ends every room.
+    pub restart_key: Option<crate::runar::ticket::RestartKey>,
 }
 
 impl Default for Config {
@@ -99,6 +103,7 @@ impl Default for Config {
             max_connections: 1024,
             max_config_blob_bytes: 4096,
             allow_ceiling_optout: false,
+            restart_key: None,
         }
     }
 }
@@ -157,6 +162,9 @@ impl Config {
         }
         c.allow_ceiling_optout =
             std::env::var("RUNA_ALLOW_CEILING_OPTOUT").is_ok_and(|v| v == "1");
+        c.restart_key = std::env::var("RUNA_RESTART_KEY")
+            .ok()
+            .and_then(|v| crate::runar::ticket::RestartKey::from_hex(&v));
         // A zero rate would brick the endpoint it guards rather than throttle
         // it, and the frame limiter multiplies by two, so keep both in range.
         c.frames_per_conn_per_sec = c.frames_per_conn_per_sec.clamp(1, u32::MAX / 2);

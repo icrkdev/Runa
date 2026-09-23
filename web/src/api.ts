@@ -65,6 +65,21 @@ export class Api {
     return res.json() as Promise<CreateRoomResponse>;
   }
 
+  /// Present a restart ticket to the process that replaced the one which
+  /// issued it. Throws only when the request never reached the server, which
+  /// the caller retries like a 503.
+  async restoreRoom(ticket: string): Promise<"restored" | "retry" | "gone" | "name-taken"> {
+    const res = await fetch(`${this.baseUrl}/api/rooms/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket }),
+    });
+    if (res.status === 200 || res.status === 201) return "restored";
+    if (res.status === 409) return "name-taken";
+    if (res.status === 400 || res.status === 410) return "gone";
+    return "retry";
+  }
+
   async createNamed(args: {
     name: string;
     suffix: boolean;

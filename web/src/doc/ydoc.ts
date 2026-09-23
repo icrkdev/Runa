@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { LogCursor } from "./cursor";
 
 export interface TransportLike {
   sendUpdate(plaintext: Uint8Array): Promise<void>;
@@ -52,6 +53,9 @@ export class RunaDoc {
   /// as the transport reports them. Not updateCount, which counts local edits
   /// before they are merged or split for sending.
   storedCount = 0;
+  /// Exactly which room-log entries this copy holds, against a server that
+  /// sends indexes.
+  readonly cursor = new LogCursor();
 
   private buffer: Uint8Array[] = [];
   private bufferedBytes = 0;
@@ -140,7 +144,8 @@ export class RunaDoc {
     return bytesOk || countOk || timeOk;
   }
 
-  async createSnapshot(logLen: bigint): Promise<void> {
+  /// Returns whether the snapshot was sent.
+  async createSnapshot(logLen: bigint): Promise<boolean> {
     const state = Y.encodeStateAsUpdate(this.ydoc);
     try {
       await this.opts.transport.sendSnapshot(wrapWithLengthAndPad(state), logLen);
@@ -148,12 +153,13 @@ export class RunaDoc {
       // The server rejects snapshots from anyone but the elected peer. Moving
       // baseIndex anyway would make the next sync request start past history
       // the server still holds, and the missing updates never arrive.
-      return;
+      return false;
     }
     this.lastSnapshotAt = Date.now();
     this.updateCount = 0;
     this.storedCount = 0;
     this.baseIndex = Number(logLen);
+    return true;
   }
 
   destroy(): void {

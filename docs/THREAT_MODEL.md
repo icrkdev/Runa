@@ -174,3 +174,26 @@ server event. A hostile server can announce a restart that never comes, or stop
 without announcing one. It could end a room at any moment regardless. The
 warning exists so that an honest operator's redeploys stop costing people their
 documents.
+
+Restart tickets (PROTOCOL amendment I) let a room outlive a restart without the
+server writing anything down. What makes that safe is what a ticket cannot do:
+
+- **It cannot open a room.** It recreates one with the verifier it had, so
+  joining still takes the key. A leaked ticket lets its holder recreate an
+  empty room nobody can enter without the key — and only for ten minutes.
+- **It cannot undo a shred.** Tickets are issued when the process stops, only
+  for rooms still alive at that moment, so a room shredded before then has
+  none. One shredded after it was brought back is a tombstone in the new
+  process, which refuses the ticket.
+- **It cannot be minted without the key.** `RUNA_RESTART_KEY` is operator
+  configuration, kept out of the world-readable env file. Someone who has it
+  can recreate rooms of their choosing under chosen ids and names, but every
+  field still passes the same validation as a new room, and the verifier still
+  guards entry. They could squat a name, which anyone can already do while it
+  is free.
+
+Log indexes on relayed updates (amendment H) are written by the server outside
+the AEAD. A server that lied about them could have a snapshot cover entries the
+client never received, and those would be lost to later joiners. That is the
+same power as dropping the entries, which the server holding the log always
+had.

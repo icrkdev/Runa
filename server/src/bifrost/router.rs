@@ -10,7 +10,9 @@ use axum::Router;
 use tower_http::services::ServeDir;
 
 use crate::bifrost;
-use crate::bifrost::http::{create_named, create_unlisted, meta_unlisted, names_resolve, version};
+use crate::bifrost::http::{
+    create_named, create_unlisted, meta_unlisted, names_resolve, restore_room, version,
+};
 use crate::AppState;
 
 pub async fn ws_route(
@@ -170,6 +172,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/names/resolve", post(names_resolve))
         .route("/api/rooms/unlisted", post(create_unlisted))
         .route("/api/rooms/named", post(create_named))
+        .route("/api/rooms/restore", post(restore_room))
         .route("/version", get(version))
         .fallback_service(static_service)
         .layer(middleware::from_fn(security_headers))

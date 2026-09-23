@@ -191,13 +191,27 @@ $SSH "MEM_MAX=$MEM_MAX MEM_HIGH=$MEM_HIGH LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS \
     echo "added RUNA_TRUSTED_PROXY=1 to /etc/runa/runa.env; it was missing"
   fi
 
+  # The key that lets open rooms outlive a restart. Generated once and never
+  # replaced: the process being stopped signs its tickets with the key it
+  # started with, and the one starting must read them with the same.
+  if ! sudo test -s /etc/runa/restart.env; then
+    # Piped from the shell's own printf, so the key never appears in the
+    # process list the way an argument to sudo would.
+    KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+    printf 'RUNA_RESTART_KEY=%s\n' "$KEY" | sudo sh -c 'umask 077; cat > /etc/runa/restart.env'
+    unset KEY
+    echo "created /etc/runa/restart.env: open rooms carry over from the next restart on"
+    echo "(this restart is done by the running binary, which may predate the handover)"
+  fi
+
   sudo systemctl daemon-reload
   sudo systemctl enable runa >/dev/null 2>&1 || true
   PORT=$(grep -oP '^RUNA_BIND=.*:\K[0-9]+' /etc/runa/runa.env || echo 3000)
   LIVE=$(ss -Htn state established "( sport = :$PORT )" 2>/dev/null | wc -l | tr -d ' ')
   if [ "${LIVE:-0}" -gt 0 ]; then
-    echo "$LIVE connection(s) open: each open room gets a restart countdown, and the"
-    echo "restart waits it out (RUNA_SHUTDOWN_GRACE_SECS, 60 s by default)"
+    echo "$LIVE connection(s) open: each open room gets a restart countdown, the"
+    echo "restart waits it out (RUNA_SHUTDOWN_GRACE_SECS, 60 s by default), and the"
+    echo "rooms carry over to the new process"
   else
     echo "no open connections; restarting straight away"
   fi

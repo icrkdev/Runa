@@ -40,8 +40,8 @@ Encrypted body = `counter` (8 B BE) `||` AES-256-GCM output `||` tag (16 B).
 
 | Value | Name | Dir | Body |
 |---|---|---|---|
-| 0x01 | JOIN | C→S | JSON `{auth_key_b64? (32 B), session_pubkey_b64 (32 B), client_version, acks?}` |
-| 0x02 | JOIN_ACK | S→C | JSON `{peer_id, epoch, log_len, base_index, has_snapshot, ttl, elapsed_secs, ceiling_optout, kdf:{alg,m,t,p,salt_b64}, config_blob?, roster:[{peer_id,pubkey_b64,joined_at_seq}], acks?, limits?:{max_frame_bytes,frames_per_sec,bytes_per_sec}}` — amendment E |
+| 0x01 | JOIN | C→S | JSON `{auth_key_b64? (32 B), session_pubkey_b64 (32 B), client_version, acks?, indexed?, heartbeat?}` — amendments E, G, H |
+| 0x02 | JOIN_ACK | S→C | JSON `{peer_id, epoch, log_len, base_index, has_snapshot, ttl, elapsed_secs, ceiling_optout, kdf:{alg,m,t,p,salt_b64}, config_blob?, roster:[{peer_id,pubkey_b64,joined_at_seq}], acks?, limits?:{max_frame_bytes,frames_per_sec,bytes_per_sec}, indexed?, heartbeat?, log_id}` — amendments E, G, H, I |
 | 0x03 | DOC_UPDATE | both | encrypted Yjs update, or one part of a split one — amendment E |
 | 0x04 | DOC_SYNC_REQ | C→S | JSON `{from_index}` (index form; state vectors leak clocks and are not used) |
 | 0x05 | DOC_SYNC_RESP | S→C | one or more encrypted entries: snapshot blob then tail |
@@ -52,7 +52,10 @@ Encrypted body = `counter` (8 B BE) `||` AES-256-GCM output `||` tag (16 B).
 | 0x10 | SHRED_REQUEST / SHRED_VOTE / SHRED_CANCEL (0x11, 0x12) | both | encrypted canonical-CBOR payload + Ed25519 signature over CBOR. No count fields exist anywhere. |
 | 0x13 | PURGE | S→C | JSON `{reason}` tombstone signal |
 | 0x14 | **PURGE_ACK** | C→S | JSON `{request_id}` — amendment A, below |
-| 0x15 | **RESTART_NOTICE** | S→C | JSON `{in_secs}`: the process stops in this many seconds, and every room with it — amendment F |
+| 0x15 | **RESTART_NOTICE** | S→C | JSON `{in_secs, handover}`: the process stops in this many seconds; `handover` says whether rooms will carry over — amendments F, I |
+| 0x16 | **RESTART_TICKET** | S→C | JSON `{ticket}`, sent as the process stops; the connection is then closed with 1012 — amendment I |
+| 0x17 | **PING** | C→S | JSON `{}`, only on a connection whose JOIN asked for `heartbeat` — amendment G |
+| 0x18 | **PONG** | S→C | JSON `{roster:[{peer_id,pubkey_b64,joined_at_seq}]}` — amendment G |
 | 0x20 | EPOCH_KEY | both | encrypted wrapped epoch secret (v1.1 consumer) |
 | 0x22 | **TTL_EXTEND** | both | JSON `{add_secs}` C→S; server broadcasts `{added_by, add_secs, effective_secs, kind}` — amendment D |
 | 0x21 | **SNAPSHOT** | C→S | header ‖ `covers_up_to_index` u64 BE (8 B plaintext) ‖ encrypted blob — amendment B, below |
@@ -62,6 +65,9 @@ Error codes: 4001 AUTH_FAILED · 4002 RATE_LIMITED · 4003 ROOM_FULL ·
 4004 FRAME_TOO_LARGE · 4005 PROTOCOL_ERROR · 4006 EPOCH_STALE ·
 4007 TOO_MANY_CONNECTIONS · 4008 SERVER_FULL ·
 4010 PURGED · 4011 EXPIRED · 4012 NAME_TAKEN · 4013 NAME_INVALID.
+
+1012 (the standard *Service Restart* close code) ends every connection that
+was handed a restart ticket (amendment I).
 
 4007 and 4008 arrive as WebSocket close codes, not ERROR frames: the server
 refuses these connections before any frame is read. 4007 means this address
@@ -141,7 +147,7 @@ original_body`. These 16 bytes are written by the server, never inspected by
 it, and are consumed by receivers as an AAD input. Sync responses reuse the
 stored entry's original frame type; frame type 0x05 therefore stays reserved.
 Server-authored event frames (JOIN_ACK, PEER_JOIN, PEER_LEAVE, PURGE, ERROR,
-TTL_EXTEND, DOC_ACK, RESTART_NOTICE) are **never enveloped** — receivers read their JSON directly from
+TTL_EXTEND, DOC_ACK, RESTART_NOTICE, RESTART_TICKET, PONG) are **never enveloped** — receivers read their JSON directly from
 the body; only relayed peer ciphertext carries the sender envelope. These
 frames also carry epoch 0 by construction, so receivers must exempt them from
 the epoch-staleness check. Both invariants are pinned by tests in
@@ -204,6 +210,86 @@ ends early if everyone disconnects, and a second signal ends it at once. With
 nobody connected the server stops immediately. The notice is server-authored
 and unauthenticated, like every server event: a hostile server could announce a
 restart that never comes, but it could end a room at any moment regardless.
+
+**G · PING (0x17) and PONG (0x18).** Acks (amendment E) cover a connection
+something is being sent on. One that died while nobody typed sent nothing that
+could go unacknowledged, so it was noticed at the next keystroke — and until
+then the page showed the room as connected while everyone else's edits went
+nowhere.
+
+- A client that sends `heartbeat: true` in JOIN has it echoed in JOIN_ACK, and
+  may then send PING. The server answers each with PONG, written straight to
+  the socket like DOC_ACK. A client pings every 15 seconds and abandons a
+  connection whose PONG is 10 seconds late.
+- PONG carries the room's current roster. JOIN_ACK was the only full roster a
+  client ever received, so a client that missed a PEER_JOIN or PEER_LEAVE kept
+  the wrong one until it reconnected. The roster is read in the same task that
+  writes the PONG, so no older view of it can arrive after a newer one; the
+  client applies the difference through the same handlers as the events it
+  missed. Like every roster, it is a server claim and is treated as a hint.
+- PING on a connection that did not ask is still a protocol error.
+
+**H · Log indexes on relayed updates.** A snapshot tells the server which log
+index it covers, and the server discards everything below it. The client could
+only estimate that index from its own stored updates, which undercounts by
+every update anyone else wrote — and once a member with fewer of its own became
+the snapshotter, its estimate fell below the previous snapshot and the server
+refused it, since a snapshot may never move backwards. Compaction then stopped
+for the life of the room, and a long session filled its log until edits were
+refused.
+
+- A client that sends `indexed: true` in JOIN has it echoed in JOIN_ACK, and
+  every DOC_UPDATE relayed to it, live or replayed, arrives as
+  `header(32) ‖ sender(16) ‖ index(u64 BE) ‖ body`. Other frame types, and
+  connections that did not ask, keep the plain envelope.
+- The client counts an entry once its content is in the document: applied,
+  its own and acknowledged (DOC_ACK already carries the index), or covered by
+  a snapshot it applied. An entry nobody can decrypt counts as well, since
+  nothing will ever read it. A part of a split update counts only when the
+  whole update has been applied, so an incomplete one holds back every
+  snapshot after its first part. The snapshot index is the length of the
+  unbroken run from zero, and sync requests resume from it.
+- The index is written by the server and is outside the AEAD. A server that
+  lied about it could make a snapshot cover entries the client never saw, and
+  those would be lost — no new power, since it holds the log and can drop any
+  entry anyway.
+
+**I · RESTART_TICKET (0x16), log ids, and rooms that outlive a restart.**
+Amendment F gave people a minute's warning before a restart ended their room.
+But the people in a room still hold everything that matters — the document
+and the key — so the room need not end at all. What stopped it coming back was
+the new process: it had never heard of the room, and a client that could
+declare one into existence could squat any id or name, or bring back a room its
+members had shredded.
+
+- With `RUNA_RESTART_KEY` set (64 hex characters, the same for the stopping
+  and the starting process), RESTART_NOTICE says `handover: true`. When the
+  countdown ends, every member of every active room is sent RESTART_TICKET and
+  its connection is closed with 1012. The ticket is the old process vouching
+  for the room at the moment it stopped: HMAC-SHA-256 under the key, over its
+  id, name, creation time, TTL and extension, KDF parameters and salt,
+  verifier and config blob, with an expiry ten minutes on.
+- Issued at the very end, not with the warning, so a room shredded during the
+  countdown leaves nobody holding a way back. Nothing is written to disk: the
+  key is configuration, and the tickets live in members' tabs.
+- A member whose JOIN is refused with 4001 while holding a ticket presents it
+  to `POST /api/rooms/restore {ticket}`. 201 means restored and 200 means
+  another member got there first; either way it joins again. 400 or 410 mean
+  the room is not coming back (a bad or expired ticket, a room shredded or
+  expired in the new process, an absolute TTL that ran out during the
+  restart, or no key); 409 means its name was taken in between; 429 and 503
+  are retried for up to nine minutes. The ticket's contents must pass exactly
+  the validation a new room's would, under the new process's configuration.
+- JOIN_ACK carries `log_id`, random per room instance. A restored room keeps
+  its id and has a new, empty log, so a member that sees `log_id` change
+  replaces everything it had queued with its whole document and resyncs from
+  zero. Yjs merges every member's copy and drops what repeats. A member that
+  was offline at the restart and has no ticket catches up the same way once
+  anyone has restored the room.
+- Only members connected when the process stopped are handed tickets. A room
+  with nobody in it at that moment still ends, as before.
+- Tickets are bearer tokens for recreating a room, not for entering one: the
+  restored room holds the old verifier, so joining still takes the key.
 
 All amendments keep the invariant that matters: the server never learns
 anything about document content.

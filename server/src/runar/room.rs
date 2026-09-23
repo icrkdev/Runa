@@ -73,6 +73,9 @@ pub struct PeerTx {
     tx: mpsc::Sender<Bytes>,
     queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     max_bytes: usize,
+    /// This connection asked for the log index of every DOC_UPDATE relayed to
+    /// it (amendment H).
+    pub indexed: bool,
 }
 
 impl PeerTx {
@@ -81,7 +84,14 @@ impl PeerTx {
             tx,
             queued: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_bytes,
+            indexed: false,
         }
+    }
+
+    /// Relay DOC_UPDATEs to this connection with their log index.
+    pub fn with_indexes(mut self, indexed: bool) -> Self {
+        self.indexed = indexed;
+        self
     }
 
     /// A handle the reader uses to give bytes back as it drains them.
@@ -240,6 +250,11 @@ pub struct Room {
     pub next_seq: AtomicU64,
     pub epoch: AtomicU32,
     pub ttl_extension_secs: AtomicU64,
+    /// Random per `Room` value, and so per log. A room brought back after a
+    /// restart has the same id and a new, empty log; this is how a member
+    /// tells the two apart and knows to send its whole copy again rather than
+    /// resume from an index that no longer means anything (amendment I).
+    pub log_id: [u8; 8],
     auth_guard: AuthGuard,
     purge_acks: Mutex<std::collections::HashMap<String, PurgeAckSet>>,
 }
@@ -346,6 +361,11 @@ impl Room {
             next_seq: AtomicU64::new(1),
             epoch: AtomicU32::new(0),
             ttl_extension_secs: AtomicU64::new(0),
+            log_id: {
+                let mut b = [0u8; 8];
+                getrandom::fill(&mut b).expect("system RNG unavailable");
+                b
+            },
             auth_guard: AuthGuard::new(auth_max_per_min),
             purge_acks: Mutex::new(std::collections::HashMap::new()),
         }
@@ -454,6 +474,33 @@ impl Room {
             let outbound = match sender {
                 Some(sid) => envelop(frame, sid),
                 None => frame.clone(),
+            };
+            if p.tx.try_send(outbound).is_err() {
+                dead.push(p.peer_id);
+            }
+        }
+        drop(peers);
+        for id in dead {
+            self.remove_peer(&id);
+        }
+    }
+
+    /// Fan out a stored DOC_UPDATE. Connections that asked for indexes get the
+    /// entry's log index between the sender envelope and the body (amendment
+    /// H); the rest get the ordinary envelope.
+    pub async fn broadcast_update(&self, frame: &Bytes, sender: [u8; 16], index: u64) {
+        let peers = self.peers.lock().unwrap();
+        let mut dead = Vec::new();
+        let mut plain: Option<Bytes> = None;
+        let mut indexed: Option<Bytes> = None;
+        for p in peers.iter() {
+            if p.peer_id == sender {
+                continue;
+            }
+            let outbound = if p.tx.indexed {
+                indexed.get_or_insert_with(|| envelop_indexed(frame, sender, index)).clone()
+            } else {
+                plain.get_or_insert_with(|| envelop(frame, sender)).clone()
             };
             if p.tx.try_send(outbound).is_err() {
                 dead.push(p.peer_id);
@@ -588,6 +635,23 @@ pub fn envelop(frame: &Bytes, sender: [u8; 16]) -> Bytes {
     Bytes::from(out)
 }
 
+/// `header(32) || sender(16) || index(8, big-endian) || body`: the ordinary
+/// envelope with the entry's log index added. The index is written by the
+/// server and is outside the AEAD; a client uses it only to decide what a
+/// snapshot may claim to cover. A server that lied about it could have a
+/// snapshot cover entries the client never saw, and those would be lost — no
+/// new power, since the server holds the log and can drop any entry anyway
+/// (amendment H).
+pub fn envelop_indexed(frame: &Bytes, sender: [u8; 16], index: u64) -> Bytes {
+    let split = 32.min(frame.len());
+    let mut out = Vec::with_capacity(frame.len() + 24);
+    out.extend_from_slice(&frame[..split]);
+    out.extend_from_slice(&sender);
+    out.extend_from_slice(&index.to_be_bytes());
+    out.extend_from_slice(&frame[split..]);
+    Bytes::from(out)
+}
+
 pub fn parse_header(buf: &[u8]) -> Option<Header> {
     Header::decode(buf)
 }
@@ -601,6 +665,23 @@ pub enum CreateError {
     /// The process-wide room budget is full. Rooms are pure RAM, so this is
     /// the backstop that keeps a shared host from being driven into the OOM
     /// killer by anyone who can reach the create endpoint.
+    AtCapacity,
+}
+
+pub enum RestoreOutcome {
+    Restored(std::sync::Arc<Room>),
+    /// The room is already back, restored by another of its members.
+    AlreadyLive,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestoreError {
+    /// Shredded or expired in this process.
+    Retired,
+    /// Somebody else created a room by this name in the seconds between the
+    /// old process stopping and the ticket arriving.
+    NameTaken,
+    NameInvalid,
     AtCapacity,
 }
 
@@ -794,6 +875,83 @@ impl RoomRegistry {
         self.rooms.insert(id, room.clone());
         self.names.insert(final_name.clone(), id);
         Ok((room, final_name))
+    }
+
+    /// Recreate a room the previous process vouched for in a restart ticket,
+    /// under its old id and name, with an empty log (amendment I).
+    ///
+    /// Only this process's tombstones can refuse it: a room shredded or
+    /// expired here stays gone. One shredded before the restart never got a
+    /// ticket, because tickets are issued only for rooms alive at the moment
+    /// the old process stopped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        &self,
+        id: [u8; 16],
+        name: Option<&str>,
+        created_unix: u64,
+        ttl: Ttl,
+        ttl_extension_secs: u64,
+        ceiling_optout: bool,
+        verifier: [u8; 32],
+        kdf_m: u32,
+        kdf_t: u32,
+        kdf_p: u32,
+        salt: [u8; 16],
+        config_blob: Option<Bytes>,
+        log_max_bytes: u64,
+        auth_max: u32,
+        max_peers: usize,
+    ) -> Result<RestoreOutcome, RestoreError> {
+        if let Some(n) = name {
+            names::validate(n).map_err(|_| RestoreError::NameInvalid)?;
+        }
+        if self.rooms.contains_key(&id) {
+            return Ok(RestoreOutcome::AlreadyLive);
+        }
+        if self.retired.contains_key(&id) {
+            return Err(RestoreError::Retired);
+        }
+        // Checked before any entry is held: DashMap's len() takes every
+        // shard's lock, and would deadlock against an entry we held.
+        if self.rooms.len() >= self.max_rooms {
+            return Err(RestoreError::AtCapacity);
+        }
+        let dashmap::mapref::entry::Entry::Vacant(slot) = self.rooms.entry(id) else {
+            // Another member's ticket got here first.
+            return Ok(RestoreOutcome::AlreadyLive);
+        };
+        let class = match name {
+            Some(n) => match self.names.entry(n.to_string()) {
+                dashmap::mapref::entry::Entry::Occupied(_) => return Err(RestoreError::NameTaken),
+                dashmap::mapref::entry::Entry::Vacant(v) => {
+                    v.insert(id);
+                    RoomClass::Named(n.to_string())
+                }
+            },
+            None => RoomClass::Unlisted,
+        };
+        let room = std::sync::Arc::new(Room::with_budget(
+            id,
+            class,
+            created_unix,
+            ttl,
+            ceiling_optout,
+            Some(verifier),
+            kdf_m,
+            kdf_t,
+            kdf_p,
+            salt,
+            config_blob,
+            log_max_bytes,
+            auth_max,
+            max_peers,
+            self.log_budget.clone(),
+        ));
+        room.ttl_extension_secs
+            .store(ttl_extension_secs.min(MAX_TTL_EXTENSION_SECS), Ordering::SeqCst);
+        slot.insert(room.clone());
+        Ok(RestoreOutcome::Restored(room))
     }
 
     pub fn resolve_name(&self, name: &str) -> Option<(String, std::sync::Arc<Room>)> {

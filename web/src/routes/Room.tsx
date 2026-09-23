@@ -3,8 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Editor, { loader } from "@monaco-editor/react";
 import * as monacoModule from "monaco-editor";
 import type { editor as MonacoEditor } from "monaco-editor";
+import { keepPasteOffTheMenuWhereItAsksTwice } from "../ui/contextmenu";
 
 loader.config({ monaco: monacoModule });
+keepPasteOffTheMenuWhereItAsksTwice();
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -83,6 +85,8 @@ function JoinableRoom(props: RoomProps) {
   const [diverged, setDiverged] = useState(false);
   // A restart the server has announced, as a deadline on this page's clock.
   const [restartAt, setRestartAt] = useState<number | null>(null);
+  // Whether the server said the room will carry over to the new process.
+  const [restartHandover, setRestartHandover] = useState(false);
   const [clock, setClock] = useState(() => performance.now());
   const [connRefused, setConnRefused] = useState<string | null>(null);
   const restartAnnouncedRef = useRef(false);
@@ -211,6 +215,7 @@ function JoinableRoom(props: RoomProps) {
           authKey,
           contentKey,
           insecureAllowed: isLoopbackOrigin() && window.location.protocol === "http:",
+          restoreRoom: (ticket) => api.restoreRoom(ticket),
         },
         {
           onJoinAck: (_ack) => {
@@ -271,10 +276,15 @@ function JoinableRoom(props: RoomProps) {
           onDivergence: (d) => setDiverged(d),
           onPurge: () => setPhase({ kind: "purged" }),
           onRoomUnavailable: () => setPhase({ kind: "unavailable" }),
-          onServerRestart: (inSecs) => {
+          onServerRestart: (inSecs, handover) => {
             restartAnnouncedRef.current = true;
+            setRestartHandover(handover);
             setClock(performance.now());
             setRestartAt(performance.now() + inSecs * 1000);
+          },
+          onRoomCarriedOver: () => {
+            setRestartAt(null);
+            announce("The server was updated, and this room carried over.");
           },
           onConnectionRefused: (message) => setConnRefused(message),
         },
@@ -383,6 +393,11 @@ function JoinableRoom(props: RoomProps) {
           setMarkdown(model.getValue());
         }, 90);
       });
+      // Whatever the room already held arrived while the editor was being
+      // attached, before there was a listener to hear it. Without this read
+      // someone joining a room with text in it saw an empty preview until
+      // somebody typed.
+      setMarkdown(model.getValue());
     },
     [],
   );
@@ -506,7 +521,9 @@ function JoinableRoom(props: RoomProps) {
         <p className="micro-label tag">THIS ROOM IS GONE</p>
         <div className="panel">
           <p>
-            {restartAnnouncedRef.current
+            {restartAnnouncedRef.current && restartHandover
+              ? "The server restarted for an update, and this room could not be brought back to the new version. Rooms live only in memory — there is no copy to recover, which is the point."
+              : restartAnnouncedRef.current
               ? "The server restarted for an update, and this room ended with it. Rooms live only in memory — there is no copy to recover, which is the point."
               : "It was shredded, it expired, or the server restarted. Rooms live only in memory — there is no copy to recover, which is the point."}
           </p>
@@ -611,7 +628,9 @@ function JoinableRoom(props: RoomProps) {
       )}
       {restartAt !== null && (
         <div className="banner" role="alert">
-          <span className="error-text">{restartMessage(restartAt - clock)}</span>
+          <span className={restartHandover ? undefined : "error-text"}>
+            {restartMessage(restartAt - clock, restartHandover)}
+          </span>
           <button onClick={() => setExportOpen(true)}>Export</button>
         </div>
       )}
@@ -979,9 +998,16 @@ function PassphraseGate({ name, onSubmit }: { name: string; onSubmit(p: string):
 }
 
 let announcer: ((msg: string) => void) | null = null;
-/// The restart warning, counting down. Rooms live only in memory, so the one
-/// thing worth saying is what to do with the time left.
-function restartMessage(msLeft: number): string {
+/// The restart warning, counting down. What it asks for depends on whether
+/// the server hands rooms over to the next process: if it does, the thing
+/// that keeps the room is keeping this tab open; if not, it is exporting.
+function restartMessage(msLeft: number, handover: boolean): string {
+  if (handover) {
+    if (msLeft <= 0) return "The server is restarting now. Keep this tab open: your room comes back as soon as it does.";
+    const total = Math.ceil(msLeft / 1000);
+    const time = `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+    return `This server restarts in ${time} to update. Keep this tab open and your room carries over to the new version. Export if you want your own copy.`;
+  }
   if (msLeft <= 0) return "The server is restarting now. Anything not exported from this room is gone.";
   const total = Math.ceil(msLeft / 1000);
   const time = `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
@@ -1082,16 +1108,12 @@ export const MONACO_OPTIONS = {
   // Monaco's own menu, kept. Right-click is worth having, and with this off the
   // platform menu on Monaco's rendered text is a generic page menu — no Cut, no
   // Copy — because the visible glyphs are divs and the real input is hidden.
-  // Turning it off removed the doubling and removed everything useful with it,
-  // which was the wrong half to keep.
   //
-  // Monaco calls preventDefault on the contextmenu event, and measurement says
-  // it succeeds: defaultPrevented is true in Chromium, Firefox and WebKit
-  // alike. Yet the platform menu still appears alongside this one for the
-  // reporter in Firefox and Safari. Adding a second preventDefault of our own
-  // changes nothing measurable — that was tried, and the guard below passes
-  // with or without it — so it is not here. Whatever produces that second menu
-  // is not the default action of this event, and is not yet understood.
+  // The second Paste reported from Firefox and Safari was never a second menu.
+  // It is the browser asking permission: Monaco's Paste reads the clipboard
+  // from script, and those two engines answer every such read with a Paste
+  // button of their own that has to be clicked too. Paste is taken off this
+  // menu there and nowhere else — see ui/contextmenu.ts.
   contextmenu: true,
   quickSuggestions: false,
   wordBasedSuggestions: "off",

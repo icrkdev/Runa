@@ -40,7 +40,16 @@ export interface JoinAck {
   acks?: boolean;
   /// What this connection is held to, so a resend can be paced under it.
   limits?: { max_frame_bytes: number; frames_per_sec: number; bytes_per_sec: number };
+  /// Relayed updates carry their log index (amendment H).
+  indexed?: boolean;
+  /// PING is answered with PONG (amendment G).
+  heartbeat?: boolean;
+  /// Which log the room has. It changes only when the room was brought back
+  /// after a restart with a new, empty one (amendment I).
+  log_id?: string;
 }
+
+export type WireRoster = { peer_id: string; pubkey?: string; joined_at_seq: number }[];
 
 export interface SocketEvents {
   onJoinAck(ack: JoinAck): void;
@@ -62,8 +71,17 @@ export interface SocketEvents {
   /// a server without acks, have been sent. The snapshot index is estimated
   /// from it.
   onUpdatesStored?(count: number): void;
-  /// The server stops in this many seconds, taking every room with it.
-  onRestartNotice?(inSecs: number): void;
+  /// These log entries are now in the document, or can never be: applied,
+  /// ours and stored, or unreadable. Reported only against a server that
+  /// sends indexes.
+  onEntriesTaken?(indexes: number[]): void;
+  /// The server stops in this many seconds. `handover` says whether it will
+  /// hand out tickets that bring the room back on the next process.
+  onRestartNotice?(inSecs: number, handover: boolean): void;
+  /// The ticket that brings this room back after the restart (amendment I).
+  onRestartTicket?(ticket: string): void;
+  /// The server's current roster, sent with every PONG.
+  onRoster?(roster: WireRoster): void;
   /// The server turned this connection away: 4007 when this address holds as
   /// many connections as one address may, 4008 when the server is full.
   onRefused?(code: number): void;
@@ -82,8 +100,10 @@ export interface SocketOptions {
   /// wrapped payloads; without it every queued update goes out on its own.
   compactUpdates?: (wrapped: Uint8Array[]) => Uint8Array[];
   /// How long a sent update may go unacknowledged before the connection it
-  /// went out on is treated as dead.
+  /// went out on is treated as dead. Also how long a PING may go unanswered.
   ackTimeoutMs?: number;
+  /// How often a quiet connection is asked to prove it is alive.
+  heartbeatMs?: number;
 }
 
 const textDecoder = new TextDecoder();
@@ -111,6 +131,17 @@ const DOC_FRAME_OVERHEAD = HEADER_LEN + 4 + 8 + 16;
 /// until TCP gives up, which takes minutes, and everything sent into it in
 /// that time is lost.
 const ACK_TIMEOUT_MS = 10_000;
+
+/// How often a connection is pinged. Acks only cover a connection something
+/// is being sent on, so one that died while nobody typed was noticed at the
+/// next keystroke — and until then the page said it was connected while
+/// everyone else's edits went nowhere.
+const HEARTBEAT_MS = 15_000;
+
+/// Split updates this client has finished assembling, remembered so that a
+/// part arriving again afterwards — a resend of one whose ack was lost — is
+/// recognised instead of starting an assembly that can never complete.
+const COMPLETED_PARTS_REMEMBERED = 256;
 
 /// Updates queued while disconnected are merged once there are this many,
 /// rather than holding one entry per keystroke for the whole outage.
@@ -206,6 +237,9 @@ interface Group {
   have: number;
   bytes: number;
   at: number;
+  /// Log indexes of the entries that carried these parts, reported once the
+  /// whole update has been applied.
+  indexes: number[];
 }
 
 function limitsFrom(raw: JoinAck["limits"]): Limits {
@@ -245,6 +279,12 @@ export class RunaSocket {
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private reassembly = new Map<string, Group>();
   private reassemblyBytes = 0;
+  private completedParts: string[] = [];
+  private completedPartsSet = new Set<string>();
+  private indexed = false;
+  private heartbeat = false;
+  private pingSentAt: number | null = null;
+  private lastPingAt = 0;
 
   constructor(private opts: SocketOptions) {
     this.maxBackoffMs = opts.maxBackoffMs ?? 15_000;
@@ -354,6 +394,47 @@ export class RunaSocket {
     this.stopLiveness();
   }
 
+  /// Start again after the room was brought back on a new process: the join
+  /// that found it missing stopped the retries, and nothing queued was
+  /// discarded (amendment I).
+  resume(): void {
+    const old = this.ws;
+    if (old) {
+      // The refused connection, closed or about to be. Its handlers must not
+      // fire into the new one's state.
+      this.ws = null;
+      old.onopen = null;
+      old.onmessage = null;
+      old.onclose = null;
+      old.onerror = null;
+      try {
+        old.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    this.closedByUs = false;
+    this.backoffMs = 250;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.cipher = new FrameCipher(this.opts.contentKey, this.opts.identity.publicKeyRaw);
+    void this.connect().catch(() => this.scheduleReconnect());
+  }
+
+  /// Replace everything queued with one update: this client's whole document,
+  /// for a room whose log is new. It contains every queued update already, and
+  /// the new log has none of what was sent to the old one.
+  replaceBacklogWith(wrapped: Uint8Array): void {
+    for (const item of this.outbox) {
+      item.wrapped.fill(0);
+      for (const p of item.parts ?? []) p.fill(0);
+    }
+    this.outbox = [{ wrapped, parts: null, acked: 0, sent: 0, refused: false }];
+    this.inflight = [];
+  }
+
   /// Stop retrying without tearing down keys — used when the server says the
   /// room is gone, where reconnecting can only ever fail again.
   stopReconnecting(): void {
@@ -407,6 +488,8 @@ export class RunaSocket {
       pubkey: toB64(this.opts.identity.publicKeyRaw),
       client_version: "runa/1.0",
       acks: true,
+      indexed: true,
+      heartbeat: true,
     };
     keyCopy.fill(0);
     const frame = buildJsonFrame(FT.JOIN, this.opts.roomId, this.epoch, body);
@@ -432,7 +515,9 @@ export class RunaSocket {
       header.frameType === FT.PURGE ||
       header.frameType === FT.TTL_EXTEND ||
       header.frameType === FT.DOC_ACK ||
-      header.frameType === FT.RESTART_NOTICE;
+      header.frameType === FT.RESTART_NOTICE ||
+      header.frameType === FT.RESTART_TICKET ||
+      header.frameType === FT.PONG;
     if (!isServerEvent && header.epoch < this.epoch) {
       this.events.onEpochStale(header.epoch);
       return;
@@ -460,11 +545,13 @@ export class RunaSocket {
       // of times waited fifteen seconds on every reconnect after that.
       this.backoffMs = 250;
       this.acksEnabled = ack.acks === true;
+      this.indexed = ack.indexed === true;
+      this.heartbeat = ack.heartbeat === true;
       this.limits = limitsFrom(ack.limits);
       this.bucket = { frames: this.limits.framesPerSec, bytes: this.limits.bytesPerSec, at: performance.now() };
       for (const item of this.outbox) item.sent = item.acked;
       this.compactOutbox();
-      if (this.acksEnabled) this.startLiveness();
+      if (this.acksEnabled || this.heartbeat) this.startLiveness();
       this.events.onJoinAck(ack);
       void this.pump();
       return;
@@ -475,10 +562,34 @@ export class RunaSocket {
     }
     if (header.frameType === FT.RESTART_NOTICE) {
       try {
-        const { in_secs } = JSON.parse(textDecoder.decode(parsed.body)) as { in_secs: unknown };
+        const { in_secs, handover } = JSON.parse(textDecoder.decode(parsed.body)) as {
+          in_secs: unknown;
+          handover?: unknown;
+        };
         if (typeof in_secs === "number" && Number.isFinite(in_secs) && in_secs >= 0) {
-          this.events.onRestartNotice?.(Math.min(in_secs, 3600));
+          this.events.onRestartNotice?.(Math.min(in_secs, 3600), handover === true);
         }
+      } catch {
+        return;
+      }
+      return;
+    }
+    if (header.frameType === FT.RESTART_TICKET) {
+      try {
+        const { ticket } = JSON.parse(textDecoder.decode(parsed.body)) as { ticket: unknown };
+        if (typeof ticket === "string" && ticket.length > 0 && ticket.length <= 64 * 1024) {
+          this.events.onRestartTicket?.(ticket);
+        }
+      } catch {
+        return;
+      }
+      return;
+    }
+    if (header.frameType === FT.PONG) {
+      this.pingSentAt = null;
+      try {
+        const { roster } = JSON.parse(textDecoder.decode(parsed.body)) as { roster: unknown };
+        if (Array.isArray(roster)) this.events.onRoster?.(roster as WireRoster);
       } catch {
         return;
       }
@@ -558,18 +669,30 @@ export class RunaSocket {
 
     switch (header.frameType) {
       case FT.DOC_UPDATE: {
-        try {
-          const pt = await decryptEnvelope(
-            this.opts.contentKey,
-            bytes.slice(0, HEADER_LEN),
-            senderId,
-            env.body,
-          );
-          const whole = this.acceptPlaintext(pt);
-          if (whole) this.events.onDocUpdate(senderId, whole);
-        } catch {
-          return;
+        // Against a server sending indexes, the entry's log index sits
+        // between the sender envelope and the body (amendment H).
+        let index: number | null = null;
+        let body = env.body;
+        if (this.indexed) {
+          if (body.length < 8) return;
+          const i = new DataView(body.buffer, body.byteOffset, 8).getBigUint64(0, false);
+          if (i > BigInt(Number.MAX_SAFE_INTEGER)) return;
+          index = Number(i);
+          body = body.slice(8);
         }
+        let taken: number[];
+        try {
+          const pt = await decryptEnvelope(this.opts.contentKey, bytes.slice(0, HEADER_LEN), senderId, body);
+          const accepted = this.acceptPlaintext(pt, index);
+          if (accepted.whole) this.events.onDocUpdate(senderId, accepted.whole);
+          taken = accepted.taken;
+        } catch {
+          // Nothing will ever read this entry, here or anywhere: it can be
+          // covered without losing anything, and must not hold back every
+          // snapshot after it.
+          taken = index === null ? [] : [index];
+        }
+        if (taken.length) this.events.onEntriesTaken?.(taken);
         return;
       }
       case FT.SNAPSHOT: {
@@ -626,12 +749,17 @@ export class RunaSocket {
   }
 
   private handleAck(body: Uint8Array): void {
-    let ok: boolean;
+    let parsed: { ok?: unknown; index?: unknown };
     try {
-      ok = (JSON.parse(textDecoder.decode(body)) as { ok?: unknown }).ok === true;
+      parsed = JSON.parse(textDecoder.decode(body)) as { ok?: unknown; index?: unknown };
     } catch {
       return;
     }
+    const ok = parsed.ok === true;
+    const index = parsed.index;
+    // Our own update is in our own document already, so its entry is taken
+    // in the moment the server says where it went.
+    if (ok && this.indexed && typeof index === "number") this.events.onEntriesTaken?.([index]);
     const entry = this.inflight.shift();
     if (!entry) return;
     const { item } = entry;
@@ -648,20 +776,28 @@ export class RunaSocket {
     if (item.acked >= this.framesFor(item).length) this.removeFromOutbox(item);
   }
 
-  /// Receive one DOC_UPDATE plaintext. Returns a whole update to apply, or
-  /// null while a split one is still arriving.
-  private acceptPlaintext(pt: Uint8Array): Uint8Array | null {
-    if (!isPart(pt)) return pt;
+  /// Receive one DOC_UPDATE plaintext, with its log index when the server
+  /// sends them. Returns a whole update to apply, or null while a split one is
+  /// still arriving, and the log indexes that are taken in once it is applied.
+  ///
+  /// An incomplete split update holds back its indexes, and so every snapshot
+  /// from its first part on, for as long as it stays incomplete. That is the
+  /// price of never claiming to cover half of something.
+  private acceptPlaintext(pt: Uint8Array, index: number | null): { whole: Uint8Array | null; taken: number[] } {
+    const own = index === null ? [] : [index];
+    if (!isPart(pt)) return { whole: pt, taken: own };
     const part = readPart(pt);
-    if (!part) return null;
+    if (!part) return { whole: null, taken: own };
+    if (this.completedPartsSet.has(part.id)) return { whole: null, taken: own };
     this.pruneReassembly();
     let group = this.reassembly.get(part.id);
-    if (group && group.total !== part.total) return null;
+    if (group && group.total !== part.total) return { whole: null, taken: own };
     if (!group) {
-      group = { total: part.total, parts: new Array(part.total), have: 0, bytes: 0, at: performance.now() };
+      group = { total: part.total, parts: new Array(part.total), have: 0, bytes: 0, at: performance.now(), indexes: [] };
       this.reassembly.set(part.id, group);
     }
-    if (group.parts[part.index]) return null;
+    group.indexes.push(...own);
+    if (group.parts[part.index]) return { whole: null, taken: [] };
     group.parts[part.index] = part.data;
     group.have += 1;
     group.bytes += part.data.length;
@@ -669,10 +805,15 @@ export class RunaSocket {
     this.reassemblyBytes += part.data.length;
     if (group.have < group.total) {
       this.enforceReassemblyBounds(part.id);
-      return null;
+      return { whole: null, taken: [] };
     }
     this.dropGroup(part.id, group);
-    return concatBytes(...(group.parts as Uint8Array[]));
+    this.completedParts.push(part.id);
+    this.completedPartsSet.add(part.id);
+    while (this.completedParts.length > COMPLETED_PARTS_REMEMBERED) {
+      this.completedPartsSet.delete(this.completedParts.shift() as string);
+    }
+    return { whole: concatBytes(...(group.parts as Uint8Array[])), taken: group.indexes };
   }
 
   private dropGroup(id: string, group: Group): void {
@@ -839,15 +980,31 @@ export class RunaSocket {
   private startLiveness(): void {
     this.stopLiveness();
     const timeout = this.opts.ackTimeoutMs ?? ACK_TIMEOUT_MS;
+    const beat = this.opts.heartbeatMs ?? HEARTBEAT_MS;
     const gen = this.generation;
+    this.pingSentAt = null;
+    this.lastPingAt = performance.now();
     this.livenessTimer = setInterval(() => {
       if (gen !== this.generation) {
         this.stopLiveness();
         return;
       }
+      const now = performance.now();
       const oldest = this.inflight[0];
-      if (oldest && performance.now() - oldest.sentAt > timeout) this.abandonConnection();
-    }, Math.max(25, Math.min(1000, Math.floor(timeout / 4))));
+      if (oldest && now - oldest.sentAt > timeout) {
+        this.abandonConnection();
+        return;
+      }
+      if (!this.heartbeat) return;
+      if (this.pingSentAt !== null) {
+        if (now - this.pingSentAt > timeout) this.abandonConnection();
+        return;
+      }
+      if (now - this.lastPingAt >= beat) {
+        this.lastPingAt = now;
+        if (this.rawSend(buildJsonFrame(FT.PING, this.opts.roomId, this.epoch, {}))) this.pingSentAt = now;
+      }
+    }, Math.max(25, Math.min(1000, Math.floor(Math.min(timeout, beat) / 4))));
   }
 
   private stopLiveness(): void {

@@ -120,25 +120,42 @@ async function releaseStuckNavigation(page, label, url) {
   }
 }
 
-async function main() {
-  const server = spawn(`${process.cwd()}/../target/release/runa-server`, [], {
-    env: { ...process.env, RUNA_DIST: "dist", RUNA_BIND: "127.0.0.1:3001", RUNA_SHUTDOWN_GRACE_SECS: "5" },
+/// Both processes in the restart test must hold the same key, or the second
+/// could not open the tickets the first hands out.
+const RESTART_KEY = "ab".repeat(32);
+
+const serverLog = [];
+const servers = [];
+
+async function startServer() {
+  const proc = spawn(`${process.cwd()}/../target/release/runa-server`, [], {
+    env: {
+      ...process.env,
+      RUNA_DIST: "dist",
+      RUNA_BIND: "127.0.0.1:3001",
+      RUNA_SHUTDOWN_GRACE_SECS: "5",
+      RUNA_RESTART_KEY: RESTART_KEY,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const serverLog = [];
-  server.stdout.on("data", (d) => serverLog.push(d.toString()));
-  server.stderr.on("data", (d) => serverLog.push(d.toString()));
-  serverLogRef = serverLog;
-  const killServer = () => { try { server.kill(); } catch {} };
-  process.on("exit", killServer);
-  process.on("uncaughtException", (e) => { console.error("UNCAUGHT:", e); killServer(); process.exit(1); });
-
+  proc.stdout.on("data", (d) => serverLog.push(d.toString()));
+  proc.stderr.on("data", (d) => serverLog.push(d.toString()));
+  servers.push(proc);
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("server did not start")), 5000);
     const poll = setInterval(async () => {
       try { await fetch(`${BASE}/version`); clearInterval(poll); clearTimeout(t); resolve(); } catch {}
     }, 150);
   });
+  return proc;
+}
+
+async function main() {
+  serverLogRef = serverLog;
+  const killServer = () => { for (const p of servers) { try { p.kill(); } catch {} } };
+  process.on("exit", killServer);
+  process.on("uncaughtException", (e) => { console.error("UNCAUGHT:", e); killServer(); process.exit(1); });
+  const server = await startServer();
 
   // Create an unlisted room with keys the pages will receive via fragment.
   const linkSecret = crypto.getRandomValues(new Uint8Array(32));
@@ -1089,21 +1106,19 @@ async function main() {
   }
 
   // The editor must have a context menu at all. Turning Monaco's off to stop
-  // a doubling left right-click useless — the platform menu on rendered glyphs
-  // is a generic page menu with no Cut or Copy — so this guards the regression
-  // that caused, not the doubling, which is not understood well enough to
-  // guard. It flips with the option: contextmenu:false gives defaultPrevented
-  // false and fails here. Gecko and WebKit showed the
-  // platform menu alongside it, so a right-click gave two overlapping menus
-  // with two Paste entries. Turning Monaco's off removed the doubling and
-  // removed the useful menu with it — on Monaco's rendered text the platform
-  // menu is a generic page menu, since the glyphs are divs and the real input
-  // is hidden — so the platform one is suppressed explicitly instead.
+  // a doubled Paste left right-click useless — on Monaco's rendered text the
+  // platform menu is a generic page menu with no Cut or Copy, since the glyphs
+  // are divs and the real input is hidden — so this guards that regression.
   //
-  // Asserted on preventDefault rather than on a menu element. Monaco keeps
-  // context-view containers in the DOM permanently and renders no menu under a
-  // synthetic right-click headlessly, so counting elements passes whichever
-  // way the option is set; that version was written first and proved nothing.
+  // The doubling itself was the browser, not a second menu. Monaco's Paste
+  // reads the clipboard from script, and Gecko and WebKit answer every such
+  // read with a Paste button of their own that needs a second click. So the
+  // menu there keeps everything except Paste; Chromium, which asks once per
+  // site, keeps Paste. Both halves are read off the rendered menu below.
+  //
+  // Asserted on preventDefault as well as on the menu's items. The event is
+  // what proves the platform menu was suppressed; the items are what prove
+  // which menu replaced it.
   await alice.evaluate(() => {
     window.__ctxPrevented = null;
     window.addEventListener(
@@ -1121,6 +1136,20 @@ async function main() {
   if (ctx === null) throw new Error("[contextmenu] no contextmenu event reached the page");
   if (ctx !== true) {
     throw new Error("[contextmenu] the editor has no context menu of its own — right-click falls back to a generic page menu with no Cut or Copy");
+  }
+  const menuItems = (await alice.locator(".monaco-menu .action-label").allTextContents()).filter((t) => t.trim());
+  for (const needed of ["Cut", "Copy"]) {
+    if (!menuItems.includes(needed)) {
+      throw new Error(`[contextmenu] the editor's menu has no ${needed}: ${JSON.stringify(menuItems)}`);
+    }
+  }
+  const wantsPaste = ENGINE_NAME === "chromium";
+  if (menuItems.includes("Paste") !== wantsPaste) {
+    throw new Error(
+      wantsPaste
+        ? `[contextmenu] Chromium lost Paste from the editor's menu: ${JSON.stringify(menuItems)}`
+        : `[contextmenu] ${ENGINE_NAME} offers Paste in the editor's menu, which makes the browser show a second Paste button: ${JSON.stringify(menuItems)}`,
+    );
   }
   await alice.keyboard.press("Escape");
 
@@ -1292,6 +1321,35 @@ async function main() {
   // are still in their room, so SIGTERM — what systemd sends on a redeploy —
   // has to reach both as a countdown, and the server has to wait it out rather
   // than vanish with their documents.
+  //
+  // Then the room has to survive it. A redeploy used to end every room
+  // mid-session; now the stopping process hands each member a ticket and the
+  // new one takes the room back from them. Written before the restart, this
+  // marker must be readable afterwards by someone who was never in the room
+  // before — the only way it can reach them is through the new server's log,
+  // refilled from the members' own copies.
+  const marker = `kept-across-restart-${Date.now().toString(36)}`;
+  // The whole document, from the preview: the editor renders only the lines
+  // in view, and by now the document is longer than the editor.
+  const docText = (page) =>
+    page.evaluate(() => document.querySelector(".pane-preview .preview-body")?.textContent ?? "");
+  // Earlier checks can leave a shred dialog open, and it covers the editor.
+  for (const page of [alice, bob]) {
+    for (let i = 0; i < 3; i++) {
+      const dialog = page.locator('[role="dialog"], [role="alertdialog"]').first();
+      if (!(await dialog.count())) break;
+      const dismiss = dialog.locator('button:has-text("Cancel"), button:has-text("Reject")').first();
+      if (await dismiss.count()) await dismiss.click();
+      else await page.keyboard.press("Escape");
+      await page.waitForTimeout(100);
+    }
+  }
+  await focusEditor(alice);
+  await alice.keyboard.press("ControlOrMeta+End");
+  await alice.keyboard.type(`\n${marker}\n`, { delay: 5 });
+  for (let i = 0; i < 40 && !(await docText(bob)).includes(marker); i++) await bob.waitForTimeout(250);
+  if (!(await docText(bob)).includes(marker)) throw new Error("[restart] the marker never reached bob");
+
   server.kill("SIGTERM");
   const warned = (page) =>
     page.waitForSelector('.banner:has-text("restarts in")', { timeout: 4000 }).then(
@@ -1302,6 +1360,10 @@ async function main() {
   if (!aliceWarned || !bobWarned) {
     throw new Error(`[restart] SIGTERM did not warn every open room (alice ${aliceWarned}, bob ${bobWarned})`);
   }
+  const warning = (await alice.locator(".banner", { hasText: "restarts in" }).first().textContent()) ?? "";
+  if (!warning.includes("Keep this tab open")) {
+    throw new Error(`[restart] with a restart key the warning must say the room carries over: "${warning}"`);
+  }
   if (server.exitCode !== null || server.signalCode !== null) {
     throw new Error("[restart] the server stopped without waiting out its warning");
   }
@@ -1310,6 +1372,50 @@ async function main() {
     new Promise((r) => setTimeout(() => r(false), 20_000)),
   ]);
   if (!stopped) throw new Error("[restart] the server never stopped after its warning");
+
+  await startServer();
+  const cleared = (page) =>
+    page
+      .waitForFunction(
+        () => !document.body.textContent.includes("restarts in") && !!document.querySelector(".monaco-editor"),
+        null,
+        { timeout: 30_000 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+  const [aliceBack, bobBack] = await Promise.all([cleared(alice), cleared(bob)]);
+  if (!aliceBack || !bobBack) {
+    const shown = await alice.evaluate(() => document.body.textContent.replace(/\s+/g, " ").slice(0, 300));
+    throw new Error(`[restart] the room did not come back on the new server (alice ${aliceBack}, bob ${bobBack}): ${shown}`);
+  }
+  const after = `typed-after-restart-${Date.now().toString(36)}`;
+  await focusEditor(bob);
+  await bob.keyboard.press("ControlOrMeta+End");
+  await bob.keyboard.type(`\n${after}\n`, { delay: 5 });
+  for (let i = 0; i < 60 && !(await docText(alice)).includes(after); i++) await alice.waitForTimeout(250);
+  if (!(await docText(alice)).includes(after)) {
+    throw new Error("[restart] after the handover, an edit on one side never reached the other");
+  }
+  const carol = await makePage("carol");
+  await gotoRoom(carol, "carol", roomUrl);
+  await carol.waitForSelector(".monaco-editor", { timeout: 30_000 });
+  let carolSees = "";
+  for (let i = 0; i < 60; i++) {
+    carolSees = await carol.evaluate(() => document.querySelector(".pane-preview .preview-body")?.textContent ?? "");
+    if (carolSees.includes(marker) && carolSees.includes(after)) break;
+    await carol.waitForTimeout(250);
+  }
+  if (!carolSees.includes(marker)) {
+    const carolState = await carol.evaluate(() => ({
+      body: document.body.textContent.replace(/\s+/g, " ").slice(0, 300),
+      lines: document.querySelectorAll(".view-lines .view-line").length,
+    }));
+    throw new Error(
+      `[restart] someone joining after the restart does not see what was written before it: "${carolSees.slice(-200)}" ${JSON.stringify(carolState)}`,
+    );
+  }
 
   await browser.close();
 
@@ -1332,10 +1438,11 @@ async function main() {
   console.log(`  a named room opens in another page with the passphrase it was made with`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  the room fits the window exactly; the chrome cannot scroll away`);
-  console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu only`);
+  console.log(`  ctrl/cmd+B and +I emphasise through the keyboard; one context menu, Paste only where it takes one click`);
   console.log(`  no block header pins itself to the top of an indented document`);
   console.log(`  no control under the 16px iOS zoom threshold on a touch device`);
   console.log(`  a restart warns both open rooms with a countdown, and the server waits it out`);
+  console.log(`  the room carries over to the next server process, and a newcomer reads what was written before it`);
   console.log(`  display math renders with the exponent raised and smaller`);
   console.log(`  layout tabs: one press per mode, active marked, no Split on a phone`);
   console.log(`  pressed tab outlined evenly on all four sides; control does not resize`);

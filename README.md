@@ -589,6 +589,7 @@ with anything else needs.
 | `RUNA_MAX_CONNECTIONS` | `1024` | Concurrent sockets, process-wide. The per-IP limit bounds one address; this bounds the sum |
 | `RUNA_MAX_CONNS_PER_IP` | `64` | Concurrent sockets one address may hold, at most a quarter of `RUNA_MAX_CONNECTIONS`. Offices and mobile carriers put many people behind one address |
 | `RUNA_SHUTDOWN_GRACE_SECS` | `60` | On SIGTERM, how long every open room is shown a countdown before the process stops. `0` stops at once |
+| `RUNA_RESTART_KEY` | unset | 64 hex characters. Lets open rooms carry over a restart: the stopping process hands each member a ticket signed with it, and the next process, holding the same key, takes the room back from their copies. Unset, a restart ends every room. A secret; both deploy scripts generate it once into a root-only file and never rotate it |
 | `RUNA_MAX_QUEUE_KB` | `4096` | Bytes one connection may have queued but not yet written to its socket. Floored at twice `RUNA_MAX_FRAME`, so raising the frame cap raises this too |
 | `RUNA_ROOMS_PER_HR` | `20` | Unlisted rooms one address may create per hour |
 | `RUNA_NAMED_PER_HR` | `5` | Named rooms one address may create per hour |
@@ -730,16 +731,23 @@ docker run -d --name runa \
   runa
 ```
 
-> Rooms live only in RAM. Restarting the container, deploying, or rebooting the
-> host destroys every open document. That is the design, not a bug — but it
-> means you should not restart a production instance casually.
+> Rooms live only in RAM, and the server never writes one to disk. What lets a
+> room outlive a restart is the people in it: they hold the document and the
+> key, and with `RUNA_RESTART_KEY` set the server hands them the means to bring
+> it back.
 >
-> A restart is not silent, though. On SIGTERM, which `systemctl restart`,
-> `docker stop` and both deploy scripts send, every open room is shown a
-> countdown (`RUNA_SHUTDOWN_GRACE_SECS`, 60 s by default) with an Export button,
-> and the process waits it out before stopping. With nobody connected it stops at
-> once. A reboot or a killed process still ends rooms without warning, so deploy
-> at a quiet time.
+> On SIGTERM, which `systemctl restart`, `docker stop` and both deploy scripts
+> send, every open room is shown a countdown (`RUNA_SHUTDOWN_GRACE_SECS`, 60 s by
+> default), and the process waits it out. Then every member still connected is
+> handed a signed ticket for their room and disconnected. When the new process
+> comes up with the same key, their pages present the ticket, the room is
+> recreated under its old link, and each page sends its copy back — so nobody
+> loses anything, and someone who joins afterwards sees everything written
+> before the restart. See amendment I in [PROTOCOL.md](docs/PROTOCOL.md).
+>
+> What still ends a room: a restart without the key, a room nobody had open at
+> that moment, and a reboot or a killed process, which skips the handover
+> altogether. So deploy at a quiet time all the same.
 
 ---
 

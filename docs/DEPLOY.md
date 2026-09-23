@@ -137,9 +137,20 @@ sudo journalctl -u runa | grep -E 'room budget exhausted|connection ceiling'
 curl -s https://runa.example.com/version
 ```
 
-- **A restart is a data-loss event.** `Restart=on-failure` brings the service
-  back, but every live room died with the old process. A non-zero restart
-  count in `systemctl status runa` is worth investigating.
+- **A planned restart hands rooms over; a crash does not.** On `systemctl
+  restart` (and every redeploy) the stopping process gives each connected
+  member a ticket signed with `RUNA_RESTART_KEY`, and their pages rebuild the
+  room on the new process. The key lives in `/etc/runa/restart.env` (root,
+  0600), written once by the deploy script. Do not rotate it casually: tickets
+  signed under the old key cannot be read under a new one, so the restart that
+  changes it ends every open room. A crash skips the handover, so
+  `Restart=on-failure` brings the service back without them — a non-zero
+  restart count in `systemctl status runa` is worth investigating.
+- **The first deploy that brings the handover restarts the old binary**, which
+  has never heard of tickets, so that one restart still ends open rooms. Every
+  restart after it carries them over.
+- **Check it is on** with `sudo journalctl -u runa | grep 'restart key'`: the
+  process says at startup whether it will hand rooms over.
 - **Reboots destroy rooms.** Kernel updates included. Schedule them, and tell
   whoever is using it.
 - **Rooms are not backed up, ever.** That is the product, not an omission.

@@ -18,6 +18,13 @@ async fn main() -> Result<()> {
     hardening.log();
 
     let cfg = Config::from_env();
+    match (&cfg.restart_key, std::env::var("RUNA_RESTART_KEY").is_ok()) {
+        (Some(_), _) => tracing::info!("restart key set: rooms open at a restart are handed over to the next process"),
+        (None, true) => tracing::error!(
+            "RUNA_RESTART_KEY is set but is not 64 hex characters; ignoring it, so a restart will end every open room"
+        ),
+        (None, false) => tracing::warn!("RUNA_RESTART_KEY is not set, so a restart will end every open room"),
+    }
     if cfg.trusted_proxy {
         tracing::info!(
             "RUNA_TRUSTED_PROXY=1: rate limits keyed on the last X-Forwarded-For entry. \
@@ -91,17 +98,23 @@ async fn wait_for_signal() {
 
 /// Resolves when the process should stop serving.
 ///
-/// Rooms live only in memory, so stopping ends every one of them. With people
-/// connected, the first signal warns every open room and waits out
-/// `RUNA_SHUTDOWN_GRACE_SECS` so they can export. It stops early if everyone
-/// leaves, and a second signal stops it at once. With nobody connected there
-/// is nobody to warn, so it stops straight away.
+/// Rooms live only in memory. With people connected, the first signal warns
+/// every open room and waits out `RUNA_SHUTDOWN_GRACE_SECS`. It stops early if
+/// everyone leaves, and a second signal stops it at once. Then, with a restart
+/// key, every member still connected is handed a ticket for their room and
+/// disconnected, and brings the room back on the next process. Without one,
+/// the rooms end here. With nobody connected there is nobody to warn or hand
+/// anything to, so it stops straight away.
 async fn shutdown_signal(state: AppState) {
     wait_for_signal().await;
     let grace = state.cfg.shutdown_grace;
     let live = state.live_connections();
-    if live == 0 || grace.is_zero() {
-        tracing::info!("shutdown signal received; rooms die with the process, by design");
+    if live == 0 {
+        tracing::info!("shutdown signal received with nobody connected; stopping");
+        return;
+    }
+    if grace.is_zero() {
+        hand_over(&state).await;
         return;
     }
     // Listening for the second signal starts before the countdown, so one sent
@@ -131,4 +144,19 @@ async fn shutdown_signal(state: AppState) {
             }
         }
     }
+    hand_over(&state).await;
+}
+
+/// Give out the tickets, then wait briefly for the connections they close.
+async fn hand_over(state: &AppState) {
+    let rooms = state.hand_over().await;
+    if rooms == 0 {
+        tracing::info!("stopping; the open rooms end with this process");
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while state.live_connections() > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tracing::info!(rooms, "handed every open room a ticket to the next process; stopping");
 }
