@@ -1,5 +1,6 @@
 import * as cbor2 from "cbor2";
-import { RunaSocket, fromB64, type JoinAck } from "./transport/socket";
+import * as Y from "yjs";
+import { RunaSocket, fromB64, type JoinAck, type WireRoster } from "./transport/socket";
 import { FT } from "./transport/frame";
 import { RunaDoc, wrapWithLengthAndPad, mergeWrapped } from "./doc/ydoc";
 import { bindMonaco, type Binding } from "./doc/binding";
@@ -114,6 +115,47 @@ export function replaceRoster(
   }
 }
 
+/// The log index a snapshot taken now may claim to cover, or null when there
+/// is nothing new to cover.
+///
+/// Against a server that sends indexes this is exactly what the copy holds.
+/// Without them it can only be this client's own stored updates on top of its
+/// last snapshot — an undercount that falls further behind the more other
+/// people type, and that the server refuses outright once it is below a
+/// snapshot someone else made, since a snapshot may never move backwards. A
+/// room whose oldest member mostly read therefore never compacted, and a long
+/// session filled its log until edits were refused.
+export function snapshotCover(s: {
+  indexed: boolean;
+  watermark: number;
+  lastCovered: number;
+  baseIndex: number;
+  storedCount: number;
+}): number | null {
+  if (!s.indexed) return s.baseIndex + s.storedCount;
+  return s.watermark > s.lastCovered ? s.watermark : null;
+}
+
+/// What has to change to turn `local` into the server's roster: who joined
+/// and who left without this client being told. Applied through the same
+/// handlers as PEER_JOIN and PEER_LEAVE, so a correction looks exactly like
+/// the event that was missed.
+///
+/// JOIN_ACK was the only full roster a client ever received, so one that
+/// missed an event stayed wrong until it next reconnected. Every PONG now
+/// carries the server's roster (amendment G).
+export function rosterChanges(
+  local: Iterable<string>,
+  authoritative: WireRoster,
+): { joined: WireRoster; left: string[] } {
+  const have = new Set(local);
+  const want = new Set(authoritative.map((r) => r.peer_id));
+  return {
+    joined: authoritative.filter((r) => !have.has(r.peer_id)),
+    left: [...have].filter((id) => !want.has(id)),
+  };
+}
+
 /// How long a roster entry counts as present before it has to prove itself by
 /// broadcasting. Must exceed the ten-second presence heartbeat.
 const ROSTER_JOIN_GRACE_MS = 15_000;
@@ -149,11 +191,18 @@ export interface SessionEvents {
   /// indistinguishable from one that is always on.
   onDivergence(diverged: boolean): void;
   onRoomUnavailable(code: number): void;
-  /// The server stops in this many seconds, taking every room with it.
-  onServerRestart(inSecs: number): void;
+  /// The server stops in this many seconds. With `handover`, the room comes
+  /// back on the new process for anyone who keeps it open; without, it ends.
+  onServerRestart(inSecs: number, handover: boolean): void;
+  /// The room came back after a restart, and this copy is being sent to it.
+  onRoomCarriedOver?(): void;
   /// Why the server is refusing this connection, or null once it is accepted.
   onConnectionRefused(message: string | null): void;
 }
+
+/// What the server said to a restart ticket: the room is back (whoever
+/// brought it back), try again shortly, or it is not coming back.
+export type RestoreResult = "restored" | "retry" | "gone" | "name-taken";
 
 export interface SessionConfig {
   url: string;
@@ -161,7 +210,15 @@ export interface SessionConfig {
   authKey: Uint8Array;
   contentKey: CryptoKey;
   insecureAllowed?: boolean;
+  /// Present a restart ticket to the new process. Without it, a room ends at
+  /// a restart as it always did.
+  restoreRoom?: (ticket: string) => Promise<RestoreResult>;
 }
+
+/// How long to keep presenting a ticket the server has not yet been able to
+/// take — a new process still starting, say. The server stops honouring one
+/// after ten minutes anyway.
+const TICKET_PATIENCE_MS = 9 * 60_000;
 
 /// How long a departed peer is still shown as "away" rather than gone. A
 /// phone that locks its screen drops the websocket within seconds, so without
@@ -202,6 +259,15 @@ export class Session {
   private cursorTimerRef: (() => void) | null = null;
   private steadyTimer: ReturnType<typeof setInterval> | null = null;
   private ownHash = "";
+  /// The log this client last joined, from JOIN_ACK.
+  private logId: string | null = null;
+  /// Relayed updates carry their log index, so snapshots cover exactly what
+  /// this copy holds (amendment H).
+  private indexed = false;
+  /// The index the last snapshot this client saw or made covers.
+  private lastCovered = 0;
+  private restartTicket: { ticket: string; at: number } | null = null;
+  private carryingOver = false;
 
   private constructor(
     private cfg: SessionConfig,
@@ -227,6 +293,50 @@ export class Session {
     const internals: SocketInternals = { roster, away, myPeerId: "", myJoinedSeq: 0, joinPerfMs: 0 };
     let sessionRef: Session | null = null;
 
+    const peerJoined = (entry: RosterEntry): void => {
+      const id = toB64(entry.peerId);
+      roster.set(id, entry);
+      sessionRef?.noteRosterSeen(id);
+      // Names come from the key the roster binds to this peer, never from
+      // what the peer says its name is.
+      if (entry.pubkey) {
+        void handleFromPubkey(entry.pubkey).then((h) =>
+          sessionRef?.awareness?.setHandle(id, h),
+        );
+      }
+      // They are back; stop showing them as away.
+      away.delete(id);
+      // Say hello immediately. Presence is broadcast on the ten-second
+      // heartbeat and on cursor movement, so without this a newcomer who
+      // joins and sits still is invisible to everyone — and everyone is
+      // invisible to them — for up to ten seconds. Measured at 10-12s
+      // before this line existed.
+      void sessionRef?.announcePresence();
+      events.onPeersChanged(roster.size);
+    };
+
+    const peerLeft = (peerId: Uint8Array): void => {
+      const id = toB64(peerId);
+      const entry = roster.get(id);
+      if (roster.delete(id)) {
+        // Remember them briefly, by name. A locked phone is
+        // indistinguishable on the wire from someone closing the tab, and
+        // the difference matters when a shred is about to be proposed.
+        // The handle comes from their last presence broadcast; if they
+        // never sent one, fall back to a short form of their peer id.
+        // Derive from their roster key, captured before the entry goes.
+        const pubkey = entry?.pubkey;
+        away.set(id, { handle: id.slice(0, 6), leftAt: Date.now() });
+        if (pubkey) {
+          void handleFromPubkey(pubkey).then((h) => {
+            const rec = away.get(id);
+            if (rec) rec.handle = h;
+          });
+        }
+      }
+      events.onPeersChanged(roster.size);
+    };
+
     const socket = new RunaSocket({
       url: cfg.url,
       roomId,
@@ -238,7 +348,22 @@ export class Session {
       events: {
         onJoinAck: (ack) => sessionRef?.handleJoinAck(ack),
         onUpdatesStored: (count) => sessionRef?.noteUpdatesStored(count),
-        onRestartNotice: (inSecs) => events.onServerRestart(inSecs),
+        onRestartNotice: (inSecs, handover) => events.onServerRestart(inSecs, handover),
+        onRestartTicket: (ticket) => sessionRef?.holdTicket(ticket),
+        onEntriesTaken: (indexes) => {
+          for (const i of indexes) sessionRef?.doc.cursor.note(i);
+        },
+        onRoster: (list) => {
+          const { joined, left } = rosterChanges(roster.keys(), list);
+          for (const id of left) peerLeft(fromB64(id));
+          for (const r of joined) {
+            peerJoined({
+              peerId: fromB64(r.peer_id),
+              pubkey: r.pubkey ? fromB64(r.pubkey) : undefined,
+              joinedAtSeq: r.joined_at_seq,
+            });
+          }
+        },
         onRefused: (code) =>
           events.onConnectionRefused(
             code === 4007
@@ -250,49 +375,8 @@ export class Session {
         onSnapshot: (sender, covers, blob) => sessionRef?.handleSnapshot(sender, covers, blob),
         onAwareness: (sender, pt) => sessionRef?.awareness?.receive(sender, pt),
         onShredFrame: (ft, sender, pt) => void sessionRef?.handleShredFrame(ft, sender, pt),
-        onPeerJoin: (entry) => {
-          const id = toB64(entry.peerId);
-          roster.set(id, entry);
-          sessionRef?.noteRosterSeen(id);
-          // Names come from the key the roster binds to this peer, never from
-          // what the peer says its name is.
-          if (entry.pubkey) {
-            void handleFromPubkey(entry.pubkey).then((h) =>
-              sessionRef?.awareness?.setHandle(id, h),
-            );
-          }
-          // They are back; stop showing them as away.
-          away.delete(id);
-          // Say hello immediately. Presence is broadcast on the ten-second
-          // heartbeat and on cursor movement, so without this a newcomer who
-          // joins and sits still is invisible to everyone — and everyone is
-          // invisible to them — for up to ten seconds. Measured at 10-12s
-          // before this line existed.
-          void sessionRef?.announcePresence();
-          events.onPeersChanged(roster.size);
-        },
-
-        onPeerLeave: (peerId) => {
-          const id = toB64(peerId);
-          const entry = roster.get(id);
-          if (roster.delete(id)) {
-            // Remember them briefly, by name. A locked phone is
-            // indistinguishable on the wire from someone closing the tab, and
-            // the difference matters when a shred is about to be proposed.
-            // The handle comes from their last presence broadcast; if they
-            // never sent one, fall back to a short form of their peer id.
-            // Derive from their roster key, captured before the entry goes.
-            const pubkey = entry?.pubkey;
-            away.set(id, { handle: id.slice(0, 6), leftAt: Date.now() });
-            if (pubkey) {
-              void handleFromPubkey(pubkey).then((h) => {
-                const rec = away.get(id);
-                if (rec) rec.handle = h;
-              });
-            }
-          }
-          events.onPeersChanged(roster.size);
-        },
+        onPeerJoin: (entry) => peerJoined(entry),
+        onPeerLeave: (peerId) => peerLeft(peerId),
         onPurge: (reason) => events.onPurge(reason),
         onTtlExtended: (remaining, effective, addedBy) =>
           sessionRef?.handleTtlExtended(remaining, effective, addedBy),
@@ -300,6 +384,7 @@ export class Session {
           // 4001 after a successful join means the room is gone, not that the
           // key is wrong. Discarding the code left the UI on "connecting"
           // while the socket retried forever.
+          if (code === 4001 && sessionRef?.carryOver()) return;
           if (code === 4001 || code === 4010 || code === 4011) {
             socket.stopReconnecting();
             events.onRoomUnavailable(code);
@@ -376,8 +461,73 @@ export class Session {
     this.doc.storedCount += count;
   }
 
+  /// Keep the ticket the old process handed over as it stopped.
+  holdTicket(ticket: string): void {
+    this.restartTicket = { ticket, at: Date.now() };
+  }
+
+  /// A join refused as "no such room" while holding a restart ticket is the
+  /// new process not knowing the room yet: present the ticket, then join
+  /// again. Returns false when there is no ticket to present, and the refusal
+  /// means what it always meant.
+  ///
+  /// Nothing queued is discarded while this runs. The first join after it
+  /// sees a new log and sends this whole copy anyway.
+  carryOver(): boolean {
+    const held = this.restartTicket;
+    const restore = this.cfg.restoreRoom;
+    if (!held || !restore || this.destroyed) return false;
+    if (this.carryingOver) return true;
+    this.carryingOver = true;
+    void (async () => {
+      let wait = 1_000;
+      try {
+        while (!this.destroyed && Date.now() - held.at < TICKET_PATIENCE_MS) {
+          let result: RestoreResult;
+          try {
+            result = await restore(held.ticket);
+          } catch {
+            result = "retry";
+          }
+          if (result === "restored") {
+            this.restartTicket = null;
+            this.socket.resume();
+            return;
+          }
+          if (result !== "retry") break;
+          await new Promise((r) => setTimeout(r, wait));
+          wait = Math.min(wait * 2, 15_000);
+        }
+        this.restartTicket = null;
+        if (this.destroyed) return;
+        this.socket.stopReconnecting();
+        this.events.onRoomUnavailable(4001);
+      } finally {
+        this.carryingOver = false;
+      }
+    })();
+    return true;
+  }
+
   private async handleJoinAck(ack: JoinAck): Promise<void> {
     this.events.onConnectionRefused(null);
+    this.indexed = ack.indexed === true;
+    // A new log under the same room id is a room brought back after a
+    // restart (amendment I). It holds nothing yet — the server never had
+    // anything it could read — so this copy is the room now, as much as
+    // anyone's is: send all of it. Yjs merges it with everyone else's and
+    // drops what repeats. Before any await, so it replaces the backlog before
+    // the socket starts sending it.
+    const newLog = this.logId !== null && ack.log_id !== undefined && ack.log_id !== this.logId;
+    if (ack.log_id !== undefined) this.logId = ack.log_id;
+    if (newLog) {
+      this.doc.cursor.reset();
+      this.doc.baseIndex = 0;
+      this.doc.storedCount = 0;
+      this.lastCovered = 0;
+      this.socket.replaceBacklogWith(wrapWithLengthAndPad(Y.encodeStateAsUpdate(this.doc.ydoc)));
+      this.events.onRoomCarriedOver?.();
+    }
     this.internals.myPeerId = ack.peer_id;
     this.internals.myJoinedSeq = ack.roster.find((r) => r.peer_id === ack.peer_id)?.joined_at_seq ?? 0;
     this.internals.joinPerfMs = performance.now();
@@ -452,8 +602,9 @@ export class Session {
     this.events.onTemper("SECURE");
     this.events.onJoinAck(ack);
     // Resume rather than replay: asking from 0 on every reconnect pulls the
-    // entire room log down again each time.
-    this.socket.sendSyncRequest(this.doc.syncFrom());
+    // entire room log down again each time. With indexes, resume from exactly
+    // what this copy holds.
+    this.socket.sendSyncRequest(this.indexed ? this.doc.cursor.watermark : this.doc.syncFrom());
     // Anything this client wrote that the room never stored is resent by the
     // socket itself, once it has confirmed the join.
   }
@@ -589,12 +740,15 @@ export class Session {
     void this.refreshOwnHash();
   }
 
-  private handleSnapshot(_sender: Uint8Array, _covers: bigint, blobWithPrefix: Uint8Array): void {
+  private handleSnapshot(_sender: Uint8Array, covers: bigint, blobWithPrefix: Uint8Array): void {
     try {
       this.doc.applyRemote(blobWithPrefix);
     } catch {
       return;
     }
+    const c = Number(covers);
+    this.doc.cursor.noteBelow(c);
+    if (Number.isSafeInteger(c)) this.lastCovered = Math.max(this.lastCovered, c);
     void this.refreshOwnHash();
   }
 
@@ -617,10 +771,17 @@ export class Session {
           : cmpBytes(a.peerId, b.peerId),
       )[0];
       if (toB64(elected.peerId) !== me) return;
-      const estimate = BigInt(this.doc.baseIndex + this.doc.storedCount);
-      if (this.doc.shouldSnapshot(BigInt(Math.max(Number(estimate), 1)))) {
-        void this.doc.createSnapshot(estimate);
-      }
+      const covers = snapshotCover({
+        indexed: this.indexed,
+        watermark: this.doc.cursor.watermark,
+        lastCovered: this.lastCovered,
+        baseIndex: this.doc.baseIndex,
+        storedCount: this.doc.storedCount,
+      });
+      if (covers === null || !this.doc.shouldSnapshot(BigInt(Math.max(covers, 1)))) return;
+      void this.doc.createSnapshot(BigInt(covers)).then((made) => {
+        if (made) this.lastCovered = Math.max(this.lastCovered, covers);
+      });
     }, 30_000);
   }
 

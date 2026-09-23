@@ -64,7 +64,12 @@ afterEach(() => {
 const noop = () => {};
 
 async function makeSocket(
-  opts: { events?: Partial<SocketEvents>; ackTimeoutMs?: number; compact?: (w: Uint8Array[]) => Uint8Array[] } = {},
+  opts: {
+    events?: Partial<SocketEvents>;
+    ackTimeoutMs?: number;
+    heartbeatMs?: number;
+    compact?: (w: Uint8Array[]) => Uint8Array[];
+  } = {},
 ) {
   const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(9), { name: "AES-GCM" }, false, [
     "encrypt",
@@ -78,6 +83,7 @@ async function makeSocket(
     contentKey: key,
     insecureAllowed: true,
     ackTimeoutMs: opts.ackTimeoutMs,
+    heartbeatMs: opts.heartbeatMs,
     compactUpdates: opts.compact,
     events: {
       onJoinAck: noop,
@@ -342,5 +348,168 @@ describe("the server explaining itself", () => {
     first.close(4007);
     expect(refused).toEqual([4007]);
     await waitFor(() => FakeWebSocket.all.length === 2);
+  });
+});
+
+/// What the server relays to a connection that asked for indexes: the sender
+/// envelope, then the entry's log index, then the body.
+function relayIndexed(frame: Uint8Array, index: number): Uint8Array {
+  const i = new Uint8Array(8);
+  new DataView(i.buffer).setBigUint64(0, BigInt(index), false);
+  return concatBytes(frame.slice(0, HEADER_LEN), PEER, i, frame.slice(HEADER_LEN));
+}
+
+describe("a connection nobody is typing into", () => {
+  it("is pinged, and abandoned when the ping goes unanswered, without waiting for a keystroke", async () => {
+    await makeSocket({ heartbeatMs: 60, ackTimeoutMs: 150 });
+    const first = latest();
+    first.open();
+    first.deliver(joinAck({ heartbeat: true }));
+    first.dead = true;
+    await waitFor(() => FakeWebSocket.all.length === 2, 2000);
+  });
+
+  it("stays up while its pings are answered, and hands on the roster each answer carries", async () => {
+    const rosters: unknown[] = [];
+    await makeSocket({ heartbeatMs: 40, ackTimeoutMs: 150, events: { onRoster: (r) => rosters.push(r) } });
+    const ws = latest();
+    ws.open();
+    ws.deliver(joinAck({ heartbeat: true }));
+    const roster = [{ peer_id: toB64(PEER), joined_at_seq: 1 }];
+    let answered = 0;
+    const end = Date.now() + 600;
+    while (Date.now() < end) {
+      const pings = ws.sent.filter((f) => f[3] === FT.PING).length;
+      while (answered < pings) {
+        ws.deliver(buildJsonFrame(FT.PONG, ROOM, 0, { roster }));
+        answered++;
+      }
+      await sleep(10);
+    }
+    expect(answered).toBeGreaterThan(3);
+    expect(FakeWebSocket.all).toHaveLength(1);
+    expect(rosters[0]).toEqual(roster);
+  });
+
+  it("is never pinged by a server that did not offer it", async () => {
+    await makeSocket({ heartbeatMs: 20, ackTimeoutMs: 100 });
+    const ws = latest();
+    ws.open();
+    ws.deliver(joinAck());
+    await sleep(200);
+    expect(ws.sent.filter((f) => f[3] === FT.PING)).toHaveLength(0);
+    expect(FakeWebSocket.all).toHaveLength(1);
+  });
+});
+
+describe("the log index of every entry", () => {
+  it("is reported once the entry is in the document, and a split update's only once it is whole", async () => {
+    const limit = 16 * 1024;
+    const { socket: sender } = await makeSocket();
+    const sws = latest();
+    sws.open();
+    sws.deliver(joinAck({ limits: { ...LIMITS, max_frame_bytes: limit } }));
+    await sender.sendUpdate(wrapWithLengthAndPad(new Uint8Array(40 * 1024).fill(4)));
+    let acked = 0;
+    await waitFor(() => {
+      const sent = docFrames(sws);
+      while (acked < sent.length) {
+        sws.deliver(docAck());
+        acked++;
+      }
+      return sender.readyForSnapshot();
+    });
+    const parts = docFrames(sws);
+    expect(parts.length).toBeGreaterThan(2);
+
+    const taken: number[] = [];
+    const applied: Uint8Array[] = [];
+    await makeSocket({
+      events: { onEntriesTaken: (i) => taken.push(...i), onDocUpdate: (_s, pt) => applied.push(pt) },
+    });
+    const rws = latest();
+    rws.open();
+    rws.deliver(joinAck({ indexed: true }));
+    // The last part is held back: the update is not in the document yet.
+    parts.slice(0, -1).forEach((f, i) => rws.deliver(relayIndexed(f, 10 + i)));
+    await sleep(80);
+    expect(taken).toEqual([]);
+    rws.deliver(relayIndexed(parts[parts.length - 1], 10 + parts.length - 1));
+    await waitFor(() => applied.length === 1);
+    expect([...taken].sort((a, b) => a - b)).toEqual(parts.map((_, i) => 10 + i));
+
+    // A part sent again after the update was whole — its first ack was lost —
+    // is taken at once rather than starting an assembly that never ends.
+    rws.deliver(relayIndexed(parts[0], 50));
+    await waitFor(() => taken.includes(50));
+    expect(applied).toHaveLength(1);
+
+    // An entry nobody can read holds nothing back either.
+    const garbage = concatBytes(parts[0].slice(0, HEADER_LEN), new Uint8Array(64).fill(1));
+    rws.deliver(relayIndexed(garbage, 51));
+    await waitFor(() => taken.includes(51));
+  });
+
+  it("of our own update is the one its ack names", async () => {
+    const taken: number[] = [];
+    const { socket } = await makeSocket({ events: { onEntriesTaken: (i) => taken.push(...i) } });
+    const ws = latest();
+    ws.open();
+    ws.deliver(joinAck({ indexed: true }));
+    await socket.sendUpdate(text("mine"));
+    await waitFor(() => docFrames(ws).length === 1);
+    ws.deliver(buildJsonFrame(FT.DOC_ACK, ROOM, 0, { ok: true, index: 7 }));
+    await waitFor(() => taken.length === 1);
+    expect(taken).toEqual([7]);
+  });
+});
+
+describe("a restart that hands the room over", () => {
+  it("passes on the ticket, and joins again once the room is back although the refusal stopped retries", async () => {
+    const tickets: string[] = [];
+    const errors: number[] = [];
+    const { socket, key } = await makeSocket({
+      events: { onRestartTicket: (t) => tickets.push(t), onError: (c) => errors.push(c) },
+    });
+    const first = latest();
+    first.open();
+    first.deliver(joinAck());
+    first.deliver(buildJsonFrame(FT.RESTART_TICKET, ROOM, 0, { ticket: "abc.def" }));
+    first.close(1012);
+    expect(tickets).toEqual(["abc.def"]);
+
+    // Typed while the server was away: queued, and kept through the refusal.
+    const typed = text("typed across the restart");
+    await socket.sendUpdate(typed.slice());
+    await waitFor(() => FakeWebSocket.all.length === 2);
+    const refused = latest();
+    refused.open();
+    refused.deliver(buildJsonFrame(FT.ERROR, ROOM, 0, { code: 4001 }));
+    await waitFor(() => errors.includes(4001));
+    await sleep(600);
+    expect(FakeWebSocket.all).toHaveLength(2);
+
+    socket.resume();
+    expect(FakeWebSocket.all).toHaveLength(3);
+    const back = latest();
+    back.open();
+    back.deliver(joinAck());
+    await waitFor(() => docFrames(back).length === 1);
+    expect(await readAsPeer(docFrames(back)[0], key)).toEqual(typed);
+  });
+
+  it("can replace the whole backlog with one update, for a room whose log is new", async () => {
+    const { socket, key } = await makeSocket();
+    const ws = latest();
+    ws.open();
+    await socket.sendUpdate(text("one"));
+    await socket.sendUpdate(text("two"));
+    const whole = text("everything");
+    socket.replaceBacklogWith(whole.slice());
+    ws.deliver(joinAck());
+    await waitFor(() => docFrames(ws).length === 1);
+    await sleep(50);
+    expect(docFrames(ws)).toHaveLength(1);
+    expect(await readAsPeer(docFrames(ws)[0], key)).toEqual(whole);
   });
 });

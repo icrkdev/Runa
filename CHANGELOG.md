@@ -4,6 +4,48 @@ Newest first. The release workflow reads the section matching the tag and
 publishes it as the release notes, and refuses to build a tag that has no
 section — so this file is not documentation of the release, it is part of it.
 
+## Unreleased
+
+### Added
+
+- **Rooms survive a server restart.** Rooms still live only in memory, and the
+  server still writes nothing down. With `RUNA_RESTART_KEY` set, the countdown
+  before a restart now ends by handing every member a signed ticket for their
+  room. When the new process comes up, their pages present it, the room is
+  recreated under its old link, and each page sends its copy back — so a
+  redeploy costs nobody their document, and someone who joins afterwards sees
+  everything written before it. The countdown says which of the two is about
+  to happen. Both deploy scripts generate the key once into a root-only file.
+- **A connection nobody is typing into is checked every 15 seconds.** One that
+  died quietly used to show the room as connected, while everyone else's edits
+  went nowhere, until the next keystroke. Each answer also carries who is in
+  the room, so a list that missed a join or a leave is corrected.
+
+### Fixed
+
+- **The second Paste button in Firefox and Safari.** It was never a second
+  menu. Monaco's Paste item reads the clipboard from script, and those browsers
+  answer every such read with a Paste button of their own that has to be
+  clicked as well — a permission prompt that no page can turn off. Paste is now
+  left off the editor's right-click menu in those two browsers; the rest of the
+  menu stays, and pasting from the keyboard never asked in the first place.
+  Chromium, which asks once per site, keeps it.
+- **Long sessions stopped compacting their history, and could fill up.** A
+  snapshot has to say how much of the room's log it covers, and a client could
+  only count the edits it had written itself. The longer-present member, who
+  takes the snapshots, might mostly have been reading — and once its count fell
+  below the last snapshot's, the server refused every snapshot after it. The
+  log then grew until edits were refused. The server now tells each client the
+  log position of every update, and snapshots cover exactly what the client
+  holds.
+- **Joining a room with text in it showed an empty preview** until somebody
+  typed. The text arrived while the editor was being attached, before the
+  preview was listening for it.
+
+### Changed
+
+- Playwright 1.63.
+
 ## 0.4.0
 
 ### Added

@@ -9,7 +9,7 @@ use crate::error::WireCode;
 use crate::heimdall::clientip::rate_limit_key;
 use crate::heimdall::verifier;
 use crate::runar::names;
-use crate::runar::room::{unix_now, CreateError, Ttl, TtlKind};
+use crate::runar::room::{unix_now, CreateError, RestoreError, RestoreOutcome, Ttl, TtlKind};
 use crate::AppState;
 
 /// The only KDF parameters a room may be created with.
@@ -390,6 +390,104 @@ pub async fn create_named(
         }
         Err(CreateError::AtCapacity) => {
             tracing::warn!(max = state.rooms.max_rooms(), "room budget exhausted");
+            code_response(StatusCode::SERVICE_UNAVAILABLE, "AT_CAPACITY")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RestoreBody {
+    pub ticket: String,
+}
+
+/// Bring back a room the previous process vouched for (amendment I).
+///
+/// The ticket is the whole authority here: it is signed with the restart key,
+/// names the room's id, name and settings, and expires minutes after the old
+/// process stopped. Its contents are then held to exactly the rules a new room
+/// is, under today's configuration, so a ticket cannot carry anything a create
+/// request could not.
+///
+/// 201 restored, 200 already restored by another member — both mean "join
+/// now". 400 and 410 mean the room is not coming back; 409 means its name was
+/// taken in the meantime; 429 and 503 are worth retrying.
+pub async fn restore_room(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<RestoreBody>,
+) -> Response {
+    if state.is_restarting() {
+        return code_response(StatusCode::SERVICE_UNAVAILABLE, "RESTARTING");
+    }
+    let Some(key) = state.cfg.restart_key.as_ref() else {
+        return code_response(StatusCode::GONE, "NO_HANDOVER");
+    };
+    let ip = rate_limit_key(state.cfg.trusted_proxy, &headers, addr);
+    if !state.auth_per_ip.check(&ip) {
+        return wire_code_response(StatusCode::TOO_MANY_REQUESTS, WireCode::RateLimited);
+    }
+    let now = unix_now();
+    let Ok(ticket) = crate::runar::ticket::open(key, &body.ticket, now) else {
+        return code_response(StatusCode::BAD_REQUEST, "TICKET_INVALID");
+    };
+    let Some(id) = parse_room_hex(&ticket.id) else {
+        return code_response(StatusCode::BAD_REQUEST, "TICKET_INVALID");
+    };
+    let as_create = CreateRoomBody {
+        id: None,
+        name: ticket.name.clone(),
+        suffix: Some(false),
+        verifier: Some(ticket.verifier.clone()),
+        kdf: KdfBody { m_kib: ticket.m_kib, t: ticket.t, p: ticket.p, salt: ticket.salt.clone() },
+        ttl: TtlBody { kind: ticket.ttl_kind.clone(), secs: ticket.ttl_secs },
+        ceiling_optout: ticket.optout,
+        config_blob: ticket.config_blob.clone(),
+    };
+    let params = match validate_params(&as_create, &state.cfg) {
+        Ok(p) => p,
+        Err(_) => return code_response(StatusCode::BAD_REQUEST, "TICKET_INVALID"),
+    };
+    // An absolute room whose time ran out while the process was down stays
+    // ended; bringing it back would hand it time nobody gave it.
+    if params.ttl.kind == TtlKind::Absolute
+        && ticket
+            .created
+            .saturating_add(params.ttl.secs)
+            .saturating_add(ticket.ttl_ext.min(crate::runar::room::MAX_TTL_EXTENSION_SECS))
+            <= now
+    {
+        return code_response(StatusCode::GONE, "EXPIRED");
+    }
+    match state.rooms.restore(
+        id,
+        ticket.name.as_deref(),
+        ticket.created,
+        params.ttl,
+        ticket.ttl_ext,
+        params.ceiling_optout,
+        params.verifier_key,
+        params.m,
+        params.t,
+        params.p,
+        params.salt,
+        params.config_blob.map(bytes::Bytes::from),
+        state.cfg.max_log_bytes,
+        state.cfg.auth_attempts_per_room_per_min,
+        state.cfg.max_peers_per_room,
+    ) {
+        Ok(RestoreOutcome::Restored(_)) => {
+            tracing::info!("room restored from a restart ticket");
+            json_response(StatusCode::CREATED, serde_json::json!({ "ok": true, "restored": true }))
+        }
+        Ok(RestoreOutcome::AlreadyLive) => {
+            json_response(StatusCode::OK, serde_json::json!({ "ok": true, "restored": false }))
+        }
+        Err(RestoreError::Retired) => code_response(StatusCode::GONE, "GONE"),
+        Err(RestoreError::NameTaken) => wire_code_response(StatusCode::CONFLICT, WireCode::NameTaken),
+        Err(RestoreError::NameInvalid) => code_response(StatusCode::BAD_REQUEST, "TICKET_INVALID"),
+        Err(RestoreError::AtCapacity) => {
+            tracing::warn!(max = state.rooms.max_rooms(), "room budget exhausted during restore");
             code_response(StatusCode::SERVICE_UNAVAILABLE, "AT_CAPACITY")
         }
     }

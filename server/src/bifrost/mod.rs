@@ -53,7 +53,7 @@ async fn floor_delay(floor: Duration) {
     tokio::time::sleep(floor).await;
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct JoinBody {
     #[serde(default)]
     auth_key: Option<String>,
@@ -62,6 +62,21 @@ struct JoinBody {
     /// Ask for a DOC_ACK after every DOC_UPDATE this connection sends.
     #[serde(default)]
     acks: bool,
+    /// Ask for the log index of every DOC_UPDATE relayed to this connection
+    /// (amendment H).
+    #[serde(default)]
+    indexed: bool,
+    /// This connection will send PING and wants PONG (amendment G).
+    #[serde(default)]
+    heartbeat: bool,
+}
+
+/// What one connection negotiated in its JOIN. Each is off for a client that
+/// did not ask, which then never receives a frame or field it does not know.
+#[derive(Clone, Copy)]
+struct Caps {
+    acks: bool,
+    heartbeat: bool,
 }
 
 #[derive(Serialize)]
@@ -113,6 +128,14 @@ struct JoinAck {
     acks: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     limits: Option<LimitsJson>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    indexed: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    heartbeat: bool,
+    /// Which log this is. A room brought back after a restart keeps its id
+    /// and starts a new log, and a member that sees this change sends its
+    /// whole copy again instead of resuming (amendment I).
+    log_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_blob: Option<String>,
     roster: Vec<RosterJson>,
@@ -326,9 +349,9 @@ async fn run_connection(
         return Err(WireCode::ProtocolError);
     }
 
-    let join: JoinBody = serde_json::from_slice(&first[HEADER_LEN..])
-        .unwrap_or(JoinBody { auth_key: None, pubkey: None, acks: false });
+    let join: JoinBody = serde_json::from_slice(&first[HEADER_LEN..]).unwrap_or_default();
     let wants_acks = join.acks;
+    let caps = Caps { acks: join.acks, heartbeat: join.heartbeat };
 
     // A throttled room must not answer differently from a room that does not
     // exist. Returning 4002 here was a clean existence oracle: five bad
@@ -367,7 +390,8 @@ async fn run_connection(
         .filter(|v| v.len() == 32 || v.len() == 65);
 
     let (tx, mut rx) = mpsc::channel::<Bytes>(OUTBOUND_CAPACITY);
-    let peer_tx = crate::runar::room::PeerTx::new(tx, cfg.max_queued_bytes_per_conn);
+    let peer_tx = crate::runar::room::PeerTx::new(tx, cfg.max_queued_bytes_per_conn)
+        .with_indexes(join.indexed);
     let queue_meter = peer_tx.meter();
     let entry = match room.add_peer(session_pubkey.clone(), peer_tx) {
         Ok(e) => e,
@@ -406,16 +430,11 @@ async fn run_connection(
                 frames_per_sec: cfg.frames_per_conn_per_sec,
                 bytes_per_sec: cfg.bytes_per_conn_per_sec,
             }),
+            indexed: join.indexed,
+            heartbeat: join.heartbeat,
+            log_id: hex::encode(room.log_id),
             config_blob: room.config_blob.as_ref().map(|b| B64.encode(b)),
-            roster: room
-                .roster()
-                .into_iter()
-                .map(|p| RosterJson {
-                    peer_id: B64.encode(p.peer_id),
-                    pubkey: p.pubkey.map(|k| B64.encode(k)),
-                    joined_at_seq: p.joined_at_seq,
-                })
-                .collect(),
+            roster: roster_json(&room),
         };
         let frame = json_frame(room_id, FT_JOIN_ACK, &ack);
         if sink.send(Message::Binary(frame)).await.is_err() {
@@ -427,7 +446,7 @@ async fn run_connection(
     // Joining during a restart countdown: say so at once, rather than let
     // someone start writing into a room with seconds left.
     if let Some(in_secs) = state.restart_in_secs() {
-        let notice = restart_notice(room_id, &serde_json::json!({ "in_secs": in_secs }));
+        let notice = restart_notice(room_id, &state.restart_notice_body(in_secs));
         if sink.send(Message::Binary(notice)).await.is_err() {
             room.remove_peer(&peer_id);
             return Err(WireCode::ProtocolError);
@@ -456,7 +475,8 @@ async fn run_connection(
     // whole room log, so letting them queue turns one small frame into an
     // unbounded fan-out of spawned tasks and egress.
     let sync_slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
-    let mut pending_acks: Vec<Bytes> = Vec::new();
+    // Frames answering this connection's own requests: DOC_ACK and PONG.
+    let mut direct: Vec<Bytes> = Vec::new();
 
     loop {
         tokio::select! {
@@ -471,8 +491,7 @@ async fn run_connection(
                             conn_ok = Err(WireCode::RateLimited);
                             break;
                         }
-                        let acks_out = wants_acks.then_some(&mut pending_acks);
-                        match process_frame(&state, &room, peer_id, &data, &sync_slot, acks_out).await {
+                        match process_frame(&state, &room, peer_id, &data, &sync_slot, caps, &mut direct).await {
                             Ok(()) => {}
                             Err(Some(code)) => { conn_ok = Err(code); break; }
                             Err(None) => {}
@@ -486,14 +505,14 @@ async fn run_connection(
                         // Awaiting the write also paces this reader to its
                         // own socket, which is the backpressure it should
                         // have.
-                        let mut ack_write_failed = false;
-                        for ack in pending_acks.drain(..) {
-                            if sink.send(Message::Binary(ack)).await.is_err() {
-                                ack_write_failed = true;
+                        let mut direct_write_failed = false;
+                        for frame in direct.drain(..) {
+                            if sink.send(Message::Binary(frame)).await.is_err() {
+                                direct_write_failed = true;
                                 break;
                             }
                         }
-                        if ack_write_failed {
+                        if direct_write_failed {
                             break;
                         }
                     }
@@ -509,6 +528,7 @@ async fn run_connection(
                 match outbound {
                     Some(bytes) => {
                         let is_purge = bytes.len() >= HEADER_LEN && bytes[3] == FT_PURGE;
+                        let is_ticket = bytes.len() >= HEADER_LEN && bytes[3] == FT_RESTART_TICKET;
                         let n = bytes.len();
                         let sent = sink.send(Message::Binary(bytes)).await;
                         // Quota returns once the frame is off our hands.
@@ -518,6 +538,13 @@ async fn run_connection(
                         }
                         if is_purge {
                             conn_ok = Err(WireCode::Purged);
+                            break;
+                        }
+                        // The process is stopping and this connection now
+                        // holds its room's ticket: close it as a restart, so
+                        // the member comes back to the new process with it.
+                        if is_ticket {
+                            conn_ok = Err(WireCode::ServiceRestart);
                             break;
                         }
                     }
@@ -559,7 +586,8 @@ async fn process_frame(
     sender: [u8; 16],
     data: &[u8],
     sync_slot: &std::sync::Arc<tokio::sync::Semaphore>,
-    acks: Option<&mut Vec<Bytes>>,
+    caps: Caps,
+    direct: &mut Vec<Bytes>,
 ) -> Result<(), Option<WireCode>> {
     let Some(header) = Header::decode(data) else {
         return Err(Some(WireCode::ProtocolError));
@@ -581,23 +609,23 @@ async fn process_frame(
             };
             match append_result {
                 Ok(index) => {
-                    room.broadcast(&frame_bytes, Some(sender)).await;
+                    room.broadcast_update(&frame_bytes, sender, index).await;
                     // The client keeps every update until this comes back, and
                     // sends it again on its next connection if it never does.
                     // That is what makes an edit typed into a connection that
                     // has silently died recoverable: the browser reports such
                     // a socket as open until TCP gives up, and nothing sent in
                     // that time arrives anywhere.
-                    if let Some(out) = acks {
+                    if caps.acks {
                         let body = serde_json::json!({ "ok": true, "index": index });
-                        out.push(json_frame(room.id, FT_DOC_ACK, &body));
+                        direct.push(json_frame(room.id, FT_DOC_ACK, &body));
                     }
                 }
                 Err(_) => {
                     send_direct(room, sender, error_frame(room.id, WireCode::FrameTooLarge));
-                    if let Some(out) = acks {
+                    if caps.acks {
                         let body = serde_json::json!({ "ok": false });
-                        out.push(json_frame(room.id, FT_DOC_ACK, &body));
+                        direct.push(json_frame(room.id, FT_DOC_ACK, &body));
                     }
                 }
             }
@@ -681,8 +709,15 @@ async fn process_frame(
                 };
                 tokio::spawn(async move {
                     let _permit = permit;
-                    for entry in chunk.snapshot.into_iter().chain(chunk.entries) {
-                        if tx.send_backpressured(envelop_entry(&entry)).await.is_err() {
+                    if let Some(snapshot) = chunk.snapshot {
+                        if tx.send_backpressured(envelop_entry(&snapshot, None)).await.is_err() {
+                            return;
+                        }
+                    }
+                    for (i, entry) in chunk.entries.into_iter().enumerate() {
+                        let index = (tx.indexed && entry.frame_type == FT_DOC_UPDATE)
+                            .then_some(chunk.first_index + i as u64);
+                        if tx.send_backpressured(envelop_entry(&entry, index)).await.is_err() {
                             break;
                         }
                     }
@@ -756,8 +791,38 @@ async fn process_frame(
             Ok(())
         }
 
+        // Answered straight to this socket, like DOC_ACK, so a queue full of
+        // relay traffic cannot make a live connection look dead. The roster
+        // rides along: it is taken here, in the task that writes it, so no
+        // earlier view of it can arrive after a later one (amendment G).
+        FT_PING if caps.heartbeat => {
+            direct.push(json_frame(
+                room.id,
+                FT_PONG,
+                &serde_json::json!({ "roster": roster_json(room) }),
+            ));
+            Ok(())
+        }
+
         _ => Err(Some(WireCode::ProtocolError)),
     }
+}
+
+fn roster_json(room: &Room) -> Vec<RosterJson> {
+    room.roster()
+        .into_iter()
+        .map(|p| RosterJson {
+            peer_id: B64.encode(p.peer_id),
+            pubkey: p.pubkey.map(|k| B64.encode(k)),
+            joined_at_seq: p.joined_at_seq,
+        })
+        .collect()
+}
+
+/// The frame that carries a room's restart ticket to one of its members, just
+/// before the connection is closed (amendment I).
+pub fn restart_ticket(room_id: [u8; 16], ticket: &str) -> Bytes {
+    json_frame(room_id, FT_RESTART_TICKET, &serde_json::json!({ "ticket": ticket }))
 }
 
 fn send_direct(room: &Room, target: [u8; 16], payload: Bytes) {
@@ -767,14 +832,13 @@ fn send_direct(room: &Room, target: [u8; 16], payload: Bytes) {
     }
 }
 
-fn envelop_entry(entry: &LogEntry) -> Bytes {
+fn envelop_entry(entry: &LogEntry, index: Option<u64>) -> Bytes {
     let frame = &entry.frame;
     if frame.len() < HEADER_LEN {
         return frame.clone();
     }
-    let mut out = Vec::with_capacity(frame.len() + 16);
-    out.extend_from_slice(&frame[..HEADER_LEN]);
-    out.extend_from_slice(&entry.sender);
-    out.extend_from_slice(&frame[HEADER_LEN..]);
-    Bytes::from(out)
+    match index {
+        Some(i) => crate::runar::room::envelop_indexed(frame, entry.sender, i),
+        None => crate::runar::room::envelop(frame, entry.sender),
+    }
 }

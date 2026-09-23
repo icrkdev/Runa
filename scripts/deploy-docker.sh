@@ -96,6 +96,14 @@ $SSH "MEM=$MEM LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS MAX_PEERS=$MAX_PEERS \
   # off the countdown RUNA gives open rooms before it exits.
   docker stop -t 90 runa >/dev/null 2>&1 || true
   docker rm -f runa >/dev/null 2>&1 || true
+  # The key that lets open rooms outlive a restart, kept on the host so every
+  # container gets the same one. Generated once, never replaced.
+  mkdir -p "$HOME/.runa" && chmod 700 "$HOME/.runa"
+  if [ ! -s "$HOME/.runa/restart.env" ]; then
+    (umask 077; printf 'RUNA_RESTART_KEY=%s\n' "$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')" \
+      > "$HOME/.runa/restart.env")
+    echo "created ~/.runa/restart.env: open rooms carry over from the next restart on"
+  fi
   docker run -d \
     --name runa \
     --restart unless-stopped \
@@ -115,6 +123,7 @@ $SSH "MEM=$MEM LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS MAX_PEERS=$MAX_PEERS \
     -e RUNA_MAX_CONNECTIONS="$MAX_CONNS" \
     -e RUNA_MAX_QUEUE_KB="$QUEUE_KB" \
     -e RUST_LOG=runa_server=info \
+    --env-file "$HOME/.runa/restart.env" \
     runa:latest
   # Prove it stayed up. --read-only and --cap-drop=ALL are each capable of
   # stopping it from starting, and `docker run -d` returns 0 regardless.

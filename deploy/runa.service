@@ -9,6 +9,10 @@ Type=exec
 DynamicUser=yes
 ExecStart=/usr/local/bin/runa-server
 EnvironmentFile=/etc/runa/runa.env
+# RUNA_RESTART_KEY, kept apart because it is a secret and runa.env is not.
+# systemd reads both as root before dropping to the dynamic user. Optional:
+# without it a restart ends every open room instead of handing them over.
+EnvironmentFile=-/etc/runa/restart.env
 
 # ── Hardening ────────────────────────────────────────────────────────────
 NoNewPrivileges=yes

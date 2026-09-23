@@ -77,6 +77,8 @@ pub enum AppendError {
 pub struct TailChunk {
     pub snapshot: Option<LogEntry>,
     pub entries: Vec<LogEntry>,
+    /// The log index of `entries[0]`; each entry after it is one higher.
+    pub first_index: u64,
 }
 
 impl RoomLog {
@@ -176,6 +178,7 @@ impl RoomLog {
         TailChunk {
             snapshot: if snapshot_needed { self.snapshot.clone() } else { None },
             entries,
+            first_index: self.start_index + skip as u64,
         }
     }
 

@@ -82,22 +82,64 @@ impl AppState {
         self.restart_deadline.lock().unwrap().is_some()
     }
 
+    /// What a RESTART_NOTICE says: the seconds left, and whether rooms will
+    /// be handed tickets to carry them over (amendment I), so the page can
+    /// tell people which of the two is about to happen.
+    pub fn restart_notice_body(&self, in_secs: u64) -> serde_json::Value {
+        serde_json::json!({ "in_secs": in_secs, "handover": self.cfg.restart_key.is_some() })
+    }
+
     /// Warn every open room that the process stops in `grace`, and stop
     /// creating rooms that could not outlive it.
     ///
-    /// Rooms live only in memory, so a restart ends every one of them. It used
-    /// to do that without a word: a redeploy in the middle of someone's session
-    /// took their document with it. This is the minute they get to export.
-    /// Returns how many rooms were told.
+    /// Rooms live only in memory, so a restart without a restart key ends
+    /// every one of them. It used to do that without a word: a redeploy in the
+    /// middle of someone's session took their document with it. This is the
+    /// minute they get to export. Returns how many rooms were told.
     pub async fn begin_restart(&self, grace: Duration) -> usize {
         *self.restart_deadline.lock().unwrap() = Some(std::time::Instant::now() + grace);
-        let body = serde_json::json!({ "in_secs": grace.as_secs() });
+        let body = self.restart_notice_body(grace.as_secs());
         let rooms = self.rooms.all();
         for room in &rooms {
             let frame = crate::bifrost::restart_notice(room.id, &body);
             room.broadcast_event(&frame, None).await;
         }
         rooms.len()
+    }
+
+    /// Hand every member of every live room its room's restart ticket, which
+    /// also closes their connection as a restart (amendment I). Returns how
+    /// many rooms got one; zero without a restart key.
+    ///
+    /// Issued at the very end, not with the warning: a room shredded during
+    /// the countdown must not leave its members holding a way to bring it
+    /// back. Sent with backpressure rather than dropped on a full queue — a
+    /// member who misses theirs can still rejoin once another has restored
+    /// the room, but a room nobody got a ticket for is gone.
+    pub async fn hand_over(&self) -> usize {
+        let Some(key) = self.cfg.restart_key.as_ref() else {
+            return 0;
+        };
+        let now = runar::room::unix_now();
+        let mut handed = 0;
+        for room in self.rooms.all() {
+            if !matches!(room.current_state(), runar::room::RoomState::Active) {
+                continue;
+            }
+            let peers: Vec<_> = room.peers.lock().unwrap().iter().map(|p| p.tx.clone()).collect();
+            if peers.is_empty() {
+                continue;
+            }
+            let Some(ticket) = runar::ticket::issue(key, &room, now) else {
+                continue;
+            };
+            let frame = crate::bifrost::restart_ticket(room.id, &ticket);
+            for tx in peers {
+                let _ = tokio::time::timeout(Duration::from_secs(2), tx.send_backpressured(frame.clone())).await;
+            }
+            handed += 1;
+        }
+        handed
     }
 }
 
