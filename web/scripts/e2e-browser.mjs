@@ -293,6 +293,23 @@ async function main() {
   // The CSS fix (width:100% on form controls) is correct by construction
   // rather than by this test. Left in place because the class of bug is
   // common and the check is nearly free.
+  // Someone sent a link and you are on the front page: paste it into Join. It
+  // has to arrive with its key, since the key is the part after the # and a
+  // join box that dropped it would open onto "this link is missing its key".
+  const joiner = await makePage("join");
+  await joiner.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+  await joiner.waitForSelector("#join-room", { timeout: 10_000 });
+  await joiner.fill("#join-room", `  ${roomUrl}  `);
+  await joiner.press("#join-room", "Enter");
+  await joiner.waitForSelector(".monaco-editor", { timeout: 30_000 }).catch(async () => {
+    const shown = await joiner.evaluate(() => document.body.textContent.replace(/\s+/g, " ").slice(0, 200));
+    throw new Error(`[join] pasting a room link into Join did not open the room: ${shown}`);
+  });
+  if (!(await joiner.evaluate(() => location.hash.startsWith("#k=")))) {
+    throw new Error("[join] the room opened without its key in the address");
+  }
+  await joiner.close();
+
   const landing = await makePage("landing");
   for (const width of [320, 375, 414]) {
     await landing.setViewportSize({ width, height: 780 });
@@ -1498,6 +1515,7 @@ async function main() {
   console.log(`  a 24-hour room does not accuse its server of changing the expiry`);
   console.log(`  named-room form strands nothing above the scroll origin on four phones`);
   console.log(`  a name already in use is refused as taken, before any key derivation`);
+  console.log(`  a room link pasted into Join on the front page opens the room, key included`);
   console.log(`  a named room opens in another page with the passphrase it was made with`);
   console.log(`  room stays one pane to 1000px; Copy link and Shred stay on the bar`);
   console.log(`  the room fits the window exactly; the chrome cannot scroll away`);

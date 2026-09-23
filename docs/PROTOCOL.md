@@ -126,11 +126,22 @@ known limits.
 **A · PURGE_ACK (0x14).** Spec §5.6 step 9 has clients acknowledge a shred so
 the server can destroy its own copy, but no such frame type exists in §5.2,
 and an encrypted ack could not be counted by a blind relay. Added 0x14 as an
-unencrypted one-field frame. The server purges only when every currently
-connected peer has acked the same `request_id`; there is no timeout, so an
-unacknowledged request leaves the room intact. Acks are unauthenticated,
-which is acceptable because the quorum — not the individual ack — is the
-control, and the server holds no keys either way.
+unencrypted one-field frame. The server purges only when every peer in the
+cohort has acked the same `request_id`, and nothing else can end a room early:
+an unacknowledged request leaves it intact. Acks are unauthenticated, which is
+acceptable because the quorum — not the individual ack — is the control, and
+the server holds no keys either way.
+
+The cohort is fixed when the first ack arrives: every connected peer, except
+anyone who joined after the most recent SHRED_REQUEST the server relayed
+(within the last hour). The request is never replayed, so a peer who arrives
+mid-vote can neither see it nor vote in it — and the voters' clients count
+them out too, since the roster is frozen into the request. Counting them here
+meant one arrival mid-vote kept a room alive that every voter had shredded.
+The snapshot is the server's own, taken as the request passes through, so no
+peer can shrink it. A partial set of acks is dropped after 30 seconds: a real
+decision's acks all arrive within a round trip, and a stale set would otherwise
+hold its cohort over the next one.
 
 **B · SNAPSHOT (0x21) with plaintext index extension.** Late joiners need a
 compacted history, which requires the server to truncate at an index it

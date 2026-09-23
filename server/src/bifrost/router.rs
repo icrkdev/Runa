@@ -36,6 +36,54 @@ pub async fn ws_route(
         .on_upgrade(move |socket| bifrost::handle_socket(socket, state, room_id, ip))
 }
 
+/// Whether a request was made by a page on another site.
+///
+/// Nothing here rides on cookies, so another site gains nothing by reading
+/// RÚNA's answers. What it could do was spend the visitor's own limits: a page
+/// anywhere could have the browser of whoever opened it send bad joins to
+/// RÚNA, using up that address's guess budget, and the visitor's real rooms
+/// would then be refused with the same answer as a room that does not exist.
+///
+/// Browsers send `Origin` on every WebSocket handshake and every POST, and
+/// `Sec-Fetch-Site` on everything else they can; a page cannot forge either.
+/// Clients that are not browsers send neither and are not a way for one site
+/// to act through another's visitors, so they pass.
+pub fn cross_site(headers: &HeaderMap, authority: Option<&str>) -> bool {
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .or(authority)
+            .unwrap_or("");
+        let origin_host = origin
+            .to_str()
+            .ok()
+            .and_then(|o| o.split_once("://"))
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        // "null" — a sandboxed frame or a local file — has no "://" at all.
+        return origin_host.is_empty() || !origin_host.eq_ignore_ascii_case(host);
+    }
+    matches!(
+        headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()),
+        Some("cross-site") | Some("same-site")
+    )
+}
+
+async fn same_site_only(req: axum::extract::Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let guarded = path.starts_with("/api/") || path.starts_with("/socket/");
+    let authority = req.uri().authority().map(|a| a.as_str().to_string());
+    if guarded && cross_site(req.headers(), authority.as_deref()) {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "code": "CROSS_SITE" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 async fn security_headers(req: axum::extract::Request, next: Next) -> Response {
     let is_gone = req.uri().path().ends_with("/gone.html") || req.uri().path() == "/gone.html";
     let mut res = next.run(req).await;
@@ -175,6 +223,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/rooms/restore", post(restore_room))
         .route("/version", get(version))
         .fallback_service(static_service)
+        .layer(middleware::from_fn(same_site_only))
         .layer(middleware::from_fn(security_headers))
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .with_state(state)

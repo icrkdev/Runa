@@ -712,3 +712,16 @@ p, li { orphans: 3; widows: 3; }
 @supports (height: 100dvh) {
   .app-shell, body > #root { min-height: 100dvh; }
 }
+
+/* Joining is the smaller of the two things this page does: it sits under the
+   create form as its own quiet division, with one line of feedback. */
+.join .field { margin-bottom: 8px; }
+.join .row { gap: 8px; }
+.join .row input { flex: 1; }
+.join-hint {
+  margin: 0;
+  font-size: var(--step--1);
+  line-height: 1.5;
+  color: var(--text-dim);
+  min-height: 3em; /* two lines reserved, so the hint does not push the page */
+}

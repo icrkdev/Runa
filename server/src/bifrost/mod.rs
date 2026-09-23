@@ -733,6 +733,9 @@ async fn process_frame(
         }
 
         FT_SHRED_REQUEST | FT_SHRED_VOTE | FT_SHRED_CANCEL | FT_EPOCH_KEY => {
+            if header.frame_type == FT_SHRED_REQUEST {
+                room.note_shred_request();
+            }
             gjallarhorn::relay(room, &frame_bytes, sender).await;
             Ok(())
         }
