@@ -23,17 +23,38 @@ use axum::http::HeaderMap;
 /// request. Enabling it is an explicit statement that a trusted proxy is
 /// terminating connections.
 ///
+/// An IPv6 client is keyed by its /64. That is the block one household, phone
+/// or server is normally handed, so keying on the full address gave anyone
+/// with IPv6 2^64 fresh buckets for every limit here — room creation, guesses
+/// at a key, and connections alike.
+///
 /// The returned value is a limiter key held in memory only. It is never
 /// logged and never persisted (spec §6.3).
 pub fn rate_limit_key(trusted_proxy: bool, headers: &HeaderMap, peer: SocketAddr) -> String {
     if trusted_proxy {
         if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             if let Some(last) = forwarded.rsplit(',').map(str::trim).find(|s| !s.is_empty()) {
-                return last.to_string();
+                return match last.parse::<std::net::IpAddr>() {
+                    Ok(ip) => key_for(ip),
+                    Err(_) => last.to_string(),
+                };
             }
         }
     }
-    peer.ip().to_string()
+    key_for(peer.ip())
+}
+
+fn key_for(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -88,6 +109,24 @@ mod tests {
 
     #[test]
     fn ipv6_and_whitespace_survive() {
-        assert_eq!(rate_limit_key(true, &headers_with("  2001:db8::1  "), peer()), "2001:db8::1");
+        assert_eq!(rate_limit_key(true, &headers_with("  2001:db8::1  "), peer()), "2001:db8:0:0::/64");
+    }
+
+    #[test]
+    fn one_ipv6_block_is_one_client_however_many_addresses_it_uses() {
+        let a = rate_limit_key(true, &headers_with("2001:db8:1:2:aaaa::1"), peer());
+        let b = rate_limit_key(true, &headers_with("2001:db8:1:2:ffff:ffff:ffff:ffff"), peer());
+        let other = rate_limit_key(true, &headers_with("2001:db8:1:3::1"), peer());
+        assert_eq!(a, b);
+        assert_ne!(a, other);
+        let direct: SocketAddr = "[2001:db8:1:2::9]:443".parse().unwrap();
+        assert_eq!(rate_limit_key(false, &HeaderMap::new(), direct), a);
+    }
+
+    #[test]
+    fn an_ipv4_client_seen_over_ipv6_is_still_itself() {
+        let mapped: SocketAddr = "[::ffff:198.51.100.7]:443".parse().unwrap();
+        assert_eq!(rate_limit_key(false, &HeaderMap::new(), mapped), "198.51.100.7");
+        assert_eq!(rate_limit_key(true, &headers_with("::ffff:198.51.100.7"), peer()), "198.51.100.7");
     }
 }

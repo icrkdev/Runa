@@ -285,6 +285,10 @@ export class RunaSocket {
   private heartbeat = false;
   private pingSentAt: number | null = null;
   private lastPingAt = 0;
+  /// The ticket the last process handed over as it stopped, until a join
+  /// succeeds. Kept past that, a room shredded after coming back could be
+  /// brought back again by a second restart inside the ticket's lifetime.
+  private restartTicket: { ticket: string; at: number } | null = null;
 
   constructor(private opts: SocketOptions) {
     this.maxBackoffMs = opts.maxBackoffMs ?? 15_000;
@@ -392,6 +396,16 @@ export class RunaSocket {
     this.reassembly.clear();
     this.reassemblyBytes = 0;
     this.stopLiveness();
+  }
+
+  /// The restart ticket held since the last process stopped, if no join has
+  /// succeeded since.
+  heldRestartTicket(): { ticket: string; at: number } | null {
+    return this.restartTicket;
+  }
+
+  dropRestartTicket(): void {
+    this.restartTicket = null;
   }
 
   /// Start again after the room was brought back on a new process: the join
@@ -534,6 +548,7 @@ export class RunaSocket {
         return;
       }
       this.joined = true;
+      this.restartTicket = null;
       this.epoch = ack.epoch ?? 0;
       // The AEAD sender component must be the server-assigned 16-byte peer id
       // (what receivers read from the envelope), not our public key. Re-label
@@ -578,6 +593,7 @@ export class RunaSocket {
       try {
         const { ticket } = JSON.parse(textDecoder.decode(parsed.body)) as { ticket: unknown };
         if (typeof ticket === "string" && ticket.length > 0 && ticket.length <= 64 * 1024) {
+          this.restartTicket = { ticket, at: Date.now() };
           this.events.onRestartTicket?.(ticket);
         }
       } catch {

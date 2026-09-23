@@ -498,6 +498,22 @@ describe("a restart that hands the room over", () => {
     expect(await readAsPeer(docFrames(back)[0], key)).toEqual(typed);
   });
 
+  it("forgets the ticket once a join succeeds, so it cannot bring the room back a second time", async () => {
+    const { socket } = await makeSocket();
+    const first = latest();
+    first.open();
+    first.deliver(joinAck());
+    first.deliver(buildJsonFrame(FT.RESTART_TICKET, ROOM, 0, { ticket: "abc.def" }));
+    first.close(1012);
+    expect(socket.heldRestartTicket()?.ticket).toBe("abc.def");
+
+    await waitFor(() => FakeWebSocket.all.length === 2);
+    const back = latest();
+    back.open();
+    back.deliver(joinAck());
+    await waitFor(() => socket.heldRestartTicket() === null);
+  });
+
   it("can replace the whole backlog with one update, for a room whose log is new", async () => {
     const { socket, key } = await makeSocket();
     const ws = latest();

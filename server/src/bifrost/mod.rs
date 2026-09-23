@@ -382,6 +382,12 @@ async fn run_connection(
         return Err(WireCode::AuthFailed);
     }
     room.auth_success(&ip);
+    // Only guesses count against an address. Charging successful joins too
+    // meant that the 31st connection in a minute from one office, school or
+    // carrier address — people reconnecting after a network blip, or after a
+    // restart — was refused with 4001, which is indistinguishable from "this
+    // room does not exist" by design, and so was shown "this room is gone".
+    state.auth_per_ip.refund(&ip, 1);
 
     let session_pubkey: Option<Vec<u8>> = join
         .pubkey

@@ -268,7 +268,9 @@ function JoinableRoom(props: RoomProps) {
             announce(
               reason === "roster-mismatch"
                 ? "Ignored a shred request: this room's occupant list disagrees with the sender's."
-                : `Ignored a shred request (${reason}).`,
+                : reason === "cancel-not-from-initiator"
+                  ? "Ignored an attempt to cancel the shred vote by someone who did not start it."
+                  : `Ignored a shred request (${reason}).`,
             );
           },
           onHistoryPressure: (m) => setHistoryPressure(m),

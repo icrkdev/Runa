@@ -51,6 +51,19 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
         }
     }
 
+    /// Give back `n` tokens a call took, for an attempt that turned out not to
+    /// be what the limit is counting. Never beyond capacity, and a no-op for a
+    /// key that is not tracked.
+    ///
+    /// Unlike `reset`, this cannot hand a caller more than it spent, so it is
+    /// safe after any success: a caller alternating good and bad attempts is
+    /// still held to the bad ones.
+    pub fn refund(&self, key: &K, n: u32) {
+        if let Some(b) = self.buckets.lock().unwrap().get_mut(key) {
+            b.tokens = (b.tokens + n as f64).min(self.capacity);
+        }
+    }
+
     /// Forget a key, so its next call starts from a full bucket.
     ///
     /// Only for the case where the caller has proved it is not the abuser the
@@ -118,6 +131,22 @@ mod tests {
         assert!(rl.check(&1));
         assert!(!rl.check(&1));
         assert!(rl.check(&2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refund_returns_what_was_spent_and_never_more() {
+        let rl: RateLimiter<u64> = RateLimiter::new(2, Duration::from_secs(60), 10_000);
+        assert!(rl.check(&1));
+        rl.refund(&1, 1);
+        assert!(rl.check(&1));
+        assert!(rl.check(&1));
+        assert!(!rl.check(&1), "two tokens, however many refunds came before");
+        rl.refund(&1, 5);
+        assert!(rl.check(&1));
+        assert!(rl.check(&1));
+        assert!(!rl.check(&1), "a refund is capped at capacity");
+        rl.refund(&9, 1);
+        assert!(rl.check(&9), "refunding an unknown key creates nothing odd");
     }
 
     #[test]

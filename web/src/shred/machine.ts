@@ -82,6 +82,29 @@ async function verifyObject(
   return verifyPayload(rest.alg as SignatureAlg, pubkeyRaw, signature, canonicalBytes(rest));
 }
 
+/// Whether a SHRED_CANCEL may end the request this client is voting on: only
+/// the request it names, and only from the peer who made it.
+///
+/// Any cancel used to reset the vote, whoever sent it and whichever request it
+/// named. Under MAJORITY or THRESHOLD that let a member who was being outvoted
+/// end every request the moment it opened — the veto those policies exist not
+/// to give anyone. Rejecting is how a member says no.
+///
+/// The sender is the peer id the relay attached, which the frame's AEAD binds:
+/// a member cannot claim someone else's without the relay's help.
+export function cancelApplies(
+  current: Pick<ShredRequest, "requestId" | "initiatorPeerIdB64"> | null,
+  cancel: { requestId?: unknown },
+  senderPeerIdB64: string,
+): boolean {
+  return (
+    !!current &&
+    typeof cancel.requestId === "string" &&
+    cancel.requestId === current.requestId &&
+    senderPeerIdB64 === current.initiatorPeerIdB64
+  );
+}
+
 export function randomRequestId(): string {
   const b = new Uint8Array(16);
   crypto.getRandomValues(b);

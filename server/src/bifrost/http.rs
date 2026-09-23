@@ -477,10 +477,13 @@ pub async fn restore_room(
         state.cfg.max_peers_per_room,
     ) {
         Ok(RestoreOutcome::Restored(_)) => {
+            // A valid ticket is not a guess; see the refund after a join.
+            state.auth_per_ip.refund(&ip, 1);
             tracing::info!("room restored from a restart ticket");
             json_response(StatusCode::CREATED, serde_json::json!({ "ok": true, "restored": true }))
         }
         Ok(RestoreOutcome::AlreadyLive) => {
+            state.auth_per_ip.refund(&ip, 1);
             json_response(StatusCode::OK, serde_json::json!({ "ok": true, "restored": false }))
         }
         Err(RestoreError::Retired) => code_response(StatusCode::GONE, "GONE"),

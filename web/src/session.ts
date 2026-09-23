@@ -8,6 +8,7 @@ import { AwarenessHub, handleFromPubkey } from "./doc/awareness";
 import { generateIdentity, type Identity } from "./crypto/identity";
 import {
   ShredMachine,
+  cancelApplies,
   type Policy,
   type ShredRequest,
 } from "./shred/machine";
@@ -266,7 +267,6 @@ export class Session {
   private indexed = false;
   /// The index the last snapshot this client saw or made covers.
   private lastCovered = 0;
-  private restartTicket: { ticket: string; at: number } | null = null;
   private carryingOver = false;
 
   private constructor(
@@ -349,7 +349,6 @@ export class Session {
         onJoinAck: (ack) => sessionRef?.handleJoinAck(ack),
         onUpdatesStored: (count) => sessionRef?.noteUpdatesStored(count),
         onRestartNotice: (inSecs, handover) => events.onServerRestart(inSecs, handover),
-        onRestartTicket: (ticket) => sessionRef?.holdTicket(ticket),
         onEntriesTaken: (indexes) => {
           for (const i of indexes) sessionRef?.doc.cursor.note(i);
         },
@@ -461,11 +460,6 @@ export class Session {
     this.doc.storedCount += count;
   }
 
-  /// Keep the ticket the old process handed over as it stopped.
-  holdTicket(ticket: string): void {
-    this.restartTicket = { ticket, at: Date.now() };
-  }
-
   /// A join refused as "no such room" while holding a restart ticket is the
   /// new process not knowing the room yet: present the ticket, then join
   /// again. Returns false when there is no ticket to present, and the refusal
@@ -474,7 +468,7 @@ export class Session {
   /// Nothing queued is discarded while this runs. The first join after it
   /// sees a new log and sends this whole copy anyway.
   carryOver(): boolean {
-    const held = this.restartTicket;
+    const held = this.socket.heldRestartTicket();
     const restore = this.cfg.restoreRoom;
     if (!held || !restore || this.destroyed) return false;
     if (this.carryingOver) return true;
@@ -490,7 +484,7 @@ export class Session {
             result = "retry";
           }
           if (result === "restored") {
-            this.restartTicket = null;
+            this.socket.dropRestartTicket();
             this.socket.resume();
             return;
           }
@@ -498,7 +492,7 @@ export class Session {
           await new Promise((r) => setTimeout(r, wait));
           wait = Math.min(wait * 2, 15_000);
         }
-        this.restartTicket = null;
+        this.socket.dropRestartTicket();
         if (this.destroyed) return;
         this.socket.stopReconnecting();
         this.events.onRoomUnavailable(4001);
@@ -923,10 +917,13 @@ export class Session {
       return;
     }
     if (frameType === FT.SHRED_CANCEL) {
+      if (!cancelApplies(this.machine.currentRequest(), decoded, toB64(sender))) {
+        this.events.onShredRejected("cancel-not-from-initiator");
+        return;
+      }
       this.machine.reset();
       this.events.onShredState("IDLE");
     }
-    void sender;
   }
 
   async attachEditor(
