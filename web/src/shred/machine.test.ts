@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 import { generateIdentity, type Identity } from "../crypto/identity";
 import { rosterHash, type RosterEntry } from "./roster";
-import { ShredMachine, supermajorityFor, type MachineHooks, type ShredVote } from "./machine";
+import {
+  cancelApplies, ShredMachine, supermajorityFor, type MachineHooks, type ShredVote } from "./machine";
 
 function toB64(bytes: Uint8Array): string {
   let s = "";
@@ -506,5 +507,23 @@ describe("machine hardening", () => {
       expect(responder.state).toBe("IDLE");
     }
     expect(h.hooks.guardRejects).toContain("malformed-request");
+  });
+});
+
+describe("cancelling a shred request", () => {
+  const current = { requestId: "req-1", initiatorPeerIdB64: "alice" };
+
+  it("is honoured from the peer who made it, for that request", () => {
+    expect(cancelApplies(current, { requestId: "req-1" }, "alice")).toBe(true);
+  });
+
+  it("is ignored from anyone else, so an outvoted member cannot end a MAJORITY vote", () => {
+    expect(cancelApplies(current, { requestId: "req-1" }, "mallory")).toBe(false);
+  });
+
+  it("is ignored for another request, or with no request open", () => {
+    expect(cancelApplies(current, { requestId: "req-0" }, "alice")).toBe(false);
+    expect(cancelApplies(current, {}, "alice")).toBe(false);
+    expect(cancelApplies(null, { requestId: "req-1" }, "alice")).toBe(false);
   });
 });

@@ -40,6 +40,22 @@ section — so this file is not documentation of the release, it is part of it.
   log then grew until edits were refused. The server now tells each client the
   log position of every update, and snapshots cover exactly what the client
   holds.
+- **A live room could be reported as gone.** The server allows 30 join
+  attempts a minute from one address, to slow anyone guessing at a room's
+  key — and it counted successful joins too. So the 31st connection in a minute
+  from one office, school or mobile-carrier address, as happens when a whole
+  team reconnects after a network blip or a restart, was refused with the same
+  answer as a room that does not exist, and the page said the room was gone.
+  Only failed attempts count now.
+- **A member being outvoted could block a shred.** A cancel was accepted from
+  anyone, for any request, so under Majority or Threshold one person could end
+  every vote the moment it opened. Only the person who made a request can
+  cancel it now; everyone else still rejects it by voting.
+- **A restart ticket outlived the rejoin it was for.** It is dropped once the
+  room is back, so a room shredded after a restart cannot be brought back by a
+  second restart inside the ticket's ten minutes.
+- **IPv6 visitors are limited by their /64**, the block one household or server
+  is normally given, instead of by each of its 2^64 addresses.
 - **Joining a room with text in it showed an empty preview** until somebody
   typed. The text arrived while the editor was being attached, before the
   preview was listening for it.

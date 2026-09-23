@@ -932,3 +932,40 @@ async fn a_restart_warns_open_rooms_and_new_joins_and_stops_creating_rooms() {
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["code"], "RESTARTING");
 }
+
+/// The per-address join limit exists to slow guessing. It used to charge every
+/// join, so the 31st connection in a minute from one shared address — an
+/// office reconnecting after a blip — was refused with 4001, which the page
+/// has to read as "this room is gone". Only failures may count.
+#[tokio::test]
+async fn successful_joins_do_not_use_up_the_per_address_guess_limit() {
+    let cfg = runa_server::config::Config { auth_attempts_per_ip_per_min: 3, ..test_config() };
+    let server = spawn_server_with(cfg).await;
+    let keys = create_room(&server).await;
+    for pk in 1u8..=6 {
+        let mut ws = connect(&server, &keys.room_id_hex).await;
+        ws.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[pk; 32]))
+            .await
+            .unwrap();
+        let (ft, body) = recv_json(&mut ws).await;
+        assert_eq!(ft, 0x02, "join {pk} of 6 with the right key was refused: {body}");
+        ws.close(None).await.ok();
+    }
+
+    // Guessing is still limited: three wrong keys use the budget up, and
+    // after that even the right key waits.
+    for pk in 10u8..13 {
+        let mut ws = connect(&server, &keys.room_id_hex).await;
+        ws.send(join_frame(&keys.room_id_hex, Some(&rand_bytes_32()), &[pk; 32]))
+            .await
+            .unwrap();
+        let (_, body) = recv_json(&mut ws).await;
+        assert_eq!(body["code"], 4001);
+    }
+    let mut ws = connect(&server, &keys.room_id_hex).await;
+    ws.send(join_frame(&keys.room_id_hex, Some(&keys.auth_key), &[20u8; 32]))
+        .await
+        .unwrap();
+    let (_, body) = recv_json(&mut ws).await;
+    assert_eq!(body["code"], 4001, "three failed guesses must still exhaust the budget");
+}
