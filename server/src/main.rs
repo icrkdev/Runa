@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use runa_server::config::Config;
+use axum::serve::ListenerExt;
+use runa_server::bifrost::onion;
 use runa_server::{build_router, memguard, AppState};
 
 #[tokio::main]
@@ -55,6 +57,32 @@ async fn main() -> Result<()> {
     tokio::spawn(state.clone().run_forgetting());
 
     let app = build_router(state.clone());
+
+    if let Some(bind) = cfg.onion_bind.clone() {
+        let onion_addr: SocketAddr = bind.parse()?;
+        anyhow::ensure!(
+            onion_addr.ip().is_loopback(),
+            "RUNA_ONION_BIND must be a loopback address: only the local Tor daemon may connect"
+        );
+        let listener = tokio::net::TcpListener::bind(onion_addr).await?;
+        let onion_app = onion::router(app.clone());
+        tokio::spawn(async move {
+            let listener = onion::TorListener::new(listener).tap_io(|_| {});
+            if let Err(e) = axum::serve(
+                listener,
+                onion_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
+                tracing::error!(error = %e, "onion listener stopped");
+            }
+        });
+        tracing::info!(%onion_addr, "onion listener ready: one client per Tor circuit");
+    }
+    let app = match cfg.onion_url.clone() {
+        Some(url) => onion::advertise(app, url),
+        None => app,
+    };
 
     if !std::path::Path::new(&cfg.dist_dir).join("index.html").is_file() {
         tracing::warn!(

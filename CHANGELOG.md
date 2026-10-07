@@ -60,6 +60,18 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Added
 
+- **RÚNA as a Tor onion service.** `RUNA_ONION=1 ./scripts/deploy-oracle.sh`
+  sets up tor on the box and gives RÚNA an onion address, so someone who
+  opens it through Tor never gives the server an IP address, and their
+  network sees only that they use Tor. The onion listener treats each Tor
+  circuit as its own client and believes no forwarded-for header, so one
+  visitor can neither forge a fresh allowance nor spend everyone else's; tor's
+  proof-of-work defence makes circuits costly to open in bulk. Clearnet pages
+  send `Onion-Location`, so Tor Browser offers the onion address by itself.
+  The client allows plain `ws://` on a `.onion` page, where Tor already
+  encrypts and authenticates the whole path. Caddy and other sites on the box
+  are untouched.
+
 - **A security level for each private room.** Whoever creates it chooses
   *Everyday*, where a refresh keeps you in the room, or *Highest security*,
   where the key is never stored on anyone's device, not even for the open

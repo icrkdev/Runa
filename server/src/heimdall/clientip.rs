@@ -80,11 +80,23 @@ fn pseudonym(identity: &str) -> String {
     hex::encode(&mac.finalize().into_bytes()[..16])
 }
 
+/// `fc00:dead:beef:4dad::/64`, where Tor's `HiddenServiceExportCircuitID`
+/// puts the circuit id.
+fn is_tor_circuit(v6: &std::net::Ipv6Addr) -> bool {
+    v6.segments()[..4] == [0xfc00, 0xdead, 0xbeef, 0x4dad]
+}
+
 fn key_for(ip: std::net::IpAddr) -> String {
     match ip {
         std::net::IpAddr::V4(v4) => v4.to_string(),
         std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => v4.to_string(),
+            // A Tor circuit, as the onion listener reports it. Every circuit
+            // shares this /64, so keying it like any other IPv6 client would
+            // put all onion visitors back into one bucket. Nothing outside
+            // the onion listener can present it: it is a unique-local range,
+            // never routed, and the clearnet proxy writes the real address.
+            None if is_tor_circuit(&v6) => v6.to_string(),
             None => {
                 let s = v6.segments();
                 format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
@@ -193,5 +205,19 @@ mod tests {
     fn an_unparseable_forwarded_value_is_not_kept_verbatim_either() {
         let key = rate_limit_key(true, &headers_with("not-an-ip.example"), peer());
         assert!(!key.contains("example"));
+    }
+
+    #[test]
+    fn each_tor_circuit_is_its_own_client() {
+        let a: SocketAddr = "[fc00:dead:beef:4dad::1a2b]:65535".parse().unwrap();
+        let b: SocketAddr = "[fc00:dead:beef:4dad::1a2c]:65535".parse().unwrap();
+        assert_eq!(client_identity(false, &HeaderMap::new(), a), "fc00:dead:beef:4dad::1a2b");
+        assert_ne!(
+            rate_limit_key(false, &HeaderMap::new(), a),
+            rate_limit_key(false, &HeaderMap::new(), b),
+            "one onion visitor must not be able to spend another's limits"
+        );
+        let ordinary: SocketAddr = "[2001:db8:1:2::9]:443".parse().unwrap();
+        assert_eq!(client_identity(false, &HeaderMap::new(), ordinary), "2001:db8:1:2::/64");
     }
 }

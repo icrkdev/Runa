@@ -19,6 +19,12 @@ pub struct Config {
     /// Trust `X-Forwarded-For` for per-IP rate limiting. Off unless a reverse
     /// proxy terminates connections, because otherwise the header is forgeable.
     pub trusted_proxy: bool,
+    /// A second, loopback-only listener for a Tor onion service (see
+    /// `bifrost::onion`). Unset, there is none.
+    pub onion_bind: Option<String>,
+    /// This server's onion address, `http://<56 base32>.onion`. Advertised to
+    /// Tor Browser on clearnet pages with `Onion-Location`.
+    pub onion_url: Option<String>,
     pub max_frame_bytes: usize,
     pub max_log_bytes: u64,
     pub max_peers_per_room: usize,
@@ -75,6 +81,8 @@ impl Default for Config {
             dist_dir: "dist".into(),
             allow_insecure_ws: false,
             trusted_proxy: false,
+            onion_bind: None,
+            onion_url: None,
             // Sized for SNAPSHOT, not for keystrokes. A snapshot carries the
             // whole document state and has to fit in one frame or the log can
             // never be compacted — at 256 KiB that ceiling was around 4,000
@@ -119,6 +127,8 @@ impl Config {
         c.dist_dir = std::env::var("RUNA_DIST").unwrap_or(c.dist_dir);
         c.allow_insecure_ws = std::env::var("RUNA_ALLOW_INSECURE").is_ok_and(|v| v == "1");
         c.trusted_proxy = std::env::var("RUNA_TRUSTED_PROXY").is_ok_and(|v| v == "1");
+        c.onion_bind = std::env::var("RUNA_ONION_BIND").ok().filter(|v| !v.is_empty());
+        c.onion_url = std::env::var("RUNA_ONION_URL").ok().and_then(|v| onion_url(&v));
         c.max_frame_bytes = env("RUNA_MAX_FRAME", c.max_frame_bytes);
         c.max_log_bytes = env("RUNA_MAX_LOG", c.max_log_bytes);
         c.max_peers_per_room = env("RUNA_MAX_PEERS", c.max_peers_per_room);
@@ -174,5 +184,34 @@ impl Config {
         // A queue smaller than one frame could never accept anything.
         c.max_queued_bytes_per_conn = c.max_queued_bytes_per_conn.max(c.max_frame_bytes * 2);
         c
+    }
+}
+
+/// An onion address as `Onion-Location` needs it: scheme, a v3 address (56
+/// base32 characters), and nothing else. Anything looser is refused rather
+/// than advertised, since the header tells Tor Browser where to send people.
+fn onion_url(v: &str) -> Option<String> {
+    let v = v.trim().trim_end_matches('/');
+    let host = v.strip_prefix("http://").or_else(|| v.strip_prefix("https://"))?;
+    let label = host.strip_suffix(".onion")?;
+    let ok = label.len() == 56 && label.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'));
+    if !ok {
+        tracing::warn!("RUNA_ONION_URL is not a v3 onion address; not advertising it");
+        return None;
+    }
+    Some(v.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_v3_onion_address_is_advertised() {
+        let good = format!("http://{}.onion", "a".repeat(52) + "2345");
+        assert_eq!(super::onion_url(&good), Some(good.clone()));
+        assert_eq!(super::onion_url(&format!("{good}/")), Some(good.clone()));
+        assert_eq!(super::onion_url("http://example.com"), None);
+        assert_eq!(super::onion_url(&format!("http://{}.onion", "a".repeat(16))), None, "v2 is gone");
+        assert_eq!(super::onion_url(&format!("http://{}.onion/x", "a".repeat(56))), None);
+        assert_eq!(super::onion_url(&format!("ftp://{}.onion", "a".repeat(56))), None);
     }
 }

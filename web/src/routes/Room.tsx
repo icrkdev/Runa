@@ -32,6 +32,7 @@ import { exportMarkdown } from "../export/markdown";
 import { TOOLBAR_ACTIONS, applyTool } from "../ui/toolbar";
 import { useLineSync } from "../ui/linesync";
 import { applySecurityLevel, shareLink } from "../keyhandoff";
+import { plainWebSocketAllowed } from "../transport/origin";
 
 const api = new Api("");
 
@@ -218,7 +219,7 @@ function JoinableRoom(props: RoomProps) {
           roomIdHex: args.roomIdHex,
           authKey,
           contentKey,
-          insecureAllowed: isLoopbackOrigin() && window.location.protocol === "http:",
+          insecureAllowed: plainWebSocketAllowed(window.location),
           restoreRoom: (ticket) => api.restoreRoom(ticket),
         },
         {
@@ -1172,14 +1173,9 @@ function b64ToBytes(s: string): Uint8Array {
   return out;
 }
 
-function isLoopbackOrigin(): boolean {
-  const h = window.location.hostname;
-  return h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h.endsWith(".localhost");
-}
-
 function websocketUrl(roomIdHex: string): { url: string; insecure: boolean } {
   const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
-  if (proto === "ws://" && !isLoopbackOrigin()) {
+  if (proto === "ws://" && !plainWebSocketAllowed(window.location)) {
     throw new Error("INSECURE_ORIGIN");
   }
   return { url: `${proto}${window.location.host}/socket/${roomIdHex}`, insecure: proto === "ws://" };
