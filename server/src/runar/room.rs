@@ -1123,6 +1123,16 @@ pub fn unix_now() -> u64 {
         .as_secs()
 }
 
+/// A KDF salt for tests, drawn at random like a real one. Tests used fixed
+/// literals, which no test ever asserted on, and which read to a scanner as
+/// exactly what they would be in production code: a hard-coded salt.
+#[cfg(test)]
+pub(crate) fn test_salt() -> [u8; 16] {
+    let mut s = [0u8; 16];
+    getrandom::fill(&mut s).expect("system RNG unavailable");
+    s
+}
+
 #[cfg(test)]
 mod auth_throttle_tests {
     use super::*;
@@ -1190,7 +1200,7 @@ mod auth_throttle_tests {
             65536,
             3,
             1,
-            [7u8; 16],
+            crate::runar::room::test_salt(),
             None,
             32 * 1024 * 1024,
             5,
@@ -1232,7 +1242,7 @@ mod tests {
             65536,
             3,
             1,
-            [7u8; 16],
+            crate::runar::room::test_salt(),
             None,
             32 * 1024 * 1024,
             5,
@@ -1280,7 +1290,7 @@ mod purge_ack_tests {
             65536,
             3,
             1,
-            [5u8; 16],
+            crate::runar::room::test_salt(),
             None,
             32 * 1024 * 1024,
             5,
@@ -1468,7 +1478,7 @@ mod scheduler_tests {
                 65536,
                 3,
                 1,
-                [2u8; 16],
+                crate::runar::room::test_salt(),
                 None,
                 1024 * 1024,
                 5,

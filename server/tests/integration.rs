@@ -367,8 +367,15 @@ async fn named_room_without_passphrase_is_refused_at_api() {
 async fn named_room_lifecycle_with_passphrase() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
-    let passphrase = b"harbor thistle quartz nine";
-    let auth_key: [u8; 32] = Sha256::digest(passphrase).into();
+    // The server never sees a passphrase: the browser stretches it with
+    // Argon2id and sends only the verifier of the resulting auth key. A random
+    // key is what reaches the server. Hashing a passphrase with one SHA-256
+    // here modelled nothing real, and read as weak password hashing.
+    let auth_key: [u8; 32] = {
+        let mut k = [0u8; 32];
+        getrandom::fill(&mut k).unwrap();
+        k
+    };
     let salt: [u8; 16] = {
         let mut s = [0u8; 16];
         getrandom::fill(&mut s).unwrap();

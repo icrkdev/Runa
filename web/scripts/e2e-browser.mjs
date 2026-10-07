@@ -1402,7 +1402,13 @@ async function main() {
   if (!gone.headers.get("clear-site-data")) throw new Error("gone.html missing Clear-Site-Data");
   // Comments stripped first: the file explains the old placeholder in a
   // comment, and a check that trips on its own documentation is a bad check.
-  const goneBody = (await gone.text()).replace(/<!--[\s\S]*?-->/g, "");
+  // Repeated until nothing changes, so a comment that a single pass would
+  // reassemble out of the pieces around it ("<!<!---->--") is gone too.
+  let goneBody = await gone.text();
+  for (let prev = ""; prev !== goneBody; ) {
+    prev = goneBody;
+    goneBody = goneBody.replace(/<!--[\s\S]*?-->/g, "");
+  }
   // It used to read "ROOM —— · SHREDDED —— UTC", with the dashes standing in
   // for values no script ever supplied — the element was referenced nowhere —
   // so every reader saw the placeholders themselves.
