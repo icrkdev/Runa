@@ -175,7 +175,7 @@ mod tests {
             65536,
             3,
             1,
-            [5u8; 16],
+            crate::runar::room::test_salt(),
             Some(bytes::Bytes::from_static(b"blob")),
             1 << 20,
             5,

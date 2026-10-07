@@ -18,6 +18,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# The repository's default token is already read-only; saying so here keeps
+# it that way if the default ever changes. No job in this file writes to the
+# repository, and cargo-audit reports through its own exit status.
+permissions:
+  contents: read
+
 # A new push to a pull request makes the run already in progress worthless, so
 # stop paying for it. Runs on main and on the schedule are never cancelled.
 concurrency:
