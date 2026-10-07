@@ -872,8 +872,12 @@ people. Read this before relying on it.
 **What it does for you**
 
 - The server never holds a key. It relays ciphertext, keeps it only in RAM,
-  writes nothing to disk, and logs no IP addresses. Seizing the server yields
-  nothing readable.
+  and writes nothing to disk. Seizing the server yields no document.
+- It logs no IP addresses, and does not keep them in readable form even in
+  memory: rate limits work on a keyed pseudonym, forgotten about an hour
+  after you leave at most. Someone who captures the running server could
+  still test whether a particular address used it recently — which is why
+  Tor, below, matters.
 - No accounts, no email, no phone number, no analytics, no cookies.
 - Shred destroys the shared copy for everyone, on everyone's agreement.
 

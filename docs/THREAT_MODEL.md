@@ -134,7 +134,7 @@ visit that somewhere is the relay.
 
 | Leak | Why | Mitigation |
 |---|---|---|
-| Your IP address | It is a TCP connection | No IP logging, `X-Forwarded-For` stripped, Tor works fine |
+| Your IP address | It is a TCP connection | Never logged. Rate limits hold only a keyed pseudonym (HMAC under a key drawn at startup and never written), dropped about one limiter window after you go quiet; a restart makes every earlier pseudonym unlinkable. Whoever captures the live process holds the key too and can test a suspected address, so this bounds exposure in time rather than removing it. Over Tor the server never learns an address at all |
 | That a room exists and when | Routing | Unlisted room IDs are 128-bit and unguessable; identical responses for "wrong password" and "no such room". Named rooms give this up by construction. |
 | Number of connected peers | Relay fan-out | Not hideable in a client-server relay |
 | Approximate document size | Ciphertext length | Padding to 256-byte buckets |

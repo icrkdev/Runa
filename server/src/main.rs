@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
         cfg.drain_grace,
         cfg.default_idle_ceiling,
     ));
+    tokio::spawn(state.clone().run_forgetting());
 
     let app = build_router(state.clone());
 

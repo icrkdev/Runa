@@ -8,6 +8,18 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Security
 
+- **The server remembered every visitor's address until it restarted.**
+  Nothing was logged or written to disk, but the rate-limit tables held each
+  client's IP address in plain text and dropped entries only once a table
+  reached 100,000 — which a server this size never does. So its memory held a
+  list of everyone who had used it since boot. The tables now hold a keyed
+  pseudonym instead (HMAC under a key drawn at startup and never written), and
+  every minute they drop each entry that no longer limits anything, so a visit
+  is remembered for about one limiter window — at most an hour — after it
+  ends. Whoever captures the running process still holds the key and could
+  test a suspected address; that is the floor for any server that rate-limits,
+  and the reason to reach RÚNA over Tor if it matters.
+
 - **Passphrase rooms never actually used Argon2id.** The Content Security
   Policy allowed `script-src 'self'`, which also forbids compiling
   WebAssembly, and Argon2id runs as WebAssembly. Every browser refused it, the

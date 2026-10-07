@@ -66,7 +66,41 @@ impl AppState {
     }
 }
 
+/// How often per-client limiter state that no longer limits anything is
+/// dropped. Short beside every window it serves (a minute to an hour), so a
+/// visit is remembered for at most about one window after it ends.
+pub const FORGET_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl AppState {
+    /// Drop every per-client entry that no longer affects a decision: full
+    /// buckets, expired blocks, refilled per-room join budgets. Before this,
+    /// nothing was removed until a table reached its cap, which a quiet server
+    /// never does — so it held a pseudonym for everyone since boot.
+    pub fn forget_idle_clients(&self) {
+        for limiter in [
+            &self.auth_per_ip,
+            &self.rooms_created,
+            &self.named_created,
+            &self.name_lookup_ip,
+            &self.name_lookup_global,
+        ] {
+            limiter.sweep();
+        }
+        self.conn_guard.sweep();
+        self.rooms.forget_idle_callers();
+    }
+
+    /// Runs `forget_idle_clients` every `FORGET_INTERVAL`, for the life of
+    /// the process.
+    pub async fn run_forgetting(self) {
+        let mut tick = tokio::time::interval(FORGET_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            self.forget_idle_clients();
+        }
+    }
+
     /// Live websocket connections, process-wide.
     pub fn live_connections(&self) -> usize {
         self.live_conns.load(std::sync::atomic::Ordering::SeqCst)
