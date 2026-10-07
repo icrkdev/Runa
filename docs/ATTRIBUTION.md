@@ -35,17 +35,19 @@ above. We are grateful for it.
 | yjs | MIT | CRDT document model |
 | monaco-editor | MIT | Editor |
 | react / react-dom | MIT | UI |
-| hash-wasm | Apache-2.0 | Argon2id KDF (WASM, self-hosted) |
+| hash-wasm | MIT | Argon2id KDF (WASM, self-hosted) |
 | cbor2 | MIT | Canonical CBOR encoding for signed shred payloads |
 | pagedjs | MIT | Paged.js print preview (lazy-loaded) |
 | hast-util-sanitize | MIT | Sanitiser core used via rehype-sanitize |
 | unified / remark-* / rehype-* | MIT | Markdown pipeline |
 | katex | MIT | Math rendering |
 | highlight.js | BSD-3-Clause | Code highlighting |
-| qrcode | MIT | Key handoff QR |
+| y-protocols | MIT | Awareness (cursors and presence) on top of yjs |
+| Space Grotesk, IBM Plex Mono | OFL-1.1 | Typefaces, bundled rather than fetched from a font host |
 
-Licence inventory enforced by `cargo deny` (server) and `npm audit` (web)
-in CI.
+Licences are enforced by `cargo deny` for the server. For the web client, CI
+runs `npm audit`, which checks for known vulnerabilities rather than licences,
+and fails the build on a high or critical finding in a production dependency.
 
 ## Key dependencies (server)
 

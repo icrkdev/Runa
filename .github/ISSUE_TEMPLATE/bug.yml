@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Rooms live only in RAM and are destroyed on restart, so a bug is often
-        unreproducible an hour later. The more of the state below you can
-        capture *now*, the better.
+        Rooms live only in RAM and end when they expire or are shredded, so a
+        bug is often unreproducible an hour later. The more of the state below
+        you can capture *now*, the better.
 
         **Found a security flaw?** Close this and use
         [private reporting](https://github.com/icrkdev/Runa/security/advisories/new)

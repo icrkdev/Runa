@@ -70,8 +70,7 @@ cosign verify-blob \
 ```
 
 Releases up to and including v0.4.0 published the SBOMs unsigned, so one could
-have been replaced
-on the release page with nothing to show it. The container image on GHCR is
+have been replaced on the release page with nothing to show it. The container image on GHCR is
 signed too, for final releases; pre-release tags do not build an image.
 
 The identity regexp is what actually matters: it proves the artifact was built

@@ -6,6 +6,36 @@ section — so this file is not documentation of the release, it is part of it.
 
 ## Unreleased
 
+### Security
+
+- **Passphrase rooms never actually used Argon2id.** The Content Security
+  Policy allowed `script-src 'self'`, which also forbids compiling
+  WebAssembly, and Argon2id runs as WebAssembly. Every browser refused it, the
+  client fell back to PBKDF2 at 600,000 iterations without saying so, and the
+  room went on telling the server it used Argon2id. The policy now adds
+  `'wasm-unsafe-eval'`, which permits compiling WebAssembly and nothing else;
+  `eval` stays forbidden. The fallback is gone: a browser that cannot run
+  Argon2id is refused with an explanation instead of being quietly given a
+  weaker key. No existing room was affected past the next restart, since
+  rooms live only in memory. A taken room name is now reported as taken
+  before any key is derived.
+- **One caller could lock everyone out of a room.** Join attempts were limited
+  per room, in one window shared by everybody, and every attempt counted, not
+  only failures. Anyone who knew a named room's name could spend it and keep
+  every real join failing — which looks exactly like a wrong passphrase. The
+  limit is now per caller, and a successful join no longer spends two
+  attempts.
+- **A room's key-derivation settings could reveal that it existed.** The
+  metadata endpoint answers identically for real and missing rooms, but echoed
+  a real room's own parameters while a missing one got the defaults. Creation
+  now accepts only the standard parameters, so the two cannot differ. No room
+  made through the interface was affected.
+- **Dependencies with published advisories are upgraded**: vitest 4, vite
+  6.4.4, KaTeX 0.18. Every alert but one was in build and test tooling. The
+  one in shipped code, KaTeX, was not exploitable here — RÚNA sets
+  `trust: false` itself and sanitises KaTeX's output afterwards — and math
+  renders byte-for-byte as before.
+
 ### Added
 
 - **Join a room from the front page.** Paste the link someone sent you, or type
@@ -24,8 +54,33 @@ section — so this file is not documentation of the release, it is part of it.
   died quietly used to show the room as connected, while everyone else's edits
   went nowhere, until the next keystroke. Each answer also carries who is in
   the room, so a list that missed a join or a leave is corrected.
+- **A restart warns every open room first.** On SIGTERM — what
+  `systemctl restart`, `docker stop` and both deploy scripts send — every open
+  room sees a countdown with an Export button, and the server waits it out
+  (`RUNA_SHUTDOWN_GRACE_SECS`, 60 s by default). With nobody connected it stops
+  at once. Room creation during the countdown is refused with a reason.
+- **A refused connection says why.** Past the per-address or server-wide
+  connection limit the socket used to close silently and the page retried
+  forever with nothing on screen. It now closes with `4007` or `4008` and the
+  page says which. The per-address limit was 10, which one office or mobile
+  carrier could reach; it is 64 now, and configurable with
+  `RUNA_MAX_CONNS_PER_IP`.
+- **Signed bills of materials.** The SBOMs published with each release are
+  signed with cosign the same way as the binaries, so a replaced one no longer
+  goes unnoticed. [`SECURITY.md`](docs/SECURITY.md#release-integrity) shows how
+  to verify them.
+- **Fuzz targets for the code that can lose something**: log compaction, the
+  only server path that discards data, and the room-creation body. Both were
+  confirmed able to fail by reintroducing a bug in each.
 
 ### Fixed
+
+- **Edits could be lost four ways**: typing while offline, typing into a
+  connection that had died without the browser noticing, typing just as a
+  reconnect completed, and resending a large history after an outage. An edit
+  now stays queued until the server confirms it has stored it, and is sent
+  again on the next connection. A connection that stops confirming for 10
+  seconds is replaced, and a resend too big for one message is split.
 
 - **A shredded room could stay open.** The server destroys its copy once every
   connected person has agreed — and that included anyone who opened the room
@@ -80,6 +135,13 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Changed
 
+- **Browser tests run in Chromium, Firefox and WebKit** in CI, not Chromium
+  alone. Lost edits above were found this way.
+- **Fuzzing runs on demand** (Actions → fuzz → Run workflow) instead of every
+  Monday. The Monday schedule keeps the supply-chain scan.
+- **The server crate's licence metadata says Apache-2.0.** It said MIT, the
+  upstream Rustpad licence, while `LICENSE` has always been Apache-2.0; SBOMs
+  read this field.
 - Playwright 1.63.
 
 ## 0.4.0

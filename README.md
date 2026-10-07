@@ -104,15 +104,18 @@ is below and takes about five minutes.
 - [Using RÚNA](#using-rúna)
   - [Creating a room](#creating-a-room)
   - [Sharing a room](#sharing-a-room)
+  - [Joining a room](#joining-a-room)
   - [Editing together](#editing-together)
   - [Editor settings you can change](#editor-settings-you-can-change)
   - [Shredding a room](#shredding-a-room)
 - [Running the tests](#running-the-tests)
 - [Deploying to the internet](#deploying-to-the-internet)
-  - [Docker (recommended)](#docker-recommended)
+  - [Docker](#docker)
+  - [Sizing it for the host](#sizing-it-for-the-host)
   - [Behind a reverse proxy](#behind-a-reverse-proxy)
 - [Troubleshooting](#troubleshooting)
 - [Security: what this does and does not protect you from](#security-what-this-does-and-does-not-protect-you-from)
+- [If your safety depends on it](#if-your-safety-depends-on-it)
 - [Project structure](#project-structure)
 - [Licence and attribution](#licence-and-attribution)
 
@@ -168,8 +171,8 @@ You need three things installed on your computer:
 
 | Tool | What it does | Version needed |
 |---|---|---|
-| [Rust](https://rustup.rs) | Compiles the server program | 1.70 or newer |
-| [Node.js](https://nodejs.org) | Runs the build tools for the web interface | 18 or newer |
+| [Rust](https://rustup.rs) | Compiles the server program | Install `rustup`; it fetches the pinned 1.98.0 for you |
+| [Node.js](https://nodejs.org) | Runs the build tools for the web interface | 22 or newer |
 | A web browser | To use the app | Chrome, Firefox, Safari, or Edge |
 
 If you already have these installed, skip ahead to [Getting the code](#getting-the-code).
@@ -244,8 +247,8 @@ node --version
 npm --version
 ```
 
-You should see something like `v20.11.0` and `10.2.0`. As long as both commands
-print a version number, you're good.
+You should see something like `v22.11.0` and `10.9.0`. If `node --version`
+prints anything below `v22`, install the current LTS from the link above.
 
 > **Windows note:** After installing Node.js, you may need to restart your
 > computer before `node` is recognised in Command Prompt.
@@ -377,8 +380,8 @@ Open your web browser and go to:
 http://localhost:5173
 ```
 
-You should see the RÚNA landing page with a dark background and two options:
-**UNLISTED** and **NAMED**.
+You should see the RÚNA landing page with a dark background, a choice between
+**UNLISTED** and **NAMED** rooms, and a **Join a room** box.
 
 🎉 **That's it!** Continue to [Using RÚNA](#using-rúna) below.
 
@@ -398,9 +401,12 @@ You should see the RÚNA landing page with a dark background and two options:
    | Best for most uses | Best when you need to speak the address aloud |
 
 2. Pick an expiry time (how long until the room self-destructs):
-   - **30 min / 1 h / 8 h** after last activity
-   - **24 h** from creation
-   - **No expiry** (dies when everyone leaves, you shred it, or the server restarts)
+   - **30 min / 1 hour / 8 hours** after last activity
+   - **24 hours** from creation
+
+   Whichever you pick, a room also ends the moment you shred it. A server
+   restart no longer has to end it — see
+   [Running the server behind it](#running-the-server-behind-it).
 
 3. Click **Create unlisted room** or fill in a name + passphrase and click
    **Create named room**
@@ -425,11 +431,30 @@ button in the status bar.
 For **named rooms**, share the name and passphrase separately — like telling
 someone "go to copper-lantern and the password is harbor thistle quartz nine."
 
+### Joining a room
+
+Opening the link is enough. If you were sent it in a form your browser will not
+open directly, paste it into **Join a room** on the front page. That box
+accepts:
+
+- a whole link, or one whose `https://` got lost on the way
+- a `/r/…` path, or a bare room id with or without its `#k=…`
+- a shared room's name, its full address, or an old `/n/` address
+- stray spaces and capitals
+
+It tells you what it found before opening anything, and warns you if a private
+link has lost its key — in which case ask for the link again, whole.
+
 ### Editing together
 
 Everyone who opens the same link sees the same document. Changes appear in
 real-time (within about 100 ms on a local network). The status bar at the top
 shows how many people are connected.
+
+Every 15 seconds the page checks that its connection is still alive, so one
+that died quietly is noticed and reconnected rather than showing you as
+connected while your edits go nowhere. The same check corrects the list of
+who is in the room.
 
 ### Editor settings you can change
 
@@ -490,13 +515,17 @@ write it into a history that was just wiped for exactly that reason.
 
 The fastest check is the verification script. It runs the server tests, clippy,
 the Linux cross-compile check, the web suite, type checking, linting, the
-production build, and the supply-chain scans — stopping at the first failure:
+production build, a check that the built page loads nothing from third-party
+origins, an end-to-end smoke test against a real server, and a real-browser
+test — stopping at the first failure:
 
 ```sh
 ./scripts/verify.sh
 ```
 
-It prints `VERIFIED` and nothing else if everything passed.
+It ends with `VERIFIED` if everything passed. Every pull request is expected
+to pass it. The supply-chain scans (`cargo-deny`, `cargo-audit`) run in CI, on
+every pull request and every Monday.
 
 To run the suites separately:
 
@@ -511,9 +540,20 @@ npm ci          # only needed once, or if package.json changed
 npx vitest run
 ```
 
-You should see all tests pass. The server has 47 unit tests and 23 integration
-tests. The web suite has over 130 tests covering cryptography, transport,
-document convergence, rendering security, and shred consensus.
+You should see all tests pass. The server has 70 unit tests and 48 integration
+tests. The web suite has 247 tests covering cryptography, transport, document
+convergence, rendering security, and shred consensus.
+
+There are also four `cargo-fuzz` targets in `server/fuzz/` (frame headers, room
+names, log compaction, and the room-creation body). They are not part of the
+normal run. In CI, start them from **Actions → fuzz → Run workflow**; about
+45 minutes. Locally, with a nightly toolchain:
+
+```sh
+cd server
+cargo install cargo-fuzz
+cargo +nightly fuzz run frame_header -- -max_total_time=300
+```
 
 ---
 
@@ -537,31 +577,47 @@ other people can reach it, you have two options:
 ### Docker
 
 This is the easiest way to deploy. You need [Docker](https://docs.docker.com/get-docker/)
-installed on your server.
+installed on your server. Use the signed image, or build your own from the
+project root with `docker build -t runa .` and put `runa` in place of the image
+name below.
 
 ```sh
-# Build the image (from the project root)
-docker build -t runa .
+# Generate the restart key once, and keep it: a new key cannot read tickets
+# signed under the old one, so changing it ends every open room.
+mkdir -p ~/.runa && chmod 700 ~/.runa
+(umask 077; printf 'RUNA_RESTART_KEY=%s\n' \
+  "$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')" > ~/.runa/restart.env)
 
-# Run it
-docker run \
+docker run -d --name runa \
+  --restart unless-stopped \
+  --stop-timeout 90 \
   --read-only \
   --cap-drop=ALL \
-  --security-opt=no-new-privileges:true \
+  --security-opt=no-new-privileges \
   --memory=512m --memory-swap=512m \
   --pids-limit=256 \
-  -p 3000:3000 \
-  runa
+  --ulimit memlock=-1:-1 \
+  --env-file ~/.runa/restart.env \
+  -e RUNA_TRUSTED_PROXY=1 \
+  -p 127.0.0.1:3000:3000 \
+  ghcr.io/icrkdev/runa:latest
 ```
 
 This runs the server with:
 - No write access to disk (nothing can persist)
 - No Linux capabilities (minimal attack surface)
 - No privilege escalation possible
-- Memory capped at 512 MB (with swap disabled)
+- Memory capped at 512 MB, with swap disabled and the process's memory locked
+  so key material cannot reach swap
 - Process count limited to 256
+- 90 seconds to stop, so the 60-second restart countdown is never cut short —
+  Docker's default of 10 would kill it mid-warning
+- A restart key, so open rooms carry over a `docker restart` or an upgrade
 
-The container serves the built frontend and the API/WebSocket on port 3000.
+It listens on `127.0.0.1:3000` only, for a reverse proxy to put TLS in front of
+it — see [Behind a reverse proxy](#behind-a-reverse-proxy). Without a proxy,
+drop `-e RUNA_TRUSTED_PROXY=1`. `./scripts/deploy-docker.sh` does all of this,
+plus the proxy, in one command.
 
 ### Sizing it for the host
 
@@ -651,8 +707,9 @@ on anything but loopback, so without TLS the editor simply will not connect.
 >
 > Every per-IP rate limit keys on the address RÚNA sees. Behind a proxy that
 > address is the loopback for *every* visitor, so all the limits in `config.rs`
-> collapse into one shared bucket — the eleventh simultaneous visitor is refused
-> a WebSocket because the whole server has "used up" its ten connections. With
+> collapse into one shared bucket — once 64 people are connected, the next is
+> refused a WebSocket because the whole server has "used up" one address's
+> allowance (`RUNA_MAX_CONNS_PER_IP`). With
 > this variable set, RÚNA keys the limits on the last `X-Forwarded-For` entry
 > instead. That value is used in memory as a limiter key and is never logged.
 >
@@ -720,16 +777,8 @@ RUNA_TRUSTED_PROXY=1 RUNA_DIST=web/dist RUNA_BIND=127.0.0.1:3000 \
   cargo run --release -p runa-server
 ```
 
-Or with Docker, publishing the port to loopback only:
-
-```sh
-docker run -d --name runa \
-  --read-only --cap-drop=ALL --security-opt=no-new-privileges:true \
-  --memory=512m --memory-swap=512m --pids-limit=256 \
-  -e RUNA_TRUSTED_PROXY=1 \
-  -p 127.0.0.1:3000:3000 \
-  runa
-```
+Or with Docker: the command under [Docker](#docker) already binds to loopback
+and sets `RUNA_TRUSTED_PROXY=1`.
 
 > Rooms live only in RAM, and the server never writes one to disk. What lets a
 > room outlive a restart is the people in it: they hold the document and the
@@ -766,6 +815,10 @@ docker run -d --name runa \
 | "Your network already has as many connections to this server as one address may" | More than `RUNA_MAX_CONNS_PER_IP` sockets from one address: many people behind one office or carrier address, or `RUNA_TRUSTED_PROXY` missing behind a proxy | Set `RUNA_TRUSTED_PROXY=1` behind a proxy; raise `RUNA_MAX_CONNS_PER_IP` if many people genuinely share an address |
 | Browser shows "Connection refused" | The Rust server isn't running | Check that `cargo run --release -p runa-server` is still active |
 | "This link is missing its key" | The `#k=…&s=…` part was stripped from the URL | Ask whoever shared the room for the full link including everything after the `#` |
+| "This server is at its connection limit. Retrying…" | The server is at `RUNA_MAX_CONNECTIONS` | It retries on its own. On your own server, raise the limit if the host has the memory — see [Sizing it for the host](#sizing-it-for-the-host) |
+| "This server is restarting for an update. Try again in a minute." | You tried to create a room during a restart countdown | Wait a minute. Rooms that were open carry over if the server has `RUNA_RESTART_KEY` set |
+| "This browser could not run Argon2…" | The browser cannot run the WebAssembly that protects a named room's passphrase, or ran out of memory doing it | Use an up-to-date browser and close other tabs. RÚNA refuses rather than falling back to a weaker key |
+| A self-hosted page cannot create or join rooms; the server answers `403` | The request came from a different site than the server's own address — for example a dev page on another port without the Vite proxy | Open the page from the server's own address, or through `npm run dev`, whose proxy keeps the same host |
 | Compilation errors mentioning OpenSSL | Missing system libraries | macOS: `brew install openssl` · Ubuntu: `sudo apt install libssl-dev pkg-config` · Fedora: `sudo dnf install openssl-devel` |
 | `npm ERR!` during install | Corrupt cache or network issue | Try `rm -rf node_modules package-lock.json && npm install`, or check your internet connection |
 
@@ -800,8 +853,66 @@ are the two sentences that matter most:
 |---|---|
 | Someone screenshots the document | RÚNA controls its own page, not other applications |
 | Malware on a participant's computer | Out of scope — use a clean machine |
-| Traffic correlation (who talks to whom, when) | Use Tor if this matters to you |
-| The server serving modified JS | See §2.4 of THREAT_MODEL — this is inherent to browser-delivered apps |
+| Traffic correlation (who talks to whom, when) | Use Tor Browser if this matters to you — see [If your safety depends on it](#if-your-safety-depends-on-it) |
+| Someone with access to your browser history | The full link, key included, is recorded there; use a private window or Tor Browser |
+| The server serving modified JS | See [the honest limit](docs/THREAT_MODEL.md#the-honest-limit-a-malicious-server-can-serve-you-bad-javascript) in THREAT_MODEL — this is inherent to browser-delivered apps |
+
+---
+
+## If your safety depends on it
+
+RÚNA was built so that people can write together without the server, or anyone
+who seizes it, being able to read what they wrote, and so that the document
+can be destroyed when it has done its job. That makes it useful to journalists,
+organisers and sources working where writing the wrong thing is dangerous.
+
+It is also one tool, not a guarantee, and the gaps matter most to exactly those
+people. Read this before relying on it.
+
+**What it does for you**
+
+- The server never holds a key. It relays ciphertext, keeps it only in RAM,
+  writes nothing to disk, and logs no IP addresses. Seizing the server yields
+  nothing readable.
+- No accounts, no email, no phone number, no analytics, no cookies.
+- Shred destroys the shared copy for everyone, on everyone's agreement.
+
+**What it does not hide**
+
+- **That you used it.** Your network provider, and anyone watching it, can see
+  that you connected to the server's address, when, and for how long. A
+  censor can block the address outright.
+- **The link is the key.** Anyone who gets the full link can read the room.
+  That includes anyone who can read the chat where it was sent.
+- **Your browser keeps the link.** While a room is open its key sits in the
+  address bar, and the browser records the full link in its history. With
+  browser sync turned on, that history can leave your device. Shredding
+  replaces the address on the page, but not entries your browser already
+  recorded.
+- **Copies outside RÚNA.** Screenshots, the clipboard, exported PDFs, and
+  anything on a seized or compromised device are beyond its reach.
+- **Whoever runs the server.** A malicious or compelled operator can serve you
+  modified JavaScript. That is true of every browser-based encrypted tool.
+
+**If you are at risk**
+
+1. **Open RÚNA in [Tor Browser](https://www.torproject.org/download/).** That
+   hides that you connected, gets past simple blocking, and keeps no history.
+   RÚNA needs JavaScript, so it will not run at Tor Browser's *Safest*
+   security level. Failing Tor, at least use a private window, which also
+   keeps no history.
+2. **Run your own server**, or use one run by someone you trust. The
+   [Quick start](#quick-start) is one command.
+3. **Send the link only over an end-to-end encrypted channel with
+   disappearing messages**, and never in the same message as anything that
+   identifies the room's purpose.
+4. **Use a named room's passphrase only out loud or in person**, never
+   alongside its name.
+5. **Shred when you are done**, and close the browser.
+
+If you work in a place where this matters and something here is unclear or
+wrong for your situation, say so in a [private report](docs/SECURITY.md) —
+it is treated as a security issue.
 
 ---
 
@@ -828,30 +939,42 @@ Runa/
 │   │   ├── doc/             Yjs CRDT wrapper, Monaco binding, awareness
 │   │   ├── render/          Markdown pipeline with sanitiser-last ordering
 │   │   ├── shred/           Consensus machine, roster hashing, wipe sequence
-│   │   ├── routes/          Landing page and editor room components
+│   │   ├── routes/          Landing page, Join box, editor room
 │   │   ├── ui/              Status bar, quorum dial, shred modal
 │   │   └── export/          PDF export via Paged.js
 │   └── scripts/             E2E smoke tests, SRI injection, origin checker
 ├── docs/                    Public documentation
 │   ├── THREAT_MODEL.md      What RÚNA defends against (and what it doesn't)
-│   ├── SECURITY.md          How to report vulnerabilities
-│   ├── PROTOCOL.md          Wire format specification
+│   ├── SECURITY.md          Reporting vulnerabilities, verifying releases
+│   ├── PROTOCOL.md          Wire format specification and its amendments
+│   ├── DEPLOY.md            Putting it on a VM, and why it is done that way
 │   └── ATTRIBUTION.md       Upstream credits and dependency licences
-├── scripts/verify.sh        One-command check: tests, lint, build, supply chain
-├── .github/workflows/       CI pipeline
+├── deploy/                  systemd unit, env template, Caddy vhost
+├── scripts/
+│   ├── verify.sh            One-command check: tests, lint, build, end to end
+│   ├── deploy-oracle.sh     Deploy to any Ubuntu VM as a hardened systemd unit
+│   ├── deploy-docker.sh     The same, as a container
+│   └── rollback-*.sh        Undo either
+├── .github/workflows/       CI, signed releases, on-demand fuzzing
 ├── Dockerfile               Distroless production image
-└── deny.toml                Bans database crates, enforces licences
+├── deny.toml                Bans database crates, enforces licences
+├── NOTICE                   Copyright, and Rustpad's MIT notice
+└── LICENSE                  Apache-2.0
 ```
 
 ---
 
 ## Licence and attribution
 
-This project is MIT-licensed. It derives from
-[Rustpad](https://github.com/ekzhang/rustpad) by Eric Zhang — specifically,
-Rustpad's operational transform engine was replaced with an encrypted CRDT
-relay. The MIT licence notice for both projects travels in the [`LICENSE`](LICENSE)
-file. See [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) for details on what was
+RÚNA is licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE).
+Copyright 2026 Vardr Labs LLC.
+
+It derives from [Rustpad](https://github.com/ekzhang/rustpad) by Eric Zhang,
+which is MIT-licensed. Rustpad's operational transform engine was replaced with
+an encrypted CRDT relay; Rustpad's MIT notice is reproduced in full in
+[`NOTICE`](NOTICE) and continues to apply to the portions derived from it. If
+you redistribute RÚNA or a fork of it, Apache-2.0 requires you to carry
+`NOTICE` along. See [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md) for what was
 kept, what was removed, and what was added. This project does not imply
 upstream endorsement.
 
