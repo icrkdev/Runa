@@ -118,6 +118,14 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Fixed
 
+- **Integral and sum limits rendered flat.** `$\int_0^\infty$` came out as
+  "∫ 0 ∞": KaTeX writes a sub- and superscript on one base as `<msubsup>`,
+  which the sanitizer did not allow, so it dropped the element and kept its
+  children. `\boxed`, `\cancel` and `\hphantom` were lost the same way. The
+  three elements are allowed now, `\boxed` keeps its `notation` so it is not
+  drawn as a long division, and colour (`\colorbox`) stays out as `\color`
+  always has.
+
 - **"No expiry" said a room dies when everyone leaves, or at a restart.**
   It ends when shredded, or after sitting empty with no edits for 12 hours,
   and a restart hands it over like any other room. The README had briefly

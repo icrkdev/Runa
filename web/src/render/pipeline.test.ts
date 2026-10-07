@@ -1,3 +1,4 @@
+import { sanitize } from "hast-util-sanitize";
 import { describe, expect, it } from "vitest";
 import { renderMarkdown } from "./pipeline";
 import { RUNA_SCHEMA } from "./schema";
@@ -128,6 +129,38 @@ describe("render pipeline is the security boundary (spec §7.4)", () => {
     const { html } = await renderMarkdown("$E = mc^2$");
     expect(html).toContain("<math");
     expect(html).toMatch(/<msup>\s*<mi>c<\/mi>\s*<mn>2<\/mn>\s*<\/msup>/);
+  });
+
+  it("keeps limits on integrals and sums as sub- and superscripts", async () => {
+    const { html } = await renderMarkdown("$\\int_0^\\infty f$ and $\\sum_{i=1}^{n} a_i$");
+    expect(html).toMatch(/<msubsup>\s*<mo>∫<\/mo>\s*<mn>0<\/mn>\s*<mi>∞<\/mi>\s*<\/msubsup>/);
+    expect(html).toMatch(/<msubsup>\s*<mo>∑<\/mo>/);
+  });
+
+  it("keeps \\boxed and \\cancel as what they are, not a long division", async () => {
+    const { html } = await renderMarkdown("$\\boxed{y} + \\cancel{x}$");
+    expect(html).toContain('<menclose notation="box">');
+    expect(html).toContain('<menclose notation="updiagonalstrike">');
+  });
+
+  it("lets spacing through on mpadded, and never a background colour", async () => {
+    const { html } = await renderMarkdown("$\\colorbox{red}{c} \\xrightarrow{f}$");
+    expect(html).toContain("<mpadded");
+    expect(html).not.toMatch(/mathbackground|mathcolor|style=/);
+  });
+
+  it("refuses a menclose notation or mpadded value KaTeX never emits", () => {
+    const tree = {
+      type: "root" as const,
+      children: [
+        { type: "element" as const, tagName: "menclose", properties: { notation: "longdiv; x" }, children: [] },
+        { type: "element" as const, tagName: "mpadded", properties: { width: "url(x)", mathbackground: "red" }, children: [] },
+      ],
+    };
+    const out = JSON.stringify(sanitize(tree, RUNA_SCHEMA));
+    expect(out).not.toContain("longdiv");
+    expect(out).not.toContain("url(");
+    expect(out).not.toContain("red");
   });
 
   it("keeps fractions and radicals structural too", async () => {
