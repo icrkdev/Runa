@@ -55,8 +55,10 @@ function waitForProcessExit(proc) {
 /// a superseding navigation releases it.
 ///
 /// Recovery arms only on that exact signature, and only in Firefox: five
-/// seconds in, the page still answers, is at precisely the requested URL and
-/// reports a complete document. Anything else keeps the original navigation
+/// seconds in, the page still answers, is at the requested URL and reports a
+/// complete document. "The requested URL" ignores the fragment, because the
+/// app takes the key out of the address bar as it starts (keyhandoff.ts): a
+/// room page that loaded correctly is at `/r/<id>`, never `/r/<id>#k=…`. Anything else keeps the original navigation
 /// and its verdict. Every recovery is written to the log, and the room still
 /// has to come up — each caller waits for the editor next.
 ///
@@ -77,7 +79,7 @@ async function gotoRoom(page, label, url) {
   if (early !== "slow") throw new Error(`[${label}] ${String(early.message).split("\n")[0]}`);
 
   const probe = ENGINE_NAME === "firefox" ? await probeDocument(page) : null;
-  if (!probe || probe.href !== url || probe.ready !== "complete") {
+  if (!probe || withoutFragment(probe.href) !== withoutFragment(url) || probe.ready !== "complete") {
     try {
       await nav;
       return;
@@ -86,6 +88,10 @@ async function gotoRoom(page, label, url) {
     }
   }
   await releaseStuckNavigation(page, label, url);
+}
+
+function withoutFragment(href) {
+  return typeof href === "string" ? href.split("#")[0] : href;
 }
 
 async function probeDocument(page) {
@@ -305,10 +311,67 @@ async function main() {
     const shown = await joiner.evaluate(() => document.body.textContent.replace(/\s+/g, " ").slice(0, 200));
     throw new Error(`[join] pasting a room link into Join did not open the room: ${shown}`);
   });
-  if (!(await joiner.evaluate(() => location.hash.startsWith("#k=")))) {
-    throw new Error("[join] the room opened without its key in the address");
+  // The key is handed over in memory: the room opens, and nothing the
+  // browser could write into its history carries the key.
+  if (await joiner.evaluate(() => location.href.includes("#k="))) {
+    throw new Error("[join] the key reached the address bar, and with it the browser's history");
   }
   await joiner.close();
+
+  // A clicked link brings its key in the address; the page takes it out
+  // before anything else runs.
+  {
+    const clicked = await makePage("clicked-link");
+    await gotoRoom(clicked, "clicked-link", roomUrl);
+    await clicked.waitForSelector(".monaco-editor", { timeout: 30_000 });
+    const href = await clicked.evaluate(() => location.href);
+    if (href.includes("#k=")) throw new Error(`[clicked-link] the key stayed in the address: ${href}`);
+    await clicked.close();
+  }
+
+  // Highest security, end to end, as its creator and a recipient meet it.
+  {
+    const maker = await makePage("highest");
+    await maker.addInitScript(() => {
+      window.__copied = [];
+      const write = (t) => { window.__copied.push(t); return Promise.resolve(); };
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: write } });
+    });
+    await maker.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await maker.waitForSelector("#security", { timeout: 10_000 });
+    await maker.selectOption("#security", "highest");
+    await maker.click('button:has-text("Create private room")');
+    await maker.waitForSelector(".statusbar", { timeout: 30_000 });
+    if (await maker.evaluate(() => location.href.includes("#k="))) {
+      throw new Error("[highest] creating a room put its key in the address");
+    }
+    await maker.waitForSelector('text=Highest security: this tab holds the key in memory only', { timeout: 10_000 });
+    if (await maker.evaluate(() => history.state !== null)) {
+      throw new Error("[highest] the key was saved into the tab's state");
+    }
+    await maker.click('.statusbar-actions button:has-text("Copy link")');
+    const link = await maker.evaluate(() => window.__copied.at(-1));
+    if (!link || !/\/r\/[0-9a-f]{32}#k=[^&]+&s=/.test(link)) {
+      throw new Error(`[highest] Copy link did not produce a whole link: ${link}`);
+    }
+
+    // Refresh: the tab has forgotten the key, on purpose.
+    await maker.reload({ waitUntil: "domcontentloaded" });
+    await maker.waitForSelector("text=THIS LINK IS MISSING ITS KEY", { timeout: 10_000 }).catch(async () => {
+      const shown = await maker.evaluate(() => document.body.textContent.replace(/\s+/g, " ").slice(0, 200));
+      throw new Error(`[highest] a refresh still had the key: ${shown}`);
+    });
+    await maker.close();
+
+    // The copied link still opens the room for whoever receives it.
+    const recipient = await makePage("highest-recipient");
+    await gotoRoom(recipient, "highest-recipient", link);
+    await recipient.waitForSelector(".monaco-editor", { timeout: 30_000 });
+    if (await recipient.evaluate(() => location.href.includes("#k="))) {
+      throw new Error("[highest] the recipient's address kept the key");
+    }
+    await recipient.close();
+  }
 
   const landing = await makePage("landing");
   for (const width of [320, 375, 414]) {
@@ -1500,6 +1563,8 @@ async function main() {
   await browser.close();
 
   console.log(`BROWSER E2E OK (${ENGINE_NAME})`);
+  console.log(`  the key never stays in the address: Join, a clicked link, and room creation`);
+  console.log(`  highest security: not saved, forgotten on refresh, Copy link still whole`);
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);

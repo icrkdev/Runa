@@ -151,17 +151,35 @@ memory regardless; JavaScript strings are immutable and cannot be individually
 zeroized, which is why client wipe ends in realm destruction via hard
 navigation. `zeroize` narrows a window; it does not close a door.
 
-The unlisted room key travels in the URL fragment, and stays there while the
-room is open. A fragment is never sent to the server, but the browser records
-the full URL — fragment included — in its history when the page is opened, and
-a browser with sync turned on copies that history to its vendor's servers.
-Shred replaces the address on the page (`history.replaceState` to the
-tombstone), which removes it from the back button but not from history already
-written. Anyone who later reads a participant's browser history, or their sync
-account, holds the key to every unlisted room they opened and can read any
-room still alive. This sits between A4 and A7: it needs no malware, only the
-history. A private window or Tor Browser records none. The README says so
-under "If your safety depends on it".
+The unlisted room key travels in the URL fragment. A fragment is never sent
+to the server, but browsers write the full URL into their history, and a
+browser with sync on copies that history to its vendor. So the client keeps
+the key out of the address bar (`web/src/keyhandoff.ts`):
+
+- A room opened from inside RÚNA — created on the front page, or joined by
+  pasting its link into Join — gets the key handed over in memory. It is
+  never in the address, so no history entry can carry it.
+- A room opened from a clicked link has the fragment removed by
+  `history.replaceState` as the page starts. The browser may already have
+  recorded the address it was opened with, and no page can reach that entry.
+  Measured in headless Chromium: after opening a room this way, no file in
+  the profile held the key. Headless Chromium keeps no history database,
+  though, so that run cannot speak for a desktop browser's history.
+- After joining, an *everyday* room keeps the key in the tab's
+  `history.state` so a refresh works. That is not the address, is not shown
+  in or synced with history, and goes with the tab; a browser's session
+  restore may keep it on disk until then. A *highest-security* room keeps it
+  in memory only, and a refresh forgets it.
+
+The level is chosen at creation and sealed in the room's encrypted config,
+so the server cannot see it. A config that is missing or will not open is
+treated as highest: a server that strips it cannot have a highest-security
+room's key saved in the tab.
+
+Someone who later reads a participant's history or sync account can open any
+room whose clicked link was recorded there and is still alive. The README's
+"If your safety depends on it" says to paste links into Join, and to make
+rooms for people at risk with Highest security.
 
 Delivery acknowledgements come from the server and are not authenticated. A
 client stops resending an edit once the server says it stored it, so a hostile

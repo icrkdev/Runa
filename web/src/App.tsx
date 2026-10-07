@@ -1,17 +1,19 @@
 import { useEffect, useState } from "react";
 import { Landing } from "./routes/Landing";
 import { Room } from "./routes/Room";
+import { takeRoomKey } from "./keyhandoff";
 
 type Route =
   | { kind: "landing" }
-  | { kind: "unlisted"; roomIdHex: string; fragment: string }
+  | { kind: "unlisted"; roomIdHex: string; fragment: string | undefined }
   | { kind: "named"; name: string };
 
 function parseRoute(): Route {
   const path = window.location.pathname;
-  const fragment = window.location.hash;
   const unlisted = path.match(/^\/r\/([0-9a-f]{32})\/?$/);
-  if (unlisted) return { kind: "unlisted", roomIdHex: unlisted[1], fragment };
+  // The key comes from a handoff, the address (cleared on the spot), or this
+  // tab's saved state — never left sitting in the address bar.
+  if (unlisted) return { kind: "unlisted", roomIdHex: unlisted[1], fragment: takeRoomKey(unlisted[1]) };
   // Old-style links stay valid indefinitely; people have pasted them into
   // chats and those should not rot.
   const legacyNamed = path.match(/^\/n\/([a-z0-9-]+)\/?$/);

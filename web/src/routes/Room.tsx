@@ -31,6 +31,7 @@ import { exportPdf, type ExportDensity } from "../export/paged";
 import { exportMarkdown } from "../export/markdown";
 import { TOOLBAR_ACTIONS, applyTool } from "../ui/toolbar";
 import { useLineSync } from "../ui/linesync";
+import { applySecurityLevel, shareLink } from "../keyhandoff";
 
 const api = new Api("");
 
@@ -52,6 +53,7 @@ type Phase =
   | { kind: "unavailable" };
 
 let extNoticeShown = false;
+let highestNoticeShown = false;
 let externalConfirmed = false;
 
 export function Room(props: RoomProps) {
@@ -79,6 +81,9 @@ function JoinableRoom(props: RoomProps) {
   const [mode, setMode] = useState<"split" | "editor" | "preview">("split");
   const [ladder, setLadder] = useState<LadderPhase>({ kind: "normal", remainingMs: 0 });
   const [ttlMismatch, setTtlMismatch] = useState(false);
+  // A highest-security room keeps its key in this tab's memory only, so a
+  // refresh forgets it. Said once, so nobody refreshes and is locked out.
+  const [highestNotice, setHighestNotice] = useState(false);
   const [historyPressure, setHistoryPressure] = useState<string | null>(null);
   const [tally, setTally] = useState<{ approved: number; total: number; waitingOn?: string } | null>(null);
   const [diverged, setDiverged] = useState(false);
@@ -261,6 +266,11 @@ function JoinableRoom(props: RoomProps) {
             }
           },
           onTtlMismatch: () => setTtlMismatch(true),
+          onSecurityLevel: (level) => {
+            if (!props.roomIdHex || !props.fragment) return;
+            applySecurityLevel(props.roomIdHex, props.fragment, level);
+            if (level === "highest" && !highestNoticeShown) setHighestNotice(true);
+          },
           onShredRejected: (reason) => {
             // Say it out loud. A shred request that no peer will act on has to
             // be visible to somebody, or it looks exactly like a request that
@@ -460,9 +470,16 @@ function JoinableRoom(props: RoomProps) {
   }, [cycleMode]);
 
   const copyLink = useCallback(() => {
-    void navigator.clipboard.writeText(window.location.href);
+    // The address bar no longer holds the key, so the link is rebuilt from
+    // the copy in memory. A shared room's address is the whole link: its
+    // passphrase is never part of it.
+    const link =
+      props.roomIdHex && props.fragment
+        ? shareLink(props.roomIdHex, props.fragment)
+        : window.location.href;
+    void navigator.clipboard.writeText(link);
     announce("Copied. The part after the # is the key. Send the whole thing.");
-  }, []);
+  }, [props.roomIdHex, props.fragment]);
 
   if (phase.kind === "missing-key") return <MissingKey />;
 
@@ -658,6 +675,23 @@ function JoinableRoom(props: RoomProps) {
         <div className="banner" role="alert">
           <span>The server reports a different expiry than this room was created with.</span>
           <button onClick={() => setTtlMismatch(false)}>Dismiss</button>
+        </div>
+      )}
+      {highestNotice && (
+        <div className="banner" role="note">
+          <span>
+            Highest security: this tab holds the key in memory only. Refreshing or closing it
+            forgets the key — to come back, paste the link into Join a room. Copy link first if
+            you need it.
+          </span>
+          <button
+            onClick={() => {
+              highestNoticeShown = true;
+              setHighestNotice(false);
+            }}
+          >
+            Got it
+          </button>
         </div>
       )}
       <div className="statusbar">

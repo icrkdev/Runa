@@ -8,7 +8,9 @@ import {
   randomLinkSecret,
   randomSalt,
   verifierForAuthKey,
+  type SecurityLevel,
 } from "../keys-session";
+import { openUnlistedRoom } from "../keyhandoff";
 import {
   generateDicewarePassphrase,
   generateRoomName,
@@ -121,7 +123,14 @@ function JoinForm() {
       className="panel join"
       onSubmit={(e) => {
         e.preventDefault();
-        if (opens) window.location.assign(target.href);
+        if (target.kind === "private" && !target.elsewhere) {
+          // The key is handed over in memory, so it never reaches the address
+          // bar or the browser's history. A room on another server has to be
+          // opened there, by its link.
+          openUnlistedRoom(target.roomIdHex, target.fragment);
+        } else if (opens) {
+          window.location.assign(target.href);
+        }
       }}
     >
       <div className="field">
@@ -180,9 +189,29 @@ function ExpiryPicker({ onChange }: { onChange: (ttl: TtlBody) => void }) {
           <option key={p.label} value={JSON.stringify(p.value)}>{p.label}</option>
         ))}
         <option value={JSON.stringify({ kind: "none", secs: 0 })}>
-          No expiry — dies when everyone leaves, you shred it, or the server restarts
+          No expiry — until shredded, or left empty and unedited for 12 hours
         </option>
       </select>
+    </div>
+  );
+}
+
+/// Chosen by whoever makes the room, sealed in its encrypted config, and so
+/// applied for everyone who opens it — a source does not have to know the
+/// setting exists to be covered by it.
+function SecurityPicker({ value, onChange }: { value: SecurityLevel; onChange: (l: SecurityLevel) => void }) {
+  return (
+    <div className="field">
+      <label className="micro-label" htmlFor="security">SECURITY</label>
+      <select id="security" value={value} onChange={(e) => onChange(e.target.value as SecurityLevel)}>
+        <option value="everyday">Everyday — a refresh keeps you in the room</option>
+        <option value="highest">Highest security — the key is never stored</option>
+      </select>
+      <p className="hint">
+        {value === "everyday"
+          ? "Either way the key never sits in the address bar or browser history. Everyday keeps it for this tab, so a refresh works."
+          : "The key lives only in the open tab. Refreshing or closing it forgets the key; to come back, paste the link into Join a room. Choose this when someone could be harmed by being linked to this room."}
+      </p>
     </div>
   );
 }
@@ -191,6 +220,7 @@ function UnlistedForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ttl, setTtl] = useState<TtlBody>(TTL_PRESETS[1].value);
+  const [level, setLevel] = useState<SecurityLevel>("everyday");
 
   const create = async () => {
     setBusy(true);
@@ -207,9 +237,9 @@ function UnlistedForm() {
         kdf: { m_kib: 65536, t: 3, p: 1, salt: b64Of(salt) },
         ttl,
         ceilingOptout: ttl.kind === "none",
-        configBlob: await encryptRoomConfig(contentKey, ttl, ttl.kind === "none"),
+        configBlob: await encryptRoomConfig(contentKey, ttl, ttl.kind === "none", level),
       });
-      window.location.assign(`/r/${created.room_id}${fragmentWithKey(linkSecret, salt)}`);
+      openUnlistedRoom(created.room_id, fragmentWithKey(linkSecret, salt));
     } catch (e) {
       setError(describeError(e));
       setBusy(false);
@@ -219,6 +249,7 @@ function UnlistedForm() {
   return (
     <div className="panel">
       <ExpiryPicker onChange={setTtl} />
+      <SecurityPicker value={level} onChange={setLevel} />
       <button className="primary" onClick={create} disabled={busy}>
         {busy ? "Creating…" : "Create private room"}
       </button>

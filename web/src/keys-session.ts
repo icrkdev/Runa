@@ -1,5 +1,8 @@
 import { deriveFromPassphrase, ARGON2_M_KIB, ARGON2_T, ARGON2_P } from "./crypto/kdf";
 import { hkdfBits, INFO_AUTH, INFO_CONTENT, concatBytes } from "./crypto/keys";
+import type { SecurityLevel } from "./security-level";
+
+export type { SecurityLevel } from "./security-level";
 
 export type RoomClass = "unlisted" | "named";
 
@@ -135,8 +138,9 @@ export async function encryptRoomConfig(
   contentKey: CryptoKey,
   ttl: { kind: string; secs: number },
   ceilingOptout: boolean,
+  level: SecurityLevel = "everyday",
 ): Promise<Uint8Array> {
-  const payload = new TextEncoder().encode(JSON.stringify({ ttl, ceilingOptout }));
+  const payload = new TextEncoder().encode(JSON.stringify({ ttl, ceilingOptout, level }));
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
   const ct = await crypto.subtle.encrypt(

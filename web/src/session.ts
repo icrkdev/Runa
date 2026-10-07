@@ -14,6 +14,7 @@ import {
 } from "./shred/machine";
 import type { RosterEntry } from "./shred/roster";
 import { executeWipe } from "./shred/wipe";
+import { parseSecurityLevel, securityLevelOf, type SecurityLevel } from "./security-level";
 
 /// A divergence warning is only meaningful once the document has stopped
 /// moving. Two peers mid-keystroke legitimately hold different states.
@@ -199,6 +200,9 @@ export interface SessionEvents {
   onRoomCarriedOver?(): void;
   /// Why the server is refusing this connection, or null once it is accepted.
   onConnectionRefused(message: string | null): void;
+  /// How the room asks for its key to be kept, from its sealed config. Raised
+  /// on every join.
+  onSecurityLevel?(level: SecurityLevel): void;
 }
 
 /// What the server said to a restart ticket: the room is back (whoever
@@ -555,8 +559,14 @@ export class Session {
     // the blob falls back to its clear value; a server that contradicts it
     // gets the mismatch banner AND loses the dispute.
     let effectiveTtl = ack.ttl;
+    // How this room wants its key kept comes only from the sealed config. A
+    // config that is missing or will not open is treated as the strictest
+    // level, so a server cannot strip it to have a highest-security room's
+    // key written into the tab's saved state.
+    const cfg = ack.config_blob ? await this.decryptConfigBlob(ack.config_blob) : null;
+    const level = securityLevelOf(cfg);
     if (ack.config_blob) {
-      const cfgTtl = await this.decryptConfigBlob(ack.config_blob);
+      const cfgTtl = cfg?.ttl;
       if (cfgTtl) {
         const kindMismatch =
           cfgTtl.kind === "none" ? ack.ttl.kind !== "none" : cfgTtl.kind !== ack.ttl.kind;
@@ -572,6 +582,7 @@ export class Session {
         this.events.onTtlMismatch();
       }
     }
+    this.events.onSecurityLevel?.(level);
 
     switch (effectiveTtl.kind) {
       case "none":
@@ -605,7 +616,7 @@ export class Session {
 
   private async decryptConfigBlob(
     blobB64: string,
-  ): Promise<{ kind: string; secs: number } | null> {
+  ): Promise<{ ttl: { kind: string; secs: number }; level: SecurityLevel } | null> {
     try {
       const blob = fromB64(blobB64);
       const iv = blob.slice(0, 12);
@@ -617,8 +628,9 @@ export class Session {
       );
       const parsed = JSON.parse(new TextDecoder().decode(pt)) as {
         ttl: { kind: string; secs: number };
+        level?: unknown;
       };
-      return parsed.ttl;
+      return { ttl: parsed.ttl, level: parseSecurityLevel(parsed.level) };
     } catch {
       return null;
     }
