@@ -20,6 +20,7 @@ import { estimatePassphrase } from "../crypto/passphrase";
 import { Field } from "../ui/Field";
 import { nameProblem } from "./name-rules";
 import { readJoinTarget, type JoinTarget } from "./join";
+import { navigateTo } from "./navigate";
 
 type Class = "unlisted" | "named";
 
@@ -133,7 +134,7 @@ function JoinForm() {
           // it is an everyday one.
           openNamedRoom(target.name);
         } else if (opens) {
-          window.location.assign(target.href);
+          navigateTo(target.href);
         }
       }}
     >
@@ -337,7 +338,7 @@ function NamedForm() {
         configBlob: await encryptRoomConfig(contentKey, ttl, ttl.kind === "none", level),
       });
       if (level === "highest") openNamedRoom(finalName);
-      else window.location.assign(`/${finalName}`);
+      else navigateTo(`/${finalName}`);
     } catch (e) {
       setError(describeError(e));
       setBusy(false);
