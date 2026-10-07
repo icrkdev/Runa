@@ -60,6 +60,15 @@ impl ConnGuard {
         self.blocked.insert(ip.to_string(), now + duration);
     }
 
+    /// Drop blocks that have run out. `acquire` clears one only when the same
+    /// client returns, so a client who never came back stayed listed for the
+    /// life of the process. Live counts need no sweep: `release` removes a
+    /// client the moment its last connection closes.
+    pub fn sweep(&self) {
+        let now = std::time::Instant::now();
+        self.blocked.retain(|_, until| *until > now);
+    }
+
     #[cfg(test)]
     pub fn blocked_len(&self) -> usize {
         self.blocked.len()
@@ -104,5 +113,15 @@ mod tests {
         let g = ConnGuard::new(4, Duration::ZERO);
         g.temp_block("y", Duration::ZERO);
         assert!(g.acquire("y"), "zero-duration block expires immediately");
+    }
+
+    #[test]
+    fn a_sweep_forgets_expired_blocks_and_keeps_live_ones() {
+        let g = ConnGuard::new(4, Duration::ZERO);
+        g.temp_block("gone", Duration::ZERO);
+        g.temp_block("held", Duration::from_secs(60));
+        g.sweep();
+        assert_eq!(g.blocked_len(), 1, "only the live block is remembered");
+        assert!(!g.acquire("held"), "a sweep must not lift a live block");
     }
 }

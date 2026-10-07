@@ -227,6 +227,10 @@ impl AuthGuard {
     fn reset(&self, caller: &str) {
         self.per_caller.reset(&caller.to_string());
     }
+
+    fn sweep(&self) {
+        self.per_caller.sweep();
+    }
 }
 
 pub struct Room {
@@ -392,6 +396,12 @@ impl Room {
 
     pub fn auth_allowed(&self, caller: &str) -> bool {
         self.auth_guard.allow(caller)
+    }
+
+    /// Forget callers whose join budget has fully refilled. See
+    /// `RateLimiter::sweep`.
+    pub fn forget_idle_callers(&self) {
+        self.auth_guard.sweep();
     }
 
     pub fn record_auth_failure(&self) -> Duration {
@@ -1006,6 +1016,13 @@ impl RoomRegistry {
         let id = *self.names.get(&key)?;
         let room = self.get(&id)?;
         Some((key, room))
+    }
+
+    /// Run `Room::forget_idle_callers` on every live room.
+    pub fn forget_idle_callers(&self) {
+        for entry in self.rooms.iter() {
+            entry.value().forget_idle_callers();
+        }
     }
 
     pub fn sweep_candidates(

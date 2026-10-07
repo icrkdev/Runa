@@ -73,6 +73,23 @@ impl<K: Eq + Hash + Clone> RateLimiter<K> {
         self.buckets.lock().unwrap().remove(key);
     }
 
+    /// Forget every bucket that has refilled to capacity.
+    ///
+    /// `evict` only runs once the table is full, and on a quiet server it never
+    /// is — so every key ever seen stayed in memory until the process exited.
+    /// Keys are client pseudonyms (`clientip::rate_limit_key`), but a list of
+    /// everyone who visited since boot is still a list, and nothing about rate
+    /// limiting needs it. A full bucket carries no information (see `evict`),
+    /// so dropping it on a timer changes no limiting decision; it only bounds
+    /// how long a visit is remembered to the limiter's own window.
+    pub fn sweep(&self) {
+        let now = Instant::now();
+        self.buckets
+            .lock()
+            .unwrap()
+            .retain(|_, b| self.projected(b, now) < self.capacity);
+    }
+
     /// Projected token count for a bucket at `now`, without mutating it.
     fn projected(&self, b: &Bucket, now: Instant) -> f64 {
         (b.tokens + now.duration_since(b.last).as_secs_f64() * self.refill_per_sec)
@@ -174,5 +191,30 @@ mod tests {
             rl.check(&k);
         }
         assert!(!rl.check(&1), "an evicted bucket would refill and let this through");
+    }
+
+    #[test]
+    fn a_sweep_forgets_a_client_once_its_bucket_has_refilled() {
+        let rl: RateLimiter<u64> = RateLimiter::new(2, Duration::from_millis(100), 10_000);
+        assert!(rl.check(&1));
+        rl.sweep();
+        assert_eq!(rl.buckets.lock().unwrap().len(), 1, "still inside its window");
+        std::thread::sleep(Duration::from_millis(150));
+        rl.sweep();
+        assert_eq!(
+            rl.buckets.lock().unwrap().len(),
+            0,
+            "a refilled bucket says nothing and must not be remembered"
+        );
+    }
+
+    #[test]
+    fn a_sweep_never_hands_a_throttled_client_a_fresh_bucket() {
+        let rl: RateLimiter<u64> = RateLimiter::new(2, Duration::from_secs(600), 10_000);
+        assert!(rl.check(&1));
+        assert!(rl.check(&1));
+        assert!(!rl.check(&1));
+        rl.sweep();
+        assert!(!rl.check(&1), "sweeping a throttled bucket would be a bypass");
     }
 }
