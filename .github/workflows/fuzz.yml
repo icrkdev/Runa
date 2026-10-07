@@ -1,0 +1,58 @@
+name: fuzz
+
+# Started by hand from the Actions tab (Run workflow), never on a timer. A run
+# takes about 45 minutes, 40 of them fuzzing, which on a weekly schedule was
+# most of a month's free CI minutes for a parser that has never had anything
+# to find. Run it after touching anything a target covers: frame parsing,
+# room names, log compaction, or the room-creation body.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Three things this invocation has to get right, each hidden behind the
+      # previous one:
+      #   1. cargo-fuzz resolves targets at `<cwd>/fuzz/Cargo.toml`, so it runs
+      #      from the crate root — not from server/fuzz, which made it look for
+      #      server/fuzz/fuzz/Cargo.toml.
+      #   2. The manifest needs `[package.metadata] cargo-fuzz = true`.
+      #   3. `+nightly` is explicit because rust-toolchain.toml pins 1.98.0 at
+      #      the repo root, and that pin overrides the nightly this job
+      #      installs. cargo-fuzz needs -Z flags, so it fails without it.
+      # Seeds first. fuzz/corpus is gitignored, so every run starts empty —
+      # and create_body has to get an input past
+      # serde_json::from_slice::<CreateRoomBody> before it reaches anything
+      # worth testing. Random bytes will not build a nested object with the
+      # right field names, so without these it would spend the whole budget
+      # failing to parse.
+      - name: Seed the corpora
+        working-directory: server
+        run: |
+          for t in $(ls fuzz/seeds); do
+            mkdir -p "fuzz/corpus/$t"
+            cp fuzz/seeds/"$t"/* "fuzz/corpus/$t/" 2>/dev/null || true
+          done
+      # Time is weighted towards the two targets that can lose something.
+      # frame_header parses a fixed 32-byte header with every offset bounds
+      # checked, and room_name is a charset test; both are covered by unit
+      # tests asserting the same properties, and neither has ever had anything
+      # to find. log_compaction drives the only path that discards data, and
+      # create_body guards the parameters the metadata endpoint has to be able
+      # to answer for without disclosing that a room exists.
+      - name: Run fuzz targets
+        working-directory: server
+        run: |
+          cargo +nightly fuzz run frame_header    -- -max_total_time=300
+          cargo +nightly fuzz run room_name       -- -max_total_time=300
+          cargo +nightly fuzz run log_compaction  -- -max_total_time=900
+          cargo +nightly fuzz run create_body     -- -max_total_time=900
