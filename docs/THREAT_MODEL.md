@@ -23,7 +23,7 @@ with it. Where a claim conflicts with this document, this document wins.
 | A5 | Off-path attacker with the room URL but not the passphrase | Online guessing only | Yes |
 | A6 | Attacker with post-hoc access to the server host | Cold RAM, swap, core dumps, disk | Yes, best effort. See "Known limits" below. |
 | A7 | Attacker with access to a peer's endpoint | Malware, screen capture, keylogger | **No.** Out of scope. |
-| A8 | Global adversary doing traffic correlation | Timing and volume analysis across the network | **No.** Use Tor. |
+| A8 | Global adversary doing traffic correlation | Timing and volume analysis across the network | **No.** Use Tor, and the server's onion address where it has one. |
 
 ## What RÚNA actually defends against
 
@@ -134,7 +134,7 @@ visit that somewhere is the relay.
 
 | Leak | Why | Mitigation |
 |---|---|---|
-| Your IP address | It is a TCP connection | Never logged. Rate limits hold only a keyed pseudonym (HMAC under a key drawn at startup and never written), dropped about one limiter window after you go quiet; a restart makes every earlier pseudonym unlinkable. Whoever captures the live process holds the key too and can test a suspected address, so this bounds exposure in time rather than removing it. Over Tor the server never learns an address at all |
+| Your IP address | It is a TCP connection | Never logged. Rate limits hold only a keyed pseudonym (HMAC under a key drawn at startup and never written), dropped about one limiter window after you go quiet; a restart makes every earlier pseudonym unlinkable. Whoever captures the live process holds the key too and can test a suspected address, so this bounds exposure in time rather than removing it. Over Tor the server never learns an address at all; through an onion service each circuit is limited on its own, and no forwarded-for header is believed there |
 | That a room exists and when | Routing | Unlisted room IDs are 128-bit and unguessable; identical responses for "wrong password" and "no such room". Named rooms give this up by construction. |
 | Number of connected peers | Relay fan-out | Not hideable in a client-server relay |
 | Approximate document size | Ciphertext length | Padding to 256-byte buckets |

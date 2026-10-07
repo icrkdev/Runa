@@ -69,6 +69,7 @@ Re-run it to ship an update; it is idempotent. Other knobs:
 | `RUNA_CONNS` / `RUNA_QUEUE_KB` | `512` / `1024` | |
 | `RUNA_NEIGHBOUR_URL` | *(unset)* | a service to health-check afterwards |
 | `RUNA_SKIP_WEB_BUILD` | `0` | `1` ships the `web/dist` you already built instead of rebuilding it |
+| `RUNA_ONION` | `0` | `1` also serves RÚNA as a Tor onion service — see [Onion service](#onion-service) |
 
 The memory knobs move together: the script writes the `RUNA_MAX_*` values
 into `/etc/runa/runa.env` and patches `MemoryMax`/`MemoryHigh` in the unit
@@ -124,6 +125,39 @@ Two variables must stay unset in production:
 - `RUNA_ALLOW_INSECURE` — permits plain `ws://`.
 - `RUNA_ALLOW_CEILING_OPTOUT` — lets any anonymous caller create a room that
   never expires, which is a permanent memory reservation.
+
+## Onion service
+
+```sh
+RUNA_ONION=1 RUNA_HOST=runa.example.com RUNA_BOX_IP=203.0.113.10 ./scripts/deploy-oracle.sh
+```
+
+Someone who opens RÚNA through its onion address never gives it an IP
+address: the server sees only the local Tor daemon, and their network sees
+only that they use Tor. For anyone who could be harmed by being linked to a
+room, that is the strongest protection RÚNA offers.
+
+What the option does, and nothing else:
+
+- Installs `tor` if it is missing and adds one file, `/etc/tor/torrc.d/runa.conf`,
+  plus an `%include` line in `/etc/tor/torrc`. Caddy, its vhosts and every
+  other service on the box are untouched.
+- `HiddenServiceExportCircuitID haproxy` makes tor open each connection with
+  a line naming its circuit. RÚNA's onion listener (`RUNA_ONION_BIND`,
+  loopback only) treats each circuit as its own client, so one Tor visitor
+  cannot spend everyone else's limits, and believes no `X-Forwarded-For`, so
+  none can forge a fresh allowance.
+- `HiddenServicePoWDefensesEnabled 1` makes opening circuits in bulk costly,
+  since each circuit is a fresh allowance. If the box's tor build lacks it,
+  the deploy says so and carries on without it.
+- `RUNA_ONION_URL` makes the clearnet pages send `Onion-Location`, so Tor
+  Browser offers the onion address on its own.
+
+The onion address lives in `/var/lib/tor/runa/`. **Back that directory up**
+if the address is published anywhere — losing it means a new address. It is
+tor's private key, so keep the backup as carefully as the box itself.
+
+The onion service is for the systemd path; the Docker path does not set it up.
 
 ## After it is live
 

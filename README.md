@@ -664,6 +664,8 @@ with anything else needs.
 | `RUNA_ROOMS_PER_HR` | `20` | Unlisted rooms one address may create per hour |
 | `RUNA_NAMED_PER_HR` | `5` | Named rooms one address may create per hour |
 | `RUNA_IDLE_CEILING` | `43200` | Seconds an unattended `ttl: none` room survives |
+| `RUNA_ONION_BIND` | unset | A second listener, loopback only, for a Tor onion service. Expects tor's `HiddenServiceExportCircuitID haproxy`, treats each circuit as its own client, and believes no forwarded-for header. See [DEPLOY.md](docs/DEPLOY.md#onion-service) |
+| `RUNA_ONION_URL` | unset | `http://<56 characters>.onion`. Sent to Tor Browser on clearnet pages as `Onion-Location` |
 | `RUNA_ALLOW_CEILING_OPTOUT` | unset | Set to `1` to let clients create rooms that never expire. **Off by default** — an immortal room is a permanent memory reservation any anonymous caller could make |
 
 Sizing for a small shared VM — say 1 GB, with other services on it:
@@ -917,6 +919,8 @@ people. Read this before relying on it.
 
 1. **Open RÚNA in [Tor Browser](https://www.torproject.org/download/).** That
    hides that you connected, gets past simple blocking, and keeps no history.
+   If the server has an onion address, Tor Browser offers to switch to it —
+   accept, and the server never learns an IP address for you at all.
    RÚNA needs JavaScript, so it will not run at Tor Browser's *Safest*
    security level. Failing Tor, at least use a private window, which also
    keeps no history.

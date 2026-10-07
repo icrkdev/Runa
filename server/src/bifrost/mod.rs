@@ -1,6 +1,7 @@
 pub mod frame;
 pub mod http;
 pub mod limits;
+pub mod onion;
 pub mod router;
 
 use std::time::Duration;

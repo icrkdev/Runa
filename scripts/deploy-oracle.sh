@@ -39,6 +39,13 @@ QUEUE_KB=${RUNA_QUEUE_KB:-1024}
 # when this host runs something else you would hate to have disturbed.
 NEIGHBOUR=${RUNA_NEIGHBOUR_URL:-}
 
+# 1 also makes RUNA reachable as a Tor onion service, so a visitor never
+# hands it an IP address. Installs tor and adds one config file to it; Caddy
+# and every other site are left alone. Off unless asked for.
+ONION=${RUNA_ONION:-0}
+# Loopback port the onion service forwards to. Never exposed.
+ONION_PORT=3080
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -142,10 +149,69 @@ $SSH "COMMIT=$COMMIT BUNDLE_SHA=$BUNDLE_SHA bash -euo pipefail -s" <<'REMOTE'
 REMOTE
 ok "runa-server built"
 
+# ── 5b. Onion service (RUNA_ONION=1 only) ─────────────────────────────────
+# Before the install step, so RUNA restarts once, already knowing its onion
+# address, rather than twice.
+if [ "$ONION" = "1" ]; then
+  bold "5b   Onion service"
+  $SSH "ONION_PORT=$ONION_PORT bash -euo pipefail -s" <<'REMOTE'
+  if ! command -v tor >/dev/null; then
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tor >/dev/null
+    echo "  installed tor"
+  fi
+  sudo install -d -o debian-tor -g debian-tor -m 700 /var/lib/tor/runa
+  sudo mkdir -p /etc/tor/torrc.d
+  if ! sudo grep -q '^%include /etc/tor/torrc.d' /etc/tor/torrc; then
+    echo '%include /etc/tor/torrc.d/*.conf' | sudo tee -a /etc/tor/torrc >/dev/null
+  fi
+  CONF=/etc/tor/torrc.d/runa.conf
+  PREVIOUS=$(mktemp)
+  sudo test -f "$CONF" && sudo cp "$CONF" "$PREVIOUS" || : > "$PREVIOUS"
+  # ExportCircuitID: each connection opens with a PROXY line naming its
+  # circuit, which RUNA uses as the client for rate limiting — without it,
+  # every onion visitor would share one set of limits. Proof of work makes
+  # opening circuits in bulk expensive, since each is a fresh allowance.
+  write_conf() {
+    {
+      echo "HiddenServiceDir /var/lib/tor/runa/"
+      echo "HiddenServiceVersion 3"
+      echo "HiddenServicePort 80 127.0.0.1:${ONION_PORT}"
+      echo "HiddenServiceExportCircuitID haproxy"
+      [ "$1" = "pow" ] && echo "HiddenServicePoWDefensesEnabled 1"
+      true
+    } | sudo tee "$CONF" >/dev/null
+  }
+  verify() { sudo -u debian-tor tor --verify-config -f /etc/tor/torrc >/dev/null 2>&1; }
+  write_conf pow
+  if ! verify; then
+    write_conf nopow
+    if verify; then
+      echo "  WARNING: this tor build has no proof-of-work defence; running without it" >&2
+    else
+      echo "  tor config does not validate; restoring the previous one" >&2
+      if [ -s "$PREVIOUS" ]; then sudo cp "$PREVIOUS" "$CONF"; else sudo rm -f "$CONF"; fi
+      exit 1
+    fi
+  fi
+  sudo systemctl enable tor >/dev/null 2>&1 || true
+  sudo systemctl restart tor@default
+  for _ in $(seq 1 30); do
+    sudo test -s /var/lib/tor/runa/hostname && break
+    sleep 1
+  done
+  sudo test -s /var/lib/tor/runa/hostname \
+    || { echo "  tor did not create the onion address; check: sudo journalctl -u tor@default" >&2; exit 1; }
+  echo "  onion address: $(sudo cat /var/lib/tor/runa/hostname)"
+REMOTE
+  ok "onion service configured"
+fi
+
 # ── 6. Install ───────────────────────────────────────────────────────────
 bold "6/8  Install"
 $SSH "MEM_MAX=$MEM_MAX MEM_HIGH=$MEM_HIGH LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS \
       MAX_PEERS=$MAX_PEERS MAX_CONNS=$MAX_CONNS QUEUE_KB=$QUEUE_KB \
+      ONION=$ONION ONION_PORT=$ONION_PORT \
       bash -euo pipefail -s" <<'REMOTE'
   sudo install -m 755 ~/runa/target/release/runa-server /usr/local/bin/runa-server
 
@@ -202,6 +268,16 @@ $SSH "MEM_MAX=$MEM_MAX MEM_HIGH=$MEM_HIGH LOG_MB=$LOG_MB MAX_ROOMS=$MAX_ROOMS \
     unset KEY
     echo "created /etc/runa/restart.env: open rooms carry over from the next restart on"
     echo "(this restart is done by the running binary, which may predate the handover)"
+  fi
+
+  # The onion listener and the address clearnet pages advertise. Rewritten on
+  # every onion deploy, since the address is tor's, not ours to remember.
+  if [ "$ONION" = "1" ]; then
+    ADDR=$(sudo cat /var/lib/tor/runa/hostname)
+    sudo sed -i -e '/^RUNA_ONION_BIND=/d' -e '/^RUNA_ONION_URL=/d' /etc/runa/runa.env
+    printf 'RUNA_ONION_BIND=127.0.0.1:%s\nRUNA_ONION_URL=http://%s\n' "$ONION_PORT" "$ADDR" \
+      | sudo tee -a /etc/runa/runa.env >/dev/null
+    echo "onion listener on 127.0.0.1:$ONION_PORT for http://$ADDR"
   fi
 
   sudo systemctl daemon-reload
@@ -299,6 +375,30 @@ LEAKED="$($SSH "curl -s -o /dev/null http://127.0.0.1:3000/ ; sudo journalctl -u
   && ok "no client addresses in Caddy's logs" \
   || warn "$LEAKED access-log lines carried remote_ip — check the log directives"
 
+if [ "$ONION" = "1" ]; then
+  ONION_ADDR="$($SSH "sudo cat /var/lib/tor/runa/hostname")"
+  $SSH "sudo ss -ltn 2>/dev/null | grep -q '127.0.0.1:$ONION_PORT'" \
+    && ok "onion listener on loopback only" \
+    || die "no listener on 127.0.0.1:$ONION_PORT — check: sudo journalctl -u runa | grep onion"
+  curl -sI --max-time 5 "https://$HOST/version" | grep -qi "^onion-location: http://$ONION_ADDR" \
+    && ok "clearnet pages advertise the onion address to Tor Browser" \
+    || warn "no Onion-Location header on https://$HOST/"
+  # A new onion address takes a minute or two to be published to the Tor
+  # network. Fetch through tor itself, on the box, until it answers.
+  echo "  reaching http://$ONION_ADDR through tor (can take a few minutes the first time)…"
+  REACHED=""
+  for _ in $(seq 1 24); do
+    if $SSH "curl -s --max-time 20 --socks5-hostname 127.0.0.1:9050 http://$ONION_ADDR/version" \
+        | grep -q "\"commit\":\"$COMMIT\""; then
+      REACHED=1; break
+    fi
+    sleep 10
+  done
+  [ -n "$REACHED" ] \
+    && ok "http://$ONION_ADDR serves the deployed commit over tor" \
+    || warn "not reachable over tor yet; publication can lag — retry: curl --socks5-hostname 127.0.0.1:9050 http://$ONION_ADDR/version"
+fi
+
 if [ -n "$NEIGHBOUR" ]; then
   N="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$NEIGHBOUR" || true)"
   [ "$N" = "200" ] \
@@ -308,6 +408,7 @@ fi
 
 echo
 bold "DEPLOYED  https://$HOST/"
+[ "$ONION" = "1" ] && bold "ONION     http://$ONION_ADDR/  (open in Tor Browser)"
 echo "  Open it in two windows, create a room, and confirm both edit live and"
 echo "  the peer count reads 2 PEERS on each — the WebSocket path is the part"
 echo "  curl does not exercise."
