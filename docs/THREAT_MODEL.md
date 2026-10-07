@@ -171,6 +171,16 @@ the key out of the address bar (`web/src/keyhandoff.ts`):
   restore may keep it on disk until then. A *highest-security* room keeps it
   in memory only, and a refresh forgets it.
 
+A shared room has no key in its address, but its address *is* its name, and
+the name in someone's history says which room they were in. Opened from
+inside RÚNA, a shared room sits at `/` with the name in memory, and takes
+`/<name>` only once its sealed config says *everyday*; a *highest* one keeps
+`/`, so a refresh leaves it. A name typed or clicked into the address bar is
+taken out as soon as the room says *highest*, with the same caveat as a
+clicked link. Its passphrase was never stored; a highest room's create form
+also sets `autocomplete="off"`, which browsers may still override with an
+offer to save, so the room tells people to decline it.
+
 The level is chosen at creation and sealed in the room's encrypted config,
 so the server cannot see it. A config that is missing or will not open is
 treated as highest: a server that strips it cannot have a highest-security

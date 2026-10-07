@@ -31,7 +31,7 @@ import { exportPdf, type ExportDensity } from "../export/paged";
 import { exportMarkdown } from "../export/markdown";
 import { TOOLBAR_ACTIONS, applyTool } from "../ui/toolbar";
 import { useLineSync } from "../ui/linesync";
-import { applySecurityLevel, shareLink } from "../keyhandoff";
+import { applyNamedSecurityLevel, applySecurityLevel, shareLink } from "../keyhandoff";
 import { plainWebSocketAllowed } from "../transport/origin";
 
 const api = new Api("");
@@ -268,8 +268,9 @@ function JoinableRoom(props: RoomProps) {
           },
           onTtlMismatch: () => setTtlMismatch(true),
           onSecurityLevel: (level) => {
-            if (!props.roomIdHex || !props.fragment) return;
-            applySecurityLevel(props.roomIdHex, props.fragment, level);
+            if (props.name) applyNamedSecurityLevel(props.name, level);
+            else if (props.roomIdHex && props.fragment) applySecurityLevel(props.roomIdHex, props.fragment, level);
+            else return;
             if (level === "highest" && !highestNoticeShown) setHighestNotice(true);
           },
           onShredRejected: (reason) => {
@@ -474,13 +475,21 @@ function JoinableRoom(props: RoomProps) {
     // The address bar no longer holds the key, so the link is rebuilt from
     // the copy in memory. A shared room's address is the whole link: its
     // passphrase is never part of it.
+    // A shared room's address is its name, which a highest-security room keeps
+    // out of the address bar; its passphrase is never part of the link.
     const link =
       props.roomIdHex && props.fragment
         ? shareLink(props.roomIdHex, props.fragment)
-        : window.location.href;
+        : props.name
+          ? `${window.location.origin}/${props.name}`
+          : window.location.href;
     void navigator.clipboard.writeText(link);
-    announce("Copied. The part after the # is the key. Send the whole thing.");
-  }, [props.roomIdHex, props.fragment]);
+    announce(
+      props.name
+        ? "Copied the room's address. Send the passphrase separately, never alongside it."
+        : "Copied. The part after the # is the key. Send the whole thing.",
+    );
+  }, [props.roomIdHex, props.fragment, props.name]);
 
   if (phase.kind === "missing-key") return <MissingKey />;
 
@@ -681,9 +690,9 @@ function JoinableRoom(props: RoomProps) {
       {highestNotice && (
         <div className="banner" role="note">
           <span>
-            Highest security: this tab holds the key in memory only. Refreshing or closing it
-            forgets the key — to come back, paste the link into Join a room. Copy link first if
-            you need it.
+            {props.name
+              ? "Highest security: this room's name stays out of the address bar and browser history, and the passphrase is never stored. Refreshing or closing the tab leaves the room — to come back, type its name into Join a room. If your browser offers to save the passphrase, decline."
+              : "Highest security: this tab holds the key in memory only. Refreshing or closing it forgets the key — to come back, paste the link into Join a room. Copy link first if you need it."}
           </span>
           <button
             onClick={() => {

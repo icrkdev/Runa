@@ -10,7 +10,7 @@ import {
   verifierForAuthKey,
   type SecurityLevel,
 } from "../keys-session";
-import { openUnlistedRoom } from "../keyhandoff";
+import { openNamedRoom, openUnlistedRoom } from "../keyhandoff";
 import {
   generateDicewarePassphrase,
   generateRoomName,
@@ -128,6 +128,10 @@ function JoinForm() {
           // bar or the browser's history. A room on another server has to be
           // opened there, by its link.
           openUnlistedRoom(target.roomIdHex, target.fragment);
+        } else if (target.kind === "named" && !target.elsewhere) {
+          // Likewise the name: it reaches the address only once the room says
+          // it is an everyday one.
+          openNamedRoom(target.name);
         } else if (opens) {
           window.location.assign(target.href);
         }
@@ -199,7 +203,15 @@ function ExpiryPicker({ onChange }: { onChange: (ttl: TtlBody) => void }) {
 /// Chosen by whoever makes the room, sealed in its encrypted config, and so
 /// applied for everyone who opens it — a source does not have to know the
 /// setting exists to be covered by it.
-function SecurityPicker({ value, onChange }: { value: SecurityLevel; onChange: (l: SecurityLevel) => void }) {
+function SecurityPicker({
+  value,
+  onChange,
+  kind = "private",
+}: {
+  value: SecurityLevel;
+  onChange: (l: SecurityLevel) => void;
+  kind?: "private" | "shared";
+}) {
   return (
     <div className="field">
       <label className="micro-label" htmlFor="security">SECURITY</label>
@@ -208,9 +220,13 @@ function SecurityPicker({ value, onChange }: { value: SecurityLevel; onChange: (
         <option value="highest">Highest security — the key is never stored</option>
       </select>
       <p className="hint">
-        {value === "everyday"
-          ? "Either way the key never sits in the address bar or browser history. Everyday keeps it for this tab, so a refresh works."
-          : "The key lives only in the open tab. Refreshing or closing it forgets the key; to come back, paste the link into Join a room. Choose this when someone could be harmed by being linked to this room."}
+        {kind === "private"
+          ? value === "everyday"
+            ? "Either way the key never sits in the address bar or browser history. Everyday keeps it for this tab, so a refresh works."
+            : "The key lives only in the open tab. Refreshing or closing it forgets the key; to come back, paste the link into Join a room. Choose this when someone could be harmed by being linked to this room."
+          : value === "everyday"
+            ? "The passphrase is never stored either way. Everyday gives the room its name as its address, so a refresh works and the address can be shared."
+            : "The name never goes in the address bar or browser history, and the browser is asked not to save the passphrase. A refresh leaves the room; to come back, type its name into Join a room. Choose this when someone could be harmed by being linked to this room."}
       </p>
     </div>
   );
@@ -266,6 +282,7 @@ function NamedForm() {
   const [error, setError] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [ttl, setTtl] = useState<TtlBody>(TTL_PRESETS[1].value);
+  const [level, setLevel] = useState<SecurityLevel>("everyday");
 
   const verdict = passphrase ? estimatePassphrase(passphrase) : null;
   const nameIssue = name ? nameProblem(suffixOn ? name : name.replace(/-[0-9a-f]{4}$/, "")) : null;
@@ -317,9 +334,10 @@ function NamedForm() {
         kdf: { m_kib: 65536, t: 3, p: 1, salt: b64Of(salt) },
         ttl,
         ceilingOptout: ttl.kind === "none",
-        configBlob: await encryptRoomConfig(contentKey, ttl, ttl.kind === "none"),
+        configBlob: await encryptRoomConfig(contentKey, ttl, ttl.kind === "none", level),
       });
-      window.location.assign(`/${finalName}`);
+      if (level === "highest") openNamedRoom(finalName);
+      else window.location.assign(`/${finalName}`);
     } catch (e) {
       setError(describeError(e));
       setBusy(false);
@@ -376,7 +394,11 @@ function NamedForm() {
           <input
             id="passphrase"
             type="password"
-            autoComplete="new-password"
+            // "new-password" invites the browser to save it, and a password
+            // manager with sync carries it off the device. A highest-security
+            // room asks it not to; browsers may still offer, which the hint
+            // below says.
+            autoComplete={level === "highest" ? "off" : "new-password"}
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
@@ -394,6 +416,7 @@ function NamedForm() {
         )}
       </div>
       <ExpiryPicker onChange={setTtl} />
+      <SecurityPicker value={level} onChange={setLevel} kind="shared" />
       <button className="primary" onClick={create} disabled={busy}>
         {busy ? "Creating…" : "Create shared room"}
       </button>
