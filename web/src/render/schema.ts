@@ -29,6 +29,13 @@ export const RUNA_SCHEMA = {
     // Mermaid actually emits, not something inherited from a library that no
     // longer runs.
     "math", "annotation", "semantics", "mrow", "mi", "mn", "mo", "msup", "msub", "mfrac", "mroot", "msqrt", "mtext", "mspace", "mstyle", "munderover", "munder", "mover", "mmultiscripts", "mprescripts", "mtable", "mtr", "mtd", "mphantom",
+    // Three KaTeX emits that were missing, so the sanitizer dropped the element
+    // and kept its children: \int_0^\infty came out as "∫ 0 ∞". msubsup is a
+    // sub- and superscript on one base (integral and sum limits); menclose is
+    // \cancel and \boxed; mpadded is \hphantom and labelled arrows. None can
+    // carry a URL or script. Found by rendering a corpus and listing every
+    // element the schema stripped.
+    "msubsup", "menclose", "mpadded",
     "details", "summary", "time", "var",
   ],
   attributes: {
@@ -52,6 +59,19 @@ export const RUNA_SCHEMA = {
     div: ["className", "aria-hidden"],
     annotation: [["encoding"]],
     math: [["xmlns", "http://www.w3.org/1998/Math/MathML"], "display"],
+    // Without `notation`, MathML draws a long-division sign, so \boxed{y} would
+    // render as something else entirely. Only the values KaTeX emits.
+    menclose: [["notation", /^(box|updiagonalstrike|downdiagonalstrike|horizontalstrike)( (updiagonalstrike|downdiagonalstrike))?$/]],
+    // Lengths only. `mathbackground` (\colorbox) stays out for the same reason
+    // \color does: text coloured to match the page can hide content in a
+    // shared document.
+    mpadded: [
+      ["width", /^[+-]?\d*\.?\d+(em|ex|pt|px|mu)?$/],
+      ["height", /^[+-]?\d*\.?\d+(em|ex|pt|px|mu)?$/],
+      ["depth", /^[+-]?\d*\.?\d+(em|ex|pt|px|mu)?$/],
+      ["lspace", /^[+-]?\d*\.?\d+(em|ex|pt|px|mu)?$/],
+      ["voffset", /^[+-]?\d*\.?\d+(em|ex|pt|px|mu)?$/],
+    ],
     details: ["open"],
   },
   strip: [
