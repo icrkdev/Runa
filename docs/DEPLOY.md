@@ -2,11 +2,8 @@
 
 This is the path for a small VM shared with other services. It is what the
 `scripts/deploy-oracle.sh` script automates; read this once, then use the
-script.
-
-> **Just want to deploy?** Follow
-> [`detailed_instructions.md`](../detailed_instructions.md) — every command
-> labelled with where it runs. This file is the reasoning behind it.
+script. Despite its name the script is not tied to Oracle Cloud — any Ubuntu
+VM you can SSH into with `sudo` will do.
 
 ## Two supported paths
 
@@ -71,6 +68,7 @@ Re-run it to ship an update; it is idempotent. Other knobs:
 | `RUNA_ROOMS` / `RUNA_PEERS` | `512` / `32` | |
 | `RUNA_CONNS` / `RUNA_QUEUE_KB` | `512` / `1024` | |
 | `RUNA_NEIGHBOUR_URL` | *(unset)* | a service to health-check afterwards |
+| `RUNA_SKIP_WEB_BUILD` | `0` | `1` ships the `web/dist` you already built instead of rebuilding it |
 
 The memory knobs move together: the script writes the `RUNA_MAX_*` values
 into `/etc/runa/runa.env` and patches `MemoryMax`/`MemoryHigh` in the unit

@@ -38,10 +38,17 @@ cargo run --release -p runa-server   # then open http://127.0.0.1:3000
 bash scripts/verify.sh
 ```
 
-It runs the server tests, clippy at `-D warnings`, the web suite, a type check,
-the production build, a wire-level smoke test that asserts a known string never
-appears in captured traffic, and a two-peer headless browser run under the real
-CSP. All of it must pass.
+It runs the server tests, clippy at `-D warnings`, the Linux cross-compile
+check, the web suite, a type check, lint, the production build, a check that
+the built page references no third-party origin, a wire-level smoke test that
+asserts a known string never appears in captured traffic, and a two-peer
+headless browser run under the real CSP. All of it must pass. CI additionally
+runs the browser test in Firefox and WebKit, builds the Docker image, and runs
+`cargo-deny` and `cargo-audit`.
+
+Fuzzing is not part of the gate. If you change frame parsing, room names, log
+compaction or the room-creation body, run the fuzz workflow (Actions → fuzz →
+Run workflow) or `cargo +nightly fuzz run <target>` in `server/`.
 
 The browser run is not optional theatre. Unit tests cannot see Content Security
 Policy or Trusted Types, and that run has already caught a policy allow-list

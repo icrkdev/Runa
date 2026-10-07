@@ -78,14 +78,21 @@ Third-party components
 
 This product bundles the following, each under its own licence:
 
-  yjs                    MIT        CRDT document model
-  monaco-editor          MIT        Editor
-  Space Grotesk          OFL-1.1    Display and interface typeface
-  IBM Plex Mono          OFL-1.1    Monospace typeface
-  hash-wasm              MIT        Argon2id
+  yjs, y-protocols       MIT           CRDT document model, presence
+  monaco-editor          MIT           Editor
+  React, React DOM       MIT           Interface
+  Space Grotesk          OFL-1.1       Display and interface typeface
+  IBM Plex Mono          OFL-1.1       Monospace typeface
+  hash-wasm              MIT           Argon2id
+  cbor2                  MIT           Canonical encoding of signed shred votes
   unified / remark / rehype
-                         MIT        Markdown pipeline
-  KaTeX                  MIT        Mathematics rendering
+                         MIT           Markdown pipeline
+  KaTeX                  MIT           Mathematics rendering
+  highlight.js           BSD-3-Clause  Code highlighting
+  Paged.js               MIT           PDF export (loaded only when used)
+
+The full licence text of each ships inside its npm package. Licence comments a
+package marks for preservation are kept in the built bundle.
 
 Server dependencies are enumerated with their licences in Cargo.lock and
 checked in CI by cargo-deny; see deny.toml for the allow-list.

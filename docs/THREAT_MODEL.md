@@ -151,6 +151,18 @@ memory regardless; JavaScript strings are immutable and cannot be individually
 zeroized, which is why client wipe ends in realm destruction via hard
 navigation. `zeroize` narrows a window; it does not close a door.
 
+The unlisted room key travels in the URL fragment, and stays there while the
+room is open. A fragment is never sent to the server, but the browser records
+the full URL — fragment included — in its history when the page is opened, and
+a browser with sync turned on copies that history to its vendor's servers.
+Shred replaces the address on the page (`history.replaceState` to the
+tombstone), which removes it from the back button but not from history already
+written. Anyone who later reads a participant's browser history, or their sync
+account, holds the key to every unlisted room they opened and can read any
+room still alive. This sits between A4 and A7: it needs no malware, only the
+history. A private window or Tor Browser records none. The README says so
+under "If your safety depends on it".
+
 Delivery acknowledgements come from the server and are not authenticated. A
 client stops resending an edit once the server says it stored it, so a hostile
 server can confirm an edit and then throw it away. That is the same power as
