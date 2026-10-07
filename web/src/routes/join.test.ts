@@ -11,6 +11,8 @@ describe("reading what someone pastes into Join", () => {
       kind: "private",
       href: `/r/${ID}${KEY}`,
       elsewhere: null,
+      roomIdHex: ID,
+      fragment: KEY,
     });
   });
 
@@ -23,7 +25,12 @@ describe("reading what someone pastes into Join", () => {
       `r/${ID}${KEY}`,
       `${ID}${KEY}`,
     ]) {
-      expect(readJoinTarget(pasted, HERE), pasted).toMatchObject({ kind: "private", href: `/r/${ID}${KEY}` });
+      expect(readJoinTarget(pasted, HERE), pasted).toMatchObject({
+        kind: "private",
+        href: `/r/${ID}${KEY}`,
+        roomIdHex: ID,
+        fragment: KEY,
+      });
     }
   });
 
@@ -32,6 +39,8 @@ describe("reading what someone pastes into Join", () => {
       kind: "private",
       href: `https://other.example/r/${ID}${KEY}`,
       elsewhere: "other.example",
+      roomIdHex: ID,
+      fragment: KEY,
     });
   });
 

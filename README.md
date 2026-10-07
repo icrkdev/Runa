@@ -403,26 +403,40 @@ You should see the RÚNA landing page with a dark background, a choice between
 2. Pick an expiry time (how long until the room self-destructs):
    - **30 min / 1 hour / 8 hours** after last activity
    - **24 hours** from creation
+   - **No expiry** — until it is shredded, or has sat empty with no edits for
+     12 hours (`RUNA_IDLE_CEILING`)
 
    Whichever you pick, a room also ends the moment you shred it. A server
    restart no longer has to end it — see
    [Running the server behind it](#running-the-server-behind-it).
 
-3. Click **Create unlisted room** or fill in a name + passphrase and click
-   **Create named room**
+3. For an unlisted room, pick its **Security**:
+   - **Everyday** (default) — a refresh keeps you in the room.
+   - **Highest security** — the key is never stored on anyone's device, even
+     for the open tab. A refresh forgets it, and coming back means pasting the
+     link into **Join a room**. Choose this when someone could be harmed by
+     being linked to the room.
+
+   Either way, the key never sits in the address bar or the browser's
+   history. The setting is sealed inside the room's encrypted configuration,
+   so it applies to everyone who opens the room — and the server cannot tell
+   which rooms chose which.
+
+4. Click **Create private room** or fill in a name + passphrase and click
+   **Create shared room**
 
 ### Sharing a room
 
-After creating a room, look at the URL in your browser's address bar. It looks
-something like:
+Click **Copy link** in the status bar. You get something like:
 
 ```
 http://localhost:5173/r/a1b2c3d4e5f6...#k=AbCdEf123456&s=GhIjKl789012
 ```
 
-**The entire URL including everything after the `#` is the room's key.** Send
-the whole thing to people you want to invite. You can use the **Copy link**
-button in the status bar.
+**The entire link including everything after the `#` is the room's key.** Send
+the whole thing to people you want to invite. Don't copy it from the address
+bar: RÚNA keeps the key out of there, so the address alone is `/r/…` with no
+key, and won't open the room.
 
 > ⚠️ **Important:** Some chat apps (Slack, Discord, Teams) strip the part
 > after the `#`. Always test the link yourself before sharing it, or copy-paste
@@ -814,7 +828,8 @@ and sets `RUNA_TRUSTED_PROXY=1`.
 | Only one client can connect behind a proxy | `RUNA_TRUSTED_PROXY` is not set | Every request appears to come from the proxy, so all clients share one rate-limit bucket. Set `RUNA_TRUSTED_PROXY=1` |
 | "Your network already has as many connections to this server as one address may" | More than `RUNA_MAX_CONNS_PER_IP` sockets from one address: many people behind one office or carrier address, or `RUNA_TRUSTED_PROXY` missing behind a proxy | Set `RUNA_TRUSTED_PROXY=1` behind a proxy; raise `RUNA_MAX_CONNS_PER_IP` if many people genuinely share an address |
 | Browser shows "Connection refused" | The Rust server isn't running | Check that `cargo run --release -p runa-server` is still active |
-| "This link is missing its key" | The `#k=…&s=…` part was stripped from the URL | Ask whoever shared the room for the full link including everything after the `#` |
+| "This link is missing its key" | You refreshed a **Highest security** room, which forgets its key by design — or the `#k=…&s=…` part was stripped from the link | Paste the full link into **Join a room**. If you don't have it, ask whoever shared the room for the whole link, including everything after the `#` |
+| Copying the address bar gives a link that doesn't open the room | RÚNA keeps the key out of the address bar | Use **Copy link** in the room's status bar |
 | "This server is at its connection limit. Retrying…" | The server is at `RUNA_MAX_CONNECTIONS` | It retries on its own. On your own server, raise the limit if the host has the memory — see [Sizing it for the host](#sizing-it-for-the-host) |
 | "This server is restarting for an update. Try again in a minute." | You tried to create a room during a restart countdown | Wait a minute. Rooms that were open carry over if the server has `RUNA_RESTART_KEY` set |
 | "This browser could not run Argon2…" | The browser cannot run the WebAssembly that protects a named room's passphrase, or ran out of memory doing it | Use an up-to-date browser and close other tabs. RÚNA refuses rather than falling back to a weaker key |
@@ -888,11 +903,11 @@ people. Read this before relying on it.
   censor can block the address outright.
 - **The link is the key.** Anyone who gets the full link can read the room.
   That includes anyone who can read the chat where it was sent.
-- **Your browser keeps the link.** While a room is open its key sits in the
-  address bar, and the browser records the full link in its history. With
-  browser sync turned on, that history can leave your device. Shredding
-  replaces the address on the page, but not entries your browser already
-  recorded.
+- **A clicked link may already be in your history.** RÚNA never leaves the
+  key in the address bar, and a room opened from the front page — created
+  there, or joined by pasting the link — never puts it there at all. But when
+  you *click* a link, your browser may record it, key included, before RÚNA's
+  page has loaded. With browser sync on, that history can leave your device.
 - **Copies outside RÚNA.** Screenshots, the clipboard, exported PDFs, and
   anything on a seized or compromised device are beyond its reach.
 - **Whoever runs the server.** A malicious or compelled operator can serve you
@@ -905,14 +920,17 @@ people. Read this before relying on it.
    RÚNA needs JavaScript, so it will not run at Tor Browser's *Safest*
    security level. Failing Tor, at least use a private window, which also
    keeps no history.
-2. **Run your own server**, or use one run by someone you trust. The
+2. **Paste links into Join a room instead of clicking them**, so the key
+   never enters your browser's history. Make rooms for people at risk with
+   **Highest security**, so nothing on their device keeps the key either.
+3. **Run your own server**, or use one run by someone you trust. The
    [Quick start](#quick-start) is one command.
-3. **Send the link only over an end-to-end encrypted channel with
+4. **Send the link only over an end-to-end encrypted channel with
    disappearing messages**, and never in the same message as anything that
    identifies the room's purpose.
-4. **Use a named room's passphrase only out loud or in person**, never
+5. **Use a named room's passphrase only out loud or in person**, never
    alongside its name.
-5. **Shred when you are done**, and close the browser.
+6. **Shred when you are done**, and close the browser.
 
 If you work in a place where this matters and something here is unclear or
 wrong for your situation, say so in a [private report](docs/SECURITY.md) —

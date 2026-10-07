@@ -8,6 +8,16 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Security
 
+- **A room's key no longer sits in the address bar, or in browser history.**
+  The key is the part of the link after `#`. It never reached the server, but
+  it stayed in the address bar for as long as the room was open, and browsers
+  write the full address into their history — which, with sync on, leaves the
+  device. A room created on the front page, or joined by pasting its link
+  into Join, now gets the key in memory and never shows it in the address. A
+  room opened from a clicked link has it removed as the page starts; the
+  browser may still have recorded the address it was opened with, which no
+  page can reach, so people at risk should paste links into Join. Copy link
+  builds the full link from memory.
 - **The server remembered every visitor's address until it restarted.**
   Nothing was logged or written to disk, but the rate-limit tables held each
   client's IP address in plain text and dropped entries only once a table
@@ -50,6 +60,15 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Added
 
+- **A security level for each private room.** Whoever creates it chooses
+  *Everyday*, where a refresh keeps you in the room, or *Highest security*,
+  where the key is never stored on anyone's device, not even for the open
+  tab: a refresh forgets it, and coming back means pasting the link into
+  Join. The choice is sealed in the room's encrypted configuration, so it
+  covers everyone who opens the room and the server cannot tell which rooms
+  made which. A configuration that is missing or will not open is treated as
+  Highest, so a server cannot downgrade a room by stripping it.
+
 - **Join a room from the front page.** Paste the link someone sent you, or type
   a shared room's name. It reads links with their `https://` lost, bare room
   ids, old `/n/` addresses and stray spaces, says what it found before opening
@@ -86,6 +105,11 @@ section — so this file is not documentation of the release, it is part of it.
   confirmed able to fail by reintroducing a bug in each.
 
 ### Fixed
+
+- **"No expiry" said a room dies when everyone leaves, or at a restart.**
+  It ends when shredded, or after sitting empty with no edits for 12 hours,
+  and a restart hands it over like any other room. The README had briefly
+  dropped the option altogether.
 
 - **Edits could be lost four ways**: typing while offline, typing into a
   connection that had died without the browser noticing, typing just as a
