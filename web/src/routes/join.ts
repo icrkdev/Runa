@@ -1,5 +1,6 @@
 import { parseFragment } from "../keys-session";
 import { nameProblem } from "./name-rules";
+import { cleartextIsSafe, isPlainHostname } from "./navigate";
 
 /// What someone typed or pasted into "Join a room", and where it leads.
 export type JoinTarget =
@@ -32,6 +33,21 @@ export function readJoinTarget(raw: string, origin: string): JoinTarget {
   const url = asUrl(input, origin);
   if (url) {
     const elsewhere = url.origin === origin ? null : url.host;
+    // Turned away before anything else is read from the link. A RÚNA link
+    // never carries a user name: `https://runa.example@evil.example/…`
+    // opens evil.example, whatever it looks like at a glance.
+    if (url.username || url.password) {
+      return { kind: "unrecognised", reason: `That link really leads to ${url.host} — everything before the “@” is a disguise. RÚNA links never contain an “@”.` };
+    }
+    if (!isPlainHostname(url.hostname)) {
+      return { kind: "unrecognised", reason: "That link is not a RÚNA room." };
+    }
+    // A room's key handed to a page served in the clear is a key anyone on
+    // the network can read. This server's own address is already open, so
+    // only a room elsewhere is held to it.
+    if (elsewhere && url.protocol === "http:" && !cleartextIsSafe(url.hostname)) {
+      return { kind: "unrecognised", reason: `That link uses plain http, so anyone on the network between you and ${url.host} could read the room’s key. Ask for its https link.` };
+    }
     const base = elsewhere ? url.origin : "";
     const path = url.pathname.replace(/\/+$/, "");
     const priv = path.match(/^\/r\/([0-9a-fA-F]{32})$/);
@@ -78,7 +94,7 @@ function asUrl(input: string, origin: string): URL | null {
   const withScheme = /^https?:\/\//i.test(input)
     ? input
     : /^[a-z0-9.-]+\.[a-z]{2,}(:\d+)?\//i.test(input) || /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\//i.test(input)
-      ? `${new URL(origin).protocol}//${input}`
+      ? `${schemeFor(input, origin)}//${input}`
       : null;
   if (!withScheme) return null;
   try {
@@ -87,4 +103,14 @@ function asUrl(input: string, origin: string): URL | null {
   } catch {
     return null;
   }
+}
+
+/// The scheme a link pasted without one most likely had: this page's own, if
+/// it names this server; plain http for an onion or this machine, which is
+/// how those are served; https for everything else, never a guess at http.
+function schemeFor(input: string, origin: string): string {
+  const here = new URL(origin);
+  const host = input.slice(0, input.indexOf("/")).toLowerCase();
+  if (host === here.host) return here.protocol;
+  return cleartextIsSafe(host.replace(/:\d+$/, "")) ? "http:" : "https:";
 }

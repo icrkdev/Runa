@@ -8,6 +8,15 @@ section — so this file is not documentation of the release, it is part of it.
 
 ### Security
 
+- **Join will not open a disguised or unencrypted link.** A link such as
+  `https://runa.vardrlabs.com@elsewhere.example/…` leads to the host after the
+  `@`, so Join now refuses any link with an `@` in its address and says where
+  it really goes. A room on another server reached over plain http would hand
+  its key to a page anyone on the network could rewrite, so Join opens http
+  links only to an onion address or to this machine, and reads a link pasted
+  without its scheme as https. Join and Create also check every address
+  once more just before the page moves: a path on this server, or a room
+  elsewhere that passes the same rules, and never `javascript:` or `data:`.
 - **A room's key no longer sits in the address bar, or in browser history.**
   The key is the part of the link after `#`. It never reached the server, but
   it stayed in the address bar for as long as the room was open, and browsers
