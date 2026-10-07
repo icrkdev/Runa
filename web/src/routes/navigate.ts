@@ -6,30 +6,30 @@
 /// this server or to an http(s) link — a room on another RÚNA server, which
 /// is the one place a pasted link is meant to lead elsewhere. Never to
 /// `javascript:`, `data:`, or a protocol-relative `//host` dressed as a path.
-export function navigableHref(href: string, origin: string): string | null {
+///
+/// A yes/no on the very string that gets opened, rather than a cleaned-up
+/// copy, so the check and the navigation cannot disagree about where it goes.
+export function isSafeDestination(href: string, origin: string = window.location.origin): boolean {
   if (/^\/(?![/\\])/.test(href)) {
     // Parse rather than trust the prefix: the URL parser drops tabs and
     // newlines and reads `\` as `/`, so only the resolved origin says where
     // a path really goes.
-    let url: URL;
     try {
-      url = new URL(href, origin);
+      return new URL(href, origin).origin === origin;
     } catch {
-      return null;
+      return false;
     }
-    return url.origin === origin ? `${url.pathname}${url.search}${url.hash}` : null;
   }
-  if (!/^https?:\/\//i.test(href)) return null;
+  if (!/^https?:\/\//i.test(href)) return false;
   try {
-    const url = new URL(href);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+    const { protocol } = new URL(href);
+    return protocol === "https:" || protocol === "http:";
   } catch {
-    return null;
+    return false;
   }
 }
 
-/// `location.assign`, but only to somewhere `navigableHref` allows.
+/// `location.assign`, but only to somewhere `isSafeDestination` allows.
 export function navigateTo(href: string): void {
-  const safe = navigableHref(href, window.location.origin);
-  if (safe !== null) window.location.assign(safe);
+  if (isSafeDestination(href)) window.location.assign(href);
 }
