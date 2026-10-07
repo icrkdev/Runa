@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { webcrypto as crypto } from "node:crypto";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chromium, firefox, webkit } from "playwright";
 
 /// Which engine this run drives. Chromium by default so a bare `npm run smoke`
@@ -505,8 +505,72 @@ async function main() {
       throw new Error(`[named] the room did not open with its own passphrase; the page shows: ${shown || "nothing"}`);
     }
     await joiner.close();
+
+    // An everyday shared room opened from Join gets its usual address once
+    // the room has said it is everyday, so it can be refreshed and shared.
+    const viaJoin = await makePage("named-via-join");
+    await viaJoin.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await viaJoin.waitForSelector("#join-room", { timeout: 10_000 });
+    await viaJoin.fill("#join-room", takenName);
+    await viaJoin.press("#join-room", "Enter");
+    await viaJoin.waitForSelector("#pp", { timeout: 15_000 });
+    await viaJoin.fill("#pp", passphrase);
+    await viaJoin.click('button:has-text("Enter room")');
+    await viaJoin.waitForSelector(".monaco-editor", { timeout: 60_000 });
+    await viaJoin.waitForFunction((n) => location.pathname === `/${n}`, takenName, { timeout: 10_000 }).catch(async () => {
+      throw new Error(`[named] an everyday room opened from Join never took its address: ${await viaJoin.evaluate(() => location.pathname)}`);
+    });
+    await viaJoin.close();
     await first.close();
     await second.close();
+  }
+
+  // A highest-security shared room: its name never reaches the address bar,
+  // so nothing in the browser's history says which room this was.
+  {
+    const secretName = `e2e-quiet-${randomBytes(3).toString("hex")}`;
+    const maker = await makePage("named-highest");
+    await maker.setViewportSize({ width: 1280, height: 900 });
+    await maker.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await maker.click("text=Shared name");
+    await maker.waitForSelector("text=Create shared room", { timeout: 5000 });
+    const suffix = maker.locator(".checkbox-row input[type=checkbox]");
+    if (await suffix.isChecked()) await suffix.uncheck();
+    await maker.fill("#room-name", secretName);
+    await maker.selectOption("#security", "highest");
+    if ((await maker.getAttribute("#passphrase", "autocomplete")) !== "off") {
+      throw new Error("[named-highest] the passphrase field still invites the browser to save it");
+    }
+    await maker.click('button:has-text("Generate")');
+    const phrase = await maker.inputValue("#passphrase");
+    await maker.click('button:has-text("Create shared room")');
+    await maker.waitForSelector("#pp", { timeout: 60_000 });
+    const enter = async (page) => {
+      await page.fill("#pp", phrase);
+      await page.click('button:has-text("Enter room")');
+      await page.waitForSelector(".monaco-editor", { timeout: 60_000 });
+      await page.waitForSelector("text=Highest security: this room's name stays out", { timeout: 10_000 });
+      const href = await page.evaluate(() => location.href);
+      if (href.includes(secretName) || new URL(href).pathname !== "/") {
+        throw new Error(`[named-highest] the room's name reached the address: ${href}`);
+      }
+    };
+    await enter(maker);
+    // A refresh leaves the room, by design: nothing on the device remembers it.
+    await maker.reload({ waitUntil: "domcontentloaded" });
+    await maker.waitForSelector(".landing", { timeout: 10_000 }).catch(() => {
+      throw new Error("[named-highest] a refresh did not leave the room");
+    });
+    await maker.close();
+
+    const guest = await makePage("named-highest-join");
+    await guest.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await guest.waitForSelector("#join-room", { timeout: 10_000 });
+    await guest.fill("#join-room", secretName);
+    await guest.press("#join-room", "Enter");
+    await guest.waitForSelector("#pp", { timeout: 15_000 });
+    await enter(guest);
+    await guest.close();
   }
 
   await landing.close();
@@ -1565,6 +1629,7 @@ async function main() {
   console.log(`BROWSER E2E OK (${ENGINE_NAME})`);
   console.log(`  the key never stays in the address: Join, a clicked link, and room creation`);
   console.log(`  highest security: not saved, forgotten on refresh, Copy link still whole`);
+  console.log(`  shared rooms: highest keeps the name out of the address; everyday takes it after joining`);
   console.log(`  two headless peers joined ${roomIdHex.slice(0, 8)}…`);
   console.log(`  typed concurrently; Alice's preview converged to include Bob's text`);
   console.log(`  status bars showed a 2-person count on both sides`);

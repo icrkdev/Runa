@@ -410,17 +410,23 @@ You should see the RÚNA landing page with a dark background, a choice between
    restart no longer has to end it — see
    [Running the server behind it](#running-the-server-behind-it).
 
-3. For an unlisted room, pick its **Security**:
+3. Pick the room's **Security**:
    - **Everyday** (default) — a refresh keeps you in the room.
-   - **Highest security** — the key is never stored on anyone's device, even
-     for the open tab. A refresh forgets it, and coming back means pasting the
-     link into **Join a room**. Choose this when someone could be harmed by
-     being linked to the room.
+   - **Highest security** — choose this when someone could be harmed by being
+     linked to the room.
+     - *Private room:* the key is never stored on anyone's device, even for
+       the open tab. A refresh forgets it; coming back means pasting the link
+       into **Join a room**.
+     - *Shared room:* the room's name never goes in the address bar or
+       browser history, and the browser is asked not to save the passphrase.
+       A refresh leaves the room; coming back means typing its name into
+       **Join a room**.
 
-   Either way, the key never sits in the address bar or the browser's
-   history. The setting is sealed inside the room's encrypted configuration,
-   so it applies to everyone who opens the room — and the server cannot tell
-   which rooms chose which.
+   Either way, a private room's key never sits in the address bar or the
+   browser's history, and a shared room's passphrase is never stored. The
+   setting is sealed inside the room's encrypted configuration, so it applies
+   to everyone who opens the room — and the server cannot tell which rooms
+   chose which.
 
 4. Click **Create private room** or fill in a name + passphrase and click
    **Create shared room**

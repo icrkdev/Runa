@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Landing } from "./routes/Landing";
 import { Room } from "./routes/Room";
-import { takeRoomKey } from "./keyhandoff";
+import { takePendingNamedRoom, takeRoomKey } from "./keyhandoff";
 
 type Route =
   | { kind: "landing" }
@@ -23,6 +23,10 @@ function parseRoute(): Route {
   // this point is already name-shaped.
   const bare = path.match(/^\/([a-z0-9-]+)\/?$/);
   if (bare) return { kind: "named", name: bare[1] };
+  // A shared room opened from inside the app sits at `/` with its name in
+  // memory, so the name never has to enter the address.
+  const handedOver = path === "/" ? takePendingNamedRoom() : null;
+  if (handedOver) return { kind: "named", name: handedOver };
   return { kind: "landing" };
 }
 

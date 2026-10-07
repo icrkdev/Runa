@@ -109,3 +109,43 @@ describe("which level a member applies", () => {
     expect(securityLevelOf(undefined)).toBe("highest");
   });
 });
+
+describe("where a shared room's name goes", () => {
+  it("is handed over in memory, with the address left at /", async () => {
+    const { openNamedRoom, takePendingNamedRoom } = await load();
+    const seen: string[] = [];
+    const onPop = () => seen.push(location.pathname);
+    window.addEventListener("popstate", onPop);
+    openNamedRoom("copper-lantern");
+    window.removeEventListener("popstate", onPop);
+    expect(location.pathname).toBe("/");
+    expect(seen).toEqual(["/"]);
+    expect(takePendingNamedRoom()).toBe("copper-lantern");
+  });
+
+  it("is read once, so Back or a refresh lands on the front page", async () => {
+    const { openNamedRoom, takePendingNamedRoom } = await load();
+    openNamedRoom("copper-lantern");
+    expect(takePendingNamedRoom()).toBe("copper-lantern");
+    expect(takePendingNamedRoom()).toBeNull();
+    const afterRefresh = await load();
+    expect(afterRefresh.takePendingNamedRoom()).toBeNull();
+  });
+
+  it("takes its own address in an everyday room, and stays out of it in a highest one", async () => {
+    const { applyNamedSecurityLevel } = await load();
+    applyNamedSecurityLevel("copper-lantern", "everyday");
+    expect(location.pathname).toBe("/copper-lantern");
+    applyNamedSecurityLevel("copper-lantern", "highest");
+    expect(location.pathname).toBe("/");
+    expect(location.href).not.toContain("copper-lantern");
+  });
+
+  it("is taken out of an address it arrived in, once the room says highest", async () => {
+    history.replaceState(null, "", "/copper-lantern");
+    const { applyNamedSecurityLevel } = await load();
+    applyNamedSecurityLevel("copper-lantern", "highest");
+    expect(location.pathname).toBe("/");
+  });
+});
+

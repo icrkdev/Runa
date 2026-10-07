@@ -86,3 +86,31 @@ export function applySecurityLevel(
 export function shareLink(roomIdHex: string, fragment: string): string {
   return `${window.location.origin}/r/${roomIdHex}${fragment}`;
 }
+
+/// A shared room opened from inside RÚNA (created on the front page, or typed
+/// into Join a room). Its address would be its name, so it opens at `/` with
+/// the name in memory, read once by the route, and only reaches the address
+/// once the room says it may (`applyNamedSecurityLevel`).
+let pendingNamed: string | null = null;
+
+export function openNamedRoom(name: string): void {
+  pendingNamed = name;
+  history.pushState(null, "", "/");
+  window.dispatchEvent(new PopStateEvent("popstate", { state: null }));
+}
+
+/// The name handed over by `openNamedRoom`, once. A second read, a refresh,
+/// or Back to this entry gets nothing, and lands on the front page.
+export function takePendingNamedRoom(): string | null {
+  const name = pendingNamed;
+  pendingNamed = null;
+  return name;
+}
+
+/// An everyday shared room takes its usual address, `/<name>`, so it can be
+/// refreshed and shared. A highest-security one keeps the name out: `/`.
+export function applyNamedSecurityLevel(name: string, level: SecurityLevel): void {
+  const target = level === "highest" ? "/" : `/${name}`;
+  if (window.location.pathname !== target) history.replaceState(null, "", target);
+}
+

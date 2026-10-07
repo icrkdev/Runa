@@ -65,4 +65,51 @@ describe("reading what someone pastes into Join", () => {
     expect(readJoinTarget("javascript:alert(1)", HERE)).toMatchObject({ kind: "unrecognised" });
     expect(readJoinTarget(`ftp://x.example/r/${ID}${KEY}`, HERE)).toMatchObject({ kind: "unrecognised" });
   });
+
+  it("will not be fooled by an address that hides its real host behind an @", () => {
+    for (const pasted of [
+      `https://runa.example.com@evil.example/r/${ID}${KEY}`,
+      "https://runa.example.com:pw@evil.example/copper-lantern",
+    ]) {
+      const t = readJoinTarget(pasted, HERE);
+      expect(t, pasted).toMatchObject({ kind: "unrecognised" });
+      if (t.kind === "unrecognised") expect(t.reason, pasted).toContain("evil.example");
+    }
+    // Without a scheme it is not read as a link at all.
+    expect(readJoinTarget("runa.example.com@evil.example/copper-lantern", HERE)).toMatchObject({ kind: "unrecognised" });
+  });
+
+  it("will not hand a key to a room served in the clear", () => {
+    for (const pasted of [`http://other.example/r/${ID}${KEY}`, "http://other.example/copper-lantern", `http://192.168.1.5/r/${ID}${KEY}`]) {
+      const t = readJoinTarget(pasted, HERE);
+      expect(t, pasted).toMatchObject({ kind: "unrecognised" });
+      if (t.kind === "unrecognised") expect(t.reason, pasted).toContain("plain http");
+    }
+  });
+
+  it("opens an onion, or this machine, over http — the two places that is safe", () => {
+    const onion = "xv5fx5v7kfatx7sg3ws7o3rqaixfndxmp2mplinkwdt67ghzi5rltgad.onion";
+    expect(readJoinTarget(`http://${onion}/r/${ID}${KEY}`, HERE)).toMatchObject({ kind: "private", elsewhere: onion });
+    expect(readJoinTarget(`${onion}/copper-lantern`, HERE)).toMatchObject({ kind: "named", href: `http://${onion}/copper-lantern` });
+    expect(readJoinTarget(`http://localhost:3000/r/${ID}${KEY}`, HERE)).toMatchObject({ kind: "private", elsewhere: "localhost:3000" });
+  });
+
+  it("reads a link pasted without its scheme as https, even from a page served over http", () => {
+    const onionPage = "http://xv5fx5v7kfatx7sg3ws7o3rqaixfndxmp2mplinkwdt67ghzi5rltgad.onion";
+    expect(readJoinTarget(`other.example/r/${ID}${KEY}`, onionPage)).toMatchObject({
+      kind: "private",
+      href: `https://other.example/r/${ID}${KEY}`,
+    });
+    expect(readJoinTarget("xv5fx5v7kfatx7sg3ws7o3rqaixfndxmp2mplinkwdt67ghzi5rltgad.onion/copper-lantern", onionPage)).toMatchObject({
+      kind: "named",
+      href: "/copper-lantern",
+      elsewhere: null,
+    });
+  });
+
+  it("turns away a host no server could have", () => {
+    for (const pasted of ['https://o"ther.example/copper-lantern', "https://other..example/copper-lantern", "https://a&b.example/copper-lantern"]) {
+      expect(readJoinTarget(pasted, HERE), pasted).toMatchObject({ kind: "unrecognised" });
+    }
+  });
 });
