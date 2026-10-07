@@ -55,8 +55,10 @@ function waitForProcessExit(proc) {
 /// a superseding navigation releases it.
 ///
 /// Recovery arms only on that exact signature, and only in Firefox: five
-/// seconds in, the page still answers, is at precisely the requested URL and
-/// reports a complete document. Anything else keeps the original navigation
+/// seconds in, the page still answers, is at the requested URL and reports a
+/// complete document. "The requested URL" ignores the fragment, because the
+/// app takes the key out of the address bar as it starts (keyhandoff.ts): a
+/// room page that loaded correctly is at `/r/<id>`, never `/r/<id>#k=…`. Anything else keeps the original navigation
 /// and its verdict. Every recovery is written to the log, and the room still
 /// has to come up — each caller waits for the editor next.
 ///
@@ -77,7 +79,7 @@ async function gotoRoom(page, label, url) {
   if (early !== "slow") throw new Error(`[${label}] ${String(early.message).split("\n")[0]}`);
 
   const probe = ENGINE_NAME === "firefox" ? await probeDocument(page) : null;
-  if (!probe || probe.href !== url || probe.ready !== "complete") {
+  if (!probe || withoutFragment(probe.href) !== withoutFragment(url) || probe.ready !== "complete") {
     try {
       await nav;
       return;
@@ -86,6 +88,10 @@ async function gotoRoom(page, label, url) {
     }
   }
   await releaseStuckNavigation(page, label, url);
+}
+
+function withoutFragment(href) {
+  return typeof href === "string" ? href.split("#")[0] : href;
 }
 
 async function probeDocument(page) {
