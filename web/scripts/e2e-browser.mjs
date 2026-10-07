@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { webcrypto as crypto } from "node:crypto";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chromium, firefox, webkit } from "playwright";
 
 /// Which engine this run drives. Chromium by default so a bare `npm run smoke`
@@ -528,7 +528,7 @@ async function main() {
   // A highest-security shared room: its name never reaches the address bar,
   // so nothing in the browser's history says which room this was.
   {
-    const secretName = `e2e-quiet-${Math.random().toString(16).slice(2, 8)}`;
+    const secretName = `e2e-quiet-${randomBytes(3).toString("hex")}`;
     const maker = await makePage("named-highest");
     await maker.setViewportSize({ width: 1280, height: 900 });
     await maker.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
