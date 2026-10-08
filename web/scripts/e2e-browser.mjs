@@ -38,8 +38,8 @@ function waitForProcessExit(proc) {
   return new Promise((resolve) => proc.once("exit", resolve));
 }
 
-/// Open a room, recovering from a Playwright bug that strands Firefox
-/// navigations.
+/// Open a page of the app — the front page or a room — recovering from a
+/// Playwright bug that strands Firefox navigations.
 ///
 /// On the Linux runner Firefox timed out opening a room page on four runs, at
 /// three different pages, and waiting only for commit instead of
@@ -62,10 +62,14 @@ function waitForProcessExit(proc) {
 /// and its verdict. Every recovery is written to the log, and the room still
 /// has to come up — each caller waits for the editor next.
 ///
+/// The front page goes through here too. Two Firefox runs on 2026-10-07 timed
+/// out on its very first load, waiting for DOMContentLoaded, with the server
+/// up — the same stranding, at a load that had no recovery.
+///
 /// Request listeners were taken off these pages once the diagnosis was done:
 /// listeners attached before navigating are one of the conditions the upstream
 /// issue needs in order to reproduce.
-async function gotoRoom(page, label, url) {
+async function gotoPage(page, label, url) {
   const nav = page.goto(url, { waitUntil: "commit" });
   nav.catch(() => {});
   const early = await Promise.race([
@@ -303,7 +307,7 @@ async function main() {
   // has to arrive with its key, since the key is the part after the # and a
   // join box that dropped it would open onto "this link is missing its key".
   const joiner = await makePage("join");
-  await joiner.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+  await gotoPage(joiner, "joiner", `${BASE}/`);
   await joiner.waitForSelector("#join-room", { timeout: 10_000 });
   await joiner.fill("#join-room", `  ${roomUrl}  `);
   await joiner.press("#join-room", "Enter");
@@ -322,7 +326,7 @@ async function main() {
   // before anything else runs.
   {
     const clicked = await makePage("clicked-link");
-    await gotoRoom(clicked, "clicked-link", roomUrl);
+    await gotoPage(clicked, "clicked-link", roomUrl);
     await clicked.waitForSelector(".monaco-editor", { timeout: 30_000 });
     const href = await clicked.evaluate(() => location.href);
     if (href.includes("#k=")) throw new Error(`[clicked-link] the key stayed in the address: ${href}`);
@@ -337,7 +341,7 @@ async function main() {
       const write = (t) => { window.__copied.push(t); return Promise.resolve(); };
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: write } });
     });
-    await maker.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await gotoPage(maker, "maker", `${BASE}/`);
     await maker.waitForSelector("#security", { timeout: 10_000 });
     await maker.selectOption("#security", "highest");
     await maker.click('button:has-text("Create private room")');
@@ -365,7 +369,7 @@ async function main() {
 
     // The copied link still opens the room for whoever receives it.
     const recipient = await makePage("highest-recipient");
-    await gotoRoom(recipient, "highest-recipient", link);
+    await gotoPage(recipient, "highest-recipient", link);
     await recipient.waitForSelector(".monaco-editor", { timeout: 30_000 });
     if (await recipient.evaluate(() => location.href.includes("#k="))) {
       throw new Error("[highest] the recipient's address kept the key");
@@ -376,7 +380,7 @@ async function main() {
   const landing = await makePage("landing");
   for (const width of [320, 375, 414]) {
     await landing.setViewportSize({ width, height: 780 });
-    await landing.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await gotoPage(landing, "landing", `${BASE}/`);
     await landing.waitForSelector(".landing", { timeout: 5000 });
     const m = await landing.evaluate(() => {
       const vw = document.documentElement.clientWidth;
@@ -412,7 +416,7 @@ async function main() {
   // measuring only that is what let the bug through.
   for (const [width, height] of [[320, 568], [375, 667], [375, 812], [414, 896]]) {
     await landing.setViewportSize({ width, height });
-    await landing.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await gotoPage(landing, "landing", `${BASE}/`);
     await landing.waitForSelector(".landing", { timeout: 5000 });
     await landing.click("text=Shared name");
     await landing.waitForSelector("text=Create shared room", { timeout: 5000 });
@@ -444,7 +448,7 @@ async function main() {
     const takenName = `e2e-taken-${Math.random().toString(16).slice(2, 8)}`;
     const createNamed = async (page) => {
       await page.setViewportSize({ width: 1280, height: 900 });
-      await page.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+      await gotoPage(page, "page", `${BASE}/`);
       await page.waitForSelector(".landing", { timeout: 5000 });
       await page.click("text=Shared name");
       await page.waitForSelector("text=Create shared room", { timeout: 5000 });
@@ -494,7 +498,7 @@ async function main() {
     // derivation and joined with another, which looked like a wrong
     // passphrase; this is the check that Argon2id runs on the joining side too.
     const joiner = await makePage("named-joiner");
-    await joiner.goto(`${BASE}/${takenName}`, { waitUntil: "domcontentloaded" });
+    await gotoPage(joiner, "joiner", `${BASE}/${takenName}`);
     await joiner.waitForSelector("#pp", { timeout: 15_000 });
     await joiner.fill("#pp", passphrase);
     await joiner.click('button:has-text("Enter room")');
@@ -509,7 +513,7 @@ async function main() {
     // An everyday shared room opened from Join gets its usual address once
     // the room has said it is everyday, so it can be refreshed and shared.
     const viaJoin = await makePage("named-via-join");
-    await viaJoin.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await gotoPage(viaJoin, "viaJoin", `${BASE}/`);
     await viaJoin.waitForSelector("#join-room", { timeout: 10_000 });
     await viaJoin.fill("#join-room", takenName);
     await viaJoin.press("#join-room", "Enter");
@@ -531,7 +535,7 @@ async function main() {
     const secretName = `e2e-quiet-${randomBytes(3).toString("hex")}`;
     const maker = await makePage("named-highest");
     await maker.setViewportSize({ width: 1280, height: 900 });
-    await maker.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await gotoPage(maker, "maker", `${BASE}/`);
     await maker.click("text=Shared name");
     await maker.waitForSelector("text=Create shared room", { timeout: 5000 });
     const suffix = maker.locator(".checkbox-row input[type=checkbox]");
@@ -564,7 +568,7 @@ async function main() {
     await maker.close();
 
     const guest = await makePage("named-highest-join");
-    await guest.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await gotoPage(guest, "guest", `${BASE}/`);
     await guest.waitForSelector("#join-room", { timeout: 10_000 });
     await guest.fill("#join-room", secretName);
     await guest.press("#join-room", "Enter");
@@ -588,7 +592,7 @@ async function main() {
   // could not fail, and did not: it passed against the unfixed client.
   {
     const ttlPage = await makePage("absolute-ttl");
-    await ttlPage.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
+    await gotoPage(ttlPage, "ttlPage", `${BASE}/`);
     await ttlPage.waitForSelector("#expiry", { timeout: 10_000 });
     await ttlPage.selectOption("#expiry", JSON.stringify({ kind: "absolute", secs: 86400 }));
     await ttlPage.click('button:has-text("Create private room")');
@@ -615,7 +619,7 @@ async function main() {
 
   const alice = await makePage("alice");
   alicePage = alice;
-  await gotoRoom(alice, "alice", roomUrl);
+  await gotoPage(alice, "alice", roomUrl);
 
   // Wait for editor to mount (proves CSP + Trusted Types + WASM all survived)
   await alice.waitForSelector(".monaco-editor", { timeout: 60_000 });
@@ -629,7 +633,7 @@ async function main() {
 
   const bob = await makePage("bob");
   bobPage = bob;
-  await gotoRoom(bob, "bob", roomUrl);
+  await gotoPage(bob, "bob", roomUrl);
   await bob.waitForSelector(".monaco-editor", { timeout: 30_000 });
   await bob.click(".monaco-editor .view-lines");
   await bob.keyboard.type("And Bob agrees.");
@@ -1508,7 +1512,7 @@ async function main() {
     isMobile: true,
   });
   const touch = await touchCtx.newPage();
-  await gotoRoom(touch, "touch", roomUrl);
+  await gotoPage(touch, "touch", roomUrl);
   // Counted from commit now, not DOMContentLoaded, so it covers the scripts
   // loading as well as the room coming up.
   await touch.waitForSelector(".pane-editor", { timeout: 30_000 });
@@ -1612,7 +1616,7 @@ async function main() {
     throw new Error("[restart] after the handover, an edit on one side never reached the other");
   }
   const carol = await makePage("carol");
-  await gotoRoom(carol, "carol", roomUrl);
+  await gotoPage(carol, "carol", roomUrl);
   await carol.waitForSelector(".monaco-editor", { timeout: 30_000 });
   let carolSees = "";
   for (let i = 0; i < 60; i++) {
