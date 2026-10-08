@@ -4,6 +4,23 @@ Newest first. The release workflow reads the section matching the tag and
 publishes it as the release notes, and refuses to build a tag that has no
 section — so this file is not documentation of the release, it is part of it.
 
+## Unreleased
+
+### Fixed
+
+- **`docs/PROTOCOL.md` described presence wrongly.** It said message `0x06`
+  carries a y-protocols awareness update. It never has: presence has been an
+  encrypted JSON frame of RÚNA's own since 0.1.0, and the receiver derives the
+  sender's name from the roster rather than trusting the frame. The table now
+  gives the real fields and how each is checked, so a compatible client can be
+  written from the spec.
+
+### Removed
+
+- **`y-protocols`**, a dependency nothing imported. It is gone from the web
+  client, `NOTICE` and `docs/ATTRIBUTION.md`. The bundle is unchanged, since
+  nothing in it came from that package.
+
 ## 0.5.0
 
 ### Security

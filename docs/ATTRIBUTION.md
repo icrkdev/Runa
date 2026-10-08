@@ -42,7 +42,6 @@ above. We are grateful for it.
 | unified / remark-* / rehype-* | MIT | Markdown pipeline |
 | katex | MIT | Math rendering |
 | highlight.js | BSD-3-Clause | Code highlighting |
-| y-protocols | MIT | Awareness (cursors and presence) on top of yjs |
 | Space Grotesk, IBM Plex Mono | OFL-1.1 | Typefaces, bundled rather than fetched from a font host |
 
 Licences are enforced by `cargo deny` for the server. For the web client, CI
