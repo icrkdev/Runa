@@ -78,7 +78,7 @@ Third-party components
 
 This product bundles the following, each under its own licence:
 
-  yjs, y-protocols       MIT           CRDT document model, presence
+  yjs                    MIT           CRDT document model
   monaco-editor          MIT           Editor
   React, React DOM       MIT           Interface
   Space Grotesk          OFL-1.1       Display and interface typeface

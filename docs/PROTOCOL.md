@@ -45,7 +45,7 @@ Encrypted body = `counter` (8 B BE) `||` AES-256-GCM output `||` tag (16 B).
 | 0x03 | DOC_UPDATE | both | encrypted Yjs update, or one part of a split one — amendment E |
 | 0x04 | DOC_SYNC_REQ | C→S | JSON `{from_index}` (index form; state vectors leak clocks and are not used) |
 | 0x05 | DOC_SYNC_RESP | S→C | one or more encrypted entries: snapshot blob then tail |
-| 0x06 | AWARENESS | both | encrypted y-protocols awareness update |
+| 0x06 | AWARENESS | both | encrypted JSON presence `{h, k, l, c, d?}`: handle, colour index 0–5, cursor line and column, and an optional 16-hex document hash. Receivers ignore `h` and derive the handle from the sender's roster public key, clamp `k`, `l` and `c`, and discard any `d` that is not 16 hex characters. Not the y-protocols awareness format. |
 | 0x07 | PEER_JOIN | S→C | JSON `{peer_id, pubkey_b64, joined_at_seq}` |
 | 0x08 | PEER_LEAVE | S→C | JSON `{peer_id, reason}` |
 | 0x09 | **DOC_ACK** | S→C | JSON `{ok, index?}`, to the sender of each DOC_UPDATE, only if its JOIN asked — amendment E |
