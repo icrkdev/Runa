@@ -34,7 +34,18 @@
 
 ## Try it without installing anything
 
-A public instance runs at **[runa.vardrlabs.com](https://runa.vardrlabs.com)**.
+A public instance runs at **[runa.vardrlabs.com](https://runa.vardrlabs.com)**,
+and as a Tor onion service at:
+
+```
+http://xv5fx5v7kfatx7sg3ws7o3rqaixfndxmp2mplinkwdt67ghzi5rltgad.onion
+```
+
+Open the onion address in [Tor Browser](https://www.torproject.org/download/)
+and the server never learns your IP address at all; Tor Browser also offers it
+by itself when you visit the clearnet address. Check that it matches the
+`Onion-Location` header runa.vardrlabs.com sends before trusting a copy of it
+from anywhere else.
 
 It is offered as a convenience and it is not special: it runs the same code in
 this repository, and you can confirm which commit by visiting
