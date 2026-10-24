@@ -41,6 +41,23 @@ The highest-value targets, in order:
 3. Consensus tallying — anything that lets a server forge outcomes.
 4. Anything that writes to disk (there must be nothing to find).
 
+## Published advisories
+
+Every vulnerability that reached a release is published as a GitHub security
+advisory, with its affected and fixed versions. These five were found in the
+maintainer's own review and fixed in 0.5.0; all affect 0.2.0-rc.3 through 0.4.0.
+
+| Advisory | Flaw | Severity (CVSS 3.1) |
+| --- | --- | --- |
+| [GHSA-5w54-gxx9-7rh7](https://github.com/vardrlabs/Runa/security/advisories/GHSA-5w54-gxx9-7rh7) | Other websites could lock visitors out of their rooms | Medium, 4.3 |
+| [GHSA-xgcx-rgxg-qvhm](https://github.com/vardrlabs/Runa/security/advisories/GHSA-xgcx-rgxg-qvhm) | One client could block every new join to a known room | Low, 3.7 |
+| [GHSA-fh8j-4944-xvj9](https://github.com/vardrlabs/Runa/security/advisories/GHSA-fh8j-4944-xvj9) | A shredded room could stay readable to link holders | Low, 3.1 |
+| [GHSA-6w2w-5f9x-j7r8](https://github.com/vardrlabs/Runa/security/advisories/GHSA-6w2w-5f9x-j7r8) | Any room member could cancel another member's shred vote | Low, 3.1 |
+| [GHSA-gqrj-3v47-c9h2](https://github.com/vardrlabs/Runa/security/advisories/GHSA-gqrj-3v47-c9h2) | Passphrase rooms silently used PBKDF2 instead of Argon2id | Low, 2.2 |
+
+The full list stays current at
+[Security advisories](https://github.com/vardrlabs/Runa/security/advisories).
+
 ## Release integrity
 
 Release artifacts are signed with [cosign](https://docs.sigstore.dev/) using
