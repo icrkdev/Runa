@@ -4,6 +4,27 @@ Newest first. The release workflow reads the section matching the tag and
 publishes it as the release notes, and refuses to build a tag that has no
 section — so this file is not documentation of the release, it is part of it.
 
+## Unreleased
+
+### Security
+
+- **A release can no longer go out unsigned without failing.** The signing
+  steps now check that every binary and bill of materials has its `.sig` and
+  `.pem` beside it, instead of trusting cosign's exit status. The first
+  automated update of the pinned actions would have moved cosign from 2.5.2
+  to 3.0.6, which ignores the flags those files come from and still exits
+  successfully, so the next release would have shipped nothing to verify.
+  cosign stays on 2.5.2, named explicitly, until the move to its bundle
+  format is made on purpose together with `docs/SECURITY.md`.
+- **The fuzz job asks for nightly by name.** The same update pinned it to the
+  commit of the toolchain action's `stable` branch, which differs from
+  `nightly` only in its default, so fuzzing would have run on stable and
+  failed. Every toolchain step now says which toolchain it wants.
+- **Actions moved to their current releases:** checkout 7, setup-node 7,
+  upload-artifact 7, download-artifact 8, the Docker build actions, and
+  action-gh-release 3, still pinned to commit SHAs. download-artifact now
+  fails the release on a digest mismatch rather than warning.
+
 ## 0.5.1
 
 ### Security
