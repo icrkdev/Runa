@@ -4,6 +4,17 @@ Newest first. The release workflow reads the section matching the tag and
 publishes it as the release notes, and refuses to build a tag that has no
 section — so this file is not documentation of the release, it is part of it.
 
+## Unreleased
+
+### Security
+
+- **Five vulnerabilities fixed in 0.5.0 are now published as advisories.**
+  They affected 0.2.0-rc.3 through 0.4.0: a cross-site lockout (Medium), a
+  room-wide join lockout, a shredded room that could stay open, a shred vote
+  any member could cancel, and passphrase rooms that silently used PBKDF2 in
+  place of Argon2id (all Low). `docs/SECURITY.md` lists each one with its
+  severity; anyone still running 0.4.0 or earlier should upgrade.
+
 ## 0.5.3
 
 ### Changed
