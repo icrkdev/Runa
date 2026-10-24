@@ -1,6 +1,6 @@
 [Unit]
 Description=RUNA - ephemeral E2EE collaborative markdown
-Documentation=https://github.com/icrkdev/Runa
+Documentation=https://github.com/vardrlabs/Runa
 After=network-online.target
 Wants=network-online.target
 

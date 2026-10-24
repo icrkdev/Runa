@@ -4,6 +4,18 @@ Newest first. The release workflow reads the section matching the tag and
 publishes it as the release notes, and refuses to build a tag that has no
 section — so this file is not documentation of the release, it is part of it.
 
+## Unreleased
+
+### Changed
+
+- **RÚNA now lives at [github.com/vardrlabs/Runa](https://github.com/vardrlabs/Runa).**
+  The repository moved from `icrkdev/Runa` to the Vardr Labs organisation, and
+  old links and clones redirect. Two things move with it and matter for
+  verification. Images from this release on are published at
+  `ghcr.io/vardrlabs/runa`; earlier ones stay at `ghcr.io/icrkdev/runa`, whose
+  `latest` stops at 0.5.2. Releases from this one on are signed as
+  `vardrlabs/Runa`, so `docs/SECURITY.md` now gives the identity for each.
+
 ## 0.5.2
 
 ### Security

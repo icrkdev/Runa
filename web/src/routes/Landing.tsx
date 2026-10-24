@@ -88,7 +88,7 @@ export function Landing() {
         <span className="micro-label">Apache-2.0 · no analytics · no cookies</span>
         <a
           className="source-link"
-          href="https://github.com/icrkdev/Runa"
+          href="https://github.com/vardrlabs/Runa"
           target="_blank"
           rel="noopener noreferrer"
         >

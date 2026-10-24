@@ -7,7 +7,7 @@ because it stores nothing; pin and review what you deploy.
 
 ## Reporting a vulnerability
 
-**Use [GitHub private vulnerability reporting](https://github.com/icrkdev/Runa/security/advisories/new).**
+**Use [GitHub private vulnerability reporting](https://github.com/vardrlabs/Runa/security/advisories/new).**
 It opens a private thread visible only to you and the maintainers, so nothing
 is disclosed while it is being fixed, and there is no address for scrapers to
 harvest.
@@ -52,7 +52,7 @@ short-lived signing certificate. Verify a download with:
 cosign verify-blob \
   --signature   runa-<target>.tar.gz.sig \
   --certificate runa-<target>.tar.gz.pem \
-  --certificate-identity-regexp '^https://github\.com/icrkdev/Runa/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-identity-regexp '^https://github\.com/vardrlabs/Runa/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   runa-<target>.tar.gz
 ```
@@ -64,7 +64,7 @@ signed the same way and verified with the same command:
 cosign verify-blob \
   --signature   runa-server-sbom.json.sig \
   --certificate runa-server-sbom.json.pem \
-  --certificate-identity-regexp '^https://github\.com/icrkdev/Runa/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-identity-regexp '^https://github\.com/vardrlabs/Runa/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   runa-server-sbom.json
 ```
@@ -77,6 +77,18 @@ The identity regexp is what actually matters: it proves the artifact was built
 by this repository's tagged release workflow and not by someone who merely holds
 a key. `GET /version` returns the running commit and bundle SHA-256 so you can
 compare what you were served with what was audited.
+
+The repository moved from `icrkdev/Runa` to `vardrlabs/Runa` on 2026-10-24, and
+the signing identity moved with it. Releases from v0.5.3 on are signed as
+`vardrlabs/Runa`, as in the commands above. Releases up to and including v0.5.2
+were signed as `icrkdev/Runa` and verify only with that identity:
+
+```sh
+  --certificate-identity-regexp '^https://github\.com/icrkdev/Runa/\.github/workflows/release\.yml@refs/tags/v'
+```
+
+Their images stay at `ghcr.io/icrkdev/runa`; new images are published at
+`ghcr.io/vardrlabs/runa`.
 
 That proof is only as good as the code the workflow runs, so every third-party
 action in it is pinned to a full commit SHA rather than a tag. A tag can be
