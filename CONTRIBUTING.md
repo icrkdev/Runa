@@ -6,7 +6,7 @@ enforced by `scripts/verify.sh` rather than by convention.
 ## Do not report vulnerabilities here
 
 Use [private vulnerability
-reporting](https://github.com/icrkdev/Runa/security/advisories/new). A public
+reporting](https://github.com/vardrlabs/Runa/security/advisories/new). A public
 issue on an unpatched flaw exposes every running instance while the fix is
 written. See [`docs/SECURITY.md`](docs/SECURITY.md) for scope and safe-harbour.
 
@@ -17,7 +17,7 @@ later, and a C toolchain — `rustc` shells out to `cc` for the final link, and
 minimal Linux images ship without one.
 
 ```sh
-git clone https://github.com/icrkdev/Runa.git && cd Runa
+git clone https://github.com/vardrlabs/Runa.git && cd Runa
 bash scripts/verify.sh
 ```
 

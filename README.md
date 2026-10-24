@@ -67,7 +67,7 @@ docker run -d --name runa -p 127.0.0.1:3000:3000 \
   --memory=512m --memory-swap=512m --pids-limit=256 \
   --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   --ulimit memlock=-1:-1 \
-  ghcr.io/icrkdev/runa:latest
+  ghcr.io/vardrlabs/runa:latest
 ```
 
 Then open <http://127.0.0.1:3000>. That is a complete, working RÚNA — no Rust,
@@ -89,7 +89,7 @@ curl -s http://127.0.0.1:3000/version
 anything that matters.
 
 Prefer a binary to a container? Signed builds for Linux and macOS are on the
-[releases page](https://github.com/icrkdev/Runa/releases), with cosign
+[releases page](https://github.com/vardrlabs/Runa/releases), with cosign
 signatures for the binaries and their SBOMs, and verification instructions in
 [docs/SECURITY.md](docs/SECURITY.md#release-integrity).
 
@@ -631,7 +631,7 @@ docker run -d --name runa \
   --env-file ~/.runa/restart.env \
   -e RUNA_TRUSTED_PROXY=1 \
   -p 127.0.0.1:3000:3000 \
-  ghcr.io/icrkdev/runa:latest
+  ghcr.io/vardrlabs/runa:latest
 ```
 
 This runs the server with:

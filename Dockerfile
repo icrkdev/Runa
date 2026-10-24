@@ -24,7 +24,7 @@ RUN RUNA_COMMIT=$RUNA_COMMIT RUNA_BUNDLE_SHA256=$RUNA_BUNDLE_SHA256 \
 FROM gcr.io/distroless/cc-debian12 AS runtime
 LABEL org.opencontainers.image.title="RUNA" \
       org.opencontainers.image.description="Ephemeral end-to-end encrypted collaborative markdown" \
-      org.opencontainers.image.source="https://github.com/icrkdev/Runa" \
+      org.opencontainers.image.source="https://github.com/vardrlabs/Runa" \
       org.opencontainers.image.licenses="MIT"
 
 COPY --from=server-build /src/target/release/runa-server /runa
