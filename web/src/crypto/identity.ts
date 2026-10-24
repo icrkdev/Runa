@@ -23,18 +23,32 @@ export async function supportsEd25519(): Promise<boolean> {
   }
 }
 
+/// Ed25519 where the browser can make the key, ECDSA P-256 where it cannot.
+///
+/// "Can" is decided by this generation itself, not by a probe beforehand.
+/// WebKit on Linux (Playwright's WebKit, GNOME Web, WPE) keeps Ed25519 keys as
+/// libgcrypt MPIs, which drop leading zero bytes, so about one generation in
+/// 128 throws OperationError: the ones whose public key or seed starts with
+/// 0x00. A probe that succeeded said nothing about the call after it, and the
+/// throw went up through Session.create and left the room page stuck on
+/// CONNECTING. Every peer verifies either algorithm, so a session that falls
+/// back loses nothing.
 export async function generateIdentity(force?: SignatureAlg): Promise<Identity> {
-  const alg: SignatureAlg = force ?? ((await supportsEd25519()) ? "Ed25519" : "ECDSA-P256");
-  if (alg === "Ed25519") {
-    const keypair = (await crypto.subtle.generateKey(
-      { name: "Ed25519" },
-      false,
-      ["sign", "verify"],
-    )) as CryptoKeyPair;
-    const spki = new Uint8Array(await crypto.subtle.exportKey("spki", keypair.publicKey));
-    const publicKeyRaw = spki.slice(ED25519_SPKI_PREFIX.length);
-    return { alg, keypair, publicKeyRaw };
+  if (force !== "ECDSA-P256") {
+    try {
+      const keypair = (await crypto.subtle.generateKey(
+        { name: "Ed25519" },
+        false,
+        ["sign", "verify"],
+      )) as CryptoKeyPair;
+      const spki = new Uint8Array(await crypto.subtle.exportKey("spki", keypair.publicKey));
+      const publicKeyRaw = spki.slice(ED25519_SPKI_PREFIX.length);
+      return { alg: "Ed25519", keypair, publicKeyRaw };
+    } catch (e) {
+      if (force === "Ed25519") throw e;
+    }
   }
+  const alg: SignatureAlg = "ECDSA-P256";
   const ecdsaGen: EcKeyGenParams = { name: "ECDSA", namedCurve: "P-256" };
   const keypair = (await crypto.subtle.generateKey(
     ecdsaGen,
