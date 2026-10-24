@@ -25,6 +25,17 @@ section — so this file is not documentation of the release, it is part of it.
   action-gh-release 3, still pinned to commit SHAs. download-artifact now
   fails the release on a digest mismatch rather than warning.
 
+### Fixed
+
+- **WebKit on Linux could hang a room on CONNECTING.** GNOME Web, WPE and
+  Playwright's WebKit build Ed25519 keys on libgcrypt, which drops leading
+  zero bytes, so about one key generation in 128 fails with OperationError.
+  The client tried Ed25519 once as a probe and then again for real, and when
+  the second attempt failed the room never opened. It now uses whichever key
+  it managed to make, and falls back to ECDSA P-256 for that session if
+  Ed25519 fails. Safari on macOS and iOS uses a different crypto library and
+  was not affected. This was the intermittent WebKit failure in CI.
+
 ## 0.5.1
 
 ### Security

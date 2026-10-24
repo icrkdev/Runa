@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import ed25519Vectors from "./fixtures/ed25519.json";
 import {
   generateIdentity,
@@ -74,6 +74,38 @@ describe("session identity", () => {
     const sig = await signPayload(id, msg);
     expect(await verifyPayload(id.alg, id.publicKeyRaw, sig, msg)).toBe(true);
     expect(await verifyPayload("Ed25519", id.publicKeyRaw, sig, msg)).toBe(false);
+  });
+
+  // WebKit on Linux keeps Ed25519 keys as libgcrypt MPIs, which drop leading
+  // zero bytes, so about one generation in 128 (public key or seed starting
+  // with 0x00) throws OperationError. A probe that succeeded says nothing about
+  // the next call. Each case fails one Ed25519 generation and expects a
+  // working identity anyway.
+  describe("when an Ed25519 generation throws", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    for (const failingCall of [1, 2]) {
+      it(`still yields a working identity when Ed25519 call ${failingCall} fails`, async () => {
+        const real = crypto.subtle.generateKey.bind(crypto.subtle);
+        let ed25519Calls = 0;
+        vi.spyOn(crypto.subtle, "generateKey").mockImplementation((async (
+          algorithm: AlgorithmIdentifier,
+          extractable: boolean,
+          usages: KeyUsage[],
+        ) => {
+          const name = typeof algorithm === "string" ? algorithm : algorithm.name;
+          if (name === "Ed25519" && ++ed25519Calls === failingCall) {
+            throw new DOMException("The operation failed for an operation-specific reason", "OperationError");
+          }
+          return real(algorithm, extractable, usages);
+        }) as typeof crypto.subtle.generateKey);
+
+        const id = await generateIdentity();
+        const msg = new TextEncoder().encode("vote");
+        const sig = await signPayload(id, msg);
+        expect(await verifyPayload(id.alg, id.publicKeyRaw, sig, msg)).toBe(true);
+      });
+    }
   });
 
   it("rejects signatures from unknown keys", async () => {
