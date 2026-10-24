@@ -6,6 +6,22 @@ section — so this file is not documentation of the release, it is part of it.
 
 ## Unreleased
 
+### Security
+
+- **tokio 1.54.1, clear of two advisories published in October 2026.**
+  RUSTSEC-2026-0386 lets tokio's `AsyncFd` constructors leave the I/O driver
+  pointing at freed memory. RÚNA never creates an `AsyncFd`, and nothing it
+  depends on does either, so no released build could reach it. It is cleared
+  anyway, because the advisory check fails on it, and a check that fails for
+  a reason that does not apply is a check people learn to ignore. The bump
+  goes past 1.54.0 on purpose: that release has a use-after-free in
+  `tokio::time::Interval` (RUSTSEC-2026-0384), and the server ticks an
+  `Interval` for its room scheduler and for forgetting rate-limit entries.
+  1.54.1 fixes it, and 1.54.0 has been withdrawn from crates.io.
+- **vitest 4.1.12** (GHSA-qxg6-89mg-rqv8). Development only: the flaw needs
+  vitest's mocker plugin on a dev server someone else can reach, and RÚNA's
+  tests use neither. The shipped web bundle is byte for byte the same.
+
 ### Fixed
 
 - **`docs/PROTOCOL.md` described presence wrongly.** It said message `0x06`
