@@ -62,6 +62,9 @@ What can be done, and what RÚNA does:
   git tag and served at `/version`.
 - Release binaries, their SBOMs and the container image signed with `cosign`,
   keyless.
+- Every third-party GitHub Action pinned to a full commit SHA, so moving a
+  tag upstream cannot change what runs in the release job that holds the
+  signing identity and the GHCR push token.
 - A self-host path that is one `docker run`, documented as the answer for
   anyone whose threat model includes the operator.
 

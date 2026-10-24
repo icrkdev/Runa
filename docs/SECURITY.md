@@ -77,3 +77,7 @@ The identity regexp is what actually matters: it proves the artifact was built
 by this repository's tagged release workflow and not by someone who merely holds
 a key. `GET /version` returns the running commit and bundle SHA-256 so you can
 compare what you were served with what was audited.
+
+That proof is only as good as the code the workflow runs, so every third-party
+action in it is pinned to a full commit SHA rather than a tag. A tag can be
+moved by whoever controls the action's repository; a commit cannot.

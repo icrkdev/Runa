@@ -21,6 +21,12 @@ section — so this file is not documentation of the release, it is part of it.
 - **vitest 4.1.12** (GHSA-qxg6-89mg-rqv8). Development only: the flaw needs
   vitest's mocker plugin on a dev server someone else can reach, and RÚNA's
   tests use neither. The shipped web bundle is byte for byte the same.
+- **CI and release actions pinned to commit SHAs.** Every third-party action
+  in the CI, release and fuzz workflows now names a full commit SHA, with its
+  release tag in a comment, and Dependabot proposes the updates weekly. The
+  release job holds the keyless signing identity and the GHCR push token, so
+  an action whose tag was moved upstream could otherwise have signed or pushed
+  an image of its own. Nothing suggests that happened; this closes the door.
 
 ### Fixed
 
